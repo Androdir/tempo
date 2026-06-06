@@ -1,0 +1,7 @@
+<resources>
+    <color name="tempo_primary">#6C5CE7</color>
+    <color name="tempo_primary_dark">#4B3FB0</color>
+    <color name="ic_launcher_background">#6C5CE7</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="black">#FF101018</color>
+</resources>

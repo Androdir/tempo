@@ -1,0 +1,46 @@
+[package]
+name = "productivity-tracker"
+version = "0.1.0"
+description = "Local-first desktop productivity tracker"
+authors = ["you"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+# The desktop binary is a thin wrapper around this lib (Tauri 2 convention).
+name = "productivity_tracker_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tempo-core = { path = "../crates/tempo-core" }
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+chrono = { version = "0.4", features = ["clock"] }
+active-win-pos-rs = "0.8"
+# Tiny synchronous HTTP server for the loopback ingest endpoint (browser extension).
+tiny_http = "0.12"
+# Blocking HTTP client for the local Ollama server (LLM classification).
+ureq = { version = "2", features = ["json"] }
+
+# Windows-only: idle check (GetLastInputInfo) + Smart Tracking screen OCR
+# (Windows.Media.Ocr — fully local, no model download, no Tesseract install).
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_System_SystemInformation",
+  "Win32_System_WinRT",
+  "Win32_Graphics_Gdi",
+  "Foundation",
+  "Media_Control",
+  "Media_Ocr",
+  "Graphics_Imaging",
+  "Security_Cryptography",
+  "Storage_Streams",
+] }

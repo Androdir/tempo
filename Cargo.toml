@@ -1,0 +1,13 @@
+# Virtual workspace: the desktop Tauri app, the shared GUI-free core, and the
+# headless Tempo Hub server all live here and share one target/ + lockfile.
+[workspace]
+members = ["crates/tempo-core", "crates/tempo-hub", "src-tauri"]
+resolver = "2"
+
+# Profiles must live at the workspace root (member profiles are ignored by cargo).
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

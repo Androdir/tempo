@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tempo</title>
+    <link rel="stylesheet" href="extension.css" />
+  </head>
+  <body class="popup">
+    <div class="pop-head">
+      <div class="pop-mark">◷</div>
+      <div>
+        <div class="pop-title">Tempo</div>
+        <div class="pop-sub">Local browser tracker</div>
+      </div>
+    </div>
+
+    <div id="status-card" class="pop-status">Checking…</div>
+
+    <label class="check">
+      <input id="enabled" type="checkbox" />
+      <span>Tracking enabled</span>
+    </label>
+
+    <div id="detail" class="pop-detail"></div>
+
+    <button id="options" class="btn block">Open settings</button>
+    <script src="src/popup.js"></script>
+  </body>
+</html>

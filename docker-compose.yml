@@ -1,0 +1,37 @@
+# Run the Tempo Hub on a Raspberry Pi (or any Docker host).
+#
+#   1. Create a .env file next to this one:  TEMPO_PAIRING_SECRET=<a long random secret>
+#   2. docker compose up -d --build
+#   3. Pair your desktop/phone with that secret (see the README).
+#
+# The DB lives on a named volume, so your history survives container rebuilds.
+services:
+  tempo-hub:
+    build: .
+    image: tempo-hub:latest
+    container_name: tempo-hub
+    ports:
+      - "7700:7700"
+    volumes:
+      - tempo-data:/data
+    environment:
+      # REQUIRED — a strong, random secret used to pair devices + the dashboard.
+      TEMPO_PAIRING_SECRET: "${TEMPO_PAIRING_SECRET:?set TEMPO_PAIRING_SECRET in a .env file}"
+      TEMPO_PORT: "7700"
+      TEMPO_BIND: "0.0.0.0"
+      TEMPO_DB: "/data/tempo.db"
+      # Optional: lock CORS to specific dashboard origins (default: LAN-permissive).
+      # TEMPO_ALLOWED_ORIGINS: "http://tempo-pi:7700,http://100.x.y.z:7700"
+      #
+      # Optional: let the hub-served Daily Review / Lock-In Plan be LLM-written by
+      # pointing at an Ollama you run elsewhere (e.g. your desktop). The Pi does NOT
+      # run the model. Must be a private address (LAN or Tailscale) — public/cloud is
+      # refused by the no-cloud guard. On the desktop, run Ollama with
+      # OLLAMA_HOST=0.0.0.0 so it accepts remote connections, and keep the PC awake.
+      # TEMPO_LLM_ENABLED: "1"
+      # TEMPO_OLLAMA_URL: "http://192.168.1.50:11434"   # your desktop's LAN IP
+      # TEMPO_OLLAMA_MODEL: "llama3.1:8b"
+    restart: unless-stopped
+
+volumes:
+  tempo-data:

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tempo — Options</title>
+    <link rel="stylesheet" href="extension.css" />
+  </head>
+  <body class="options">
+    <div class="wrap">
+      <h1>Tempo connection</h1>
+      <p class="sub">
+        Connect this extension to the local Tempo desktop app. Find the endpoint and
+        token in the app under <b>Privacy &amp; Settings → Browser extension</b>.
+      </p>
+
+      <label class="field">
+        <span>Local endpoint</span>
+        <input id="endpoint" type="text" placeholder="http://127.0.0.1:48710" />
+      </label>
+
+      <label class="field">
+        <span>Ingest token</span>
+        <input id="token" type="text" placeholder="paste the token from the app" />
+      </label>
+
+      <label class="check">
+        <input id="enabled" type="checkbox" />
+        <span>Tracking enabled</span>
+      </label>
+
+      <div class="row">
+        <button id="save" class="btn primary">Save</button>
+        <button id="test" class="btn">Test connection</button>
+      </div>
+
+      <p id="status" class="status"></p>
+
+      <div class="note">
+        <b>Privacy:</b> data is sent only to the loopback endpoint above. Page content is
+        captured only when you enable it in the app and only on allowed domains. Passwords,
+        form fields, and hidden text are never read.
+      </div>
+    </div>
+    <script src="src/options.js"></script>
+  </body>
+</html>

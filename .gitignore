@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-ssr/
+
+# Rust / Cargo — workspace build output is at the REPO ROOT after the workspace split
+# (this is what was missing: only src-tauri/target/ was ignored before)
+target/
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# Android (Gradle) — android/ also has its own .gitignore
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.cxx/
+*.apk
+
+# Local databases / data
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+
+# Secrets / environment (e.g. the hub's TEMPO_PAIRING_SECRET)
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor / OS / tooling
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+.claude/settings.local.json

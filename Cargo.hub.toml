@@ -1,0 +1,14 @@
+# Hub-only workspace manifest, used by the Docker build so the Raspberry Pi
+# image compiles ONLY tempo-core + tempo-hub (never the desktop crate, which
+# depends on Tauri/webkit/X11 and can't build headless). The Dockerfile copies
+# this over Cargo.toml in the build stage.
+[workspace]
+members = ["crates/tempo-core", "crates/tempo-hub"]
+resolver = "2"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

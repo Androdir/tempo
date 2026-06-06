@@ -1,0 +1,10 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- A simple white "T" inside the adaptive-icon safe zone (approx 18..90). -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M32,36 h44 v9 h-17.5 v33 h-9 v-33 h-17.5 z" />
+</vector>
