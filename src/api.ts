@@ -839,20 +839,20 @@ function mockActivityDetail(id: number): ActivityDetail {
 // ---------------------------------------------------------------------------
 
 export async function getProjects(): Promise<Project[]> {
-  if (isTauri()) return invoke<Project[]>("get_projects");
+  if (isTauri() || isRemote()) return callBackend<Project[]>("get_projects");
   return mockProjects.map((p) => ({ ...p }));
 }
 
 export async function createProject(p: Omit<Project, "id">): Promise<number> {
-  if (isTauri()) return invoke<number>("create_project", { project: { ...p, id: 0 } });
+  if (isTauri() || isRemote()) return callBackend<number>("create_project", { project: { ...p, id: 0 } });
   const id = Math.max(0, ...mockProjects.map((x) => x.id)) + 1;
   mockProjects.push({ ...p, id });
   return id;
 }
 
 export async function updateProject(p: Project): Promise<void> {
-  if (isTauri()) {
-    await invoke("update_project", { project: p });
+  if (isTauri() || isRemote()) {
+    await callBackend("update_project", { project: p });
     return;
   }
   const i = mockProjects.findIndex((x) => x.id === p.id);
@@ -860,8 +860,8 @@ export async function updateProject(p: Project): Promise<void> {
 }
 
 export async function deleteProject(id: number): Promise<void> {
-  if (isTauri()) {
-    await invoke("delete_project", { id });
+  if (isTauri() || isRemote()) {
+    await callBackend("delete_project", { id });
     return;
   }
   const i = mockProjects.findIndex((x) => x.id === id);
@@ -999,15 +999,15 @@ export async function getGoals(): Promise<Goal[]> {
 }
 
 export async function addGoal(goal: GoalDraft): Promise<number> {
-  if (isTauri()) return invoke<number>("add_goal", { goal });
+  if (isTauri() || isRemote()) return callBackend<number>("add_goal", { goal });
   const id = mockGoalId++;
   mockGoals.push({ id, completed: false, ...goal });
   return id;
 }
 
 export async function updateGoal(goal: Goal): Promise<void> {
-  if (isTauri()) {
-    await invoke("update_goal", { goal });
+  if (isTauri() || isRemote()) {
+    await callBackend("update_goal", { goal });
     return;
   }
   const i = mockGoals.findIndex((g) => g.id === goal.id);
@@ -1024,16 +1024,16 @@ export async function toggleGoal(id: number, completed: boolean): Promise<void> 
 }
 
 export async function deleteGoal(id: number): Promise<void> {
-  if (isTauri()) {
-    await invoke("delete_goal", { id });
+  if (isTauri() || isRemote()) {
+    await callBackend("delete_goal", { id });
     return;
   }
   mockGoals = mockGoals.filter((g) => g.id !== id);
 }
 
 export async function setGoalRecurring(id: number, recurring: boolean): Promise<void> {
-  if (isTauri()) {
-    await invoke("set_goal_recurring", { id, recurring });
+  if (isTauri() || isRemote()) {
+    await callBackend("set_goal_recurring", { id, recurring });
     return;
   }
   const g = mockGoals.find((x) => x.id === id);
@@ -1041,7 +1041,7 @@ export async function setGoalRecurring(id: number, recurring: boolean): Promise<
 }
 
 export async function copyPreviousGoals(): Promise<number> {
-  if (isTauri()) return invoke<number>("copy_previous_goals");
+  if (isTauri() || isRemote()) return callBackend<number>("copy_previous_goals");
   // Preview: pretend yesterday had one extra mission we don't already have.
   const extra = "Review yesterday's notes";
   if (!mockGoals.some((g) => g.title === extra)) {
@@ -1067,24 +1067,24 @@ function sortMockGoals(): Goal[] {
 }
 
 export async function setScoringWeight(id: string, weight: number): Promise<void> {
-  if (isTauri()) {
-    await invoke("set_scoring_weight", { id, weight });
+  if (isTauri() || isRemote()) {
+    await callBackend("set_scoring_weight", { id, weight });
     return;
   }
   mockWeights[id] = weight;
 }
 
 export async function setScoringThreshold(id: string, threshold: number): Promise<void> {
-  if (isTauri()) {
-    await invoke("set_scoring_threshold", { id, threshold });
+  if (isTauri() || isRemote()) {
+    await callBackend("set_scoring_threshold", { id, threshold });
     return;
   }
   mockThresholds[id] = threshold;
 }
 
 export async function resetScoringWeights(): Promise<void> {
-  if (isTauri()) {
-    await invoke("reset_scoring_weights");
+  if (isTauri() || isRemote()) {
+    await callBackend("reset_scoring_weights");
     return;
   }
   mockWeights = {};

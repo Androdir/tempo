@@ -166,38 +166,44 @@ Desktop-app internals (`src-tauri/src/` and `src/`):
 │       ├── BrowserActivity.tsx # Per-website breakdown
 │       ├── Categories.tsx      # Tag apps/sites
 │       ├── Projects.tsx        # Define & match projects
-│       ├── DailyGoals.tsx      # Daily missions + recurring
+│       ├── Goals.tsx           # Daily missions + recurring
 │       ├── DailyScore.tsx      # 0–100 score + rules breakdown
 │       ├── DailyReview.tsx     # AI review (Ollama or fallback)
 │       ├── Focus.tsx           # Focus mode session UI
 │       ├── WeeklyReview.tsx    # 7-day trends & charts
 │       └── PrivacySettings.tsx # All settings + toggles
 │
-└── src-tauri/                  # Rust backend
+├── crates/tempo-core/          # Shared Rust core (desktop + hub)
+│   └── src/
+│       ├── db.rs               # Connection, schema, prune, test_conn
+│       ├── models.rs           # Serde structs, category→bucket logic
+│       ├── classify.rs         # Rule-based classification
+│       ├── projects.rs         # Project matching + confidence
+│       ├── rules.rs            # Hybrid classifier (rule + LLM + manual)
+│       ├── llm.rs              # Ollama background worker + local generation
+│       ├── scoring.rs          # Daily score computation
+│       ├── streaks.rs          # Streak definitions + run maths
+│       ├── lockin.rs           # Tomorrow's lock-in plan (LLM + fallback)
+│       ├── aggregate.rs        # Dashboard, timeline, review, scoring roll-ups
+│       ├── events.rs           # Sync event wire format + hub ingestion
+│       └── settings.rs         # Settings key/value store + capture policy
+│
+└── src-tauri/                  # Desktop Rust backend
     ├── Cargo.toml
     ├── tauri.conf.json         # Strict CSP, no extra plugins
     ├── capabilities/default.json
     └── src/
         ├── main.rs
-        ├── lib.rs              # Builder, DB init, worker spawning
-        ├── db.rs               # Connection, schema, prune, test_conn
-        ├── models.rs           # Serde structs, category→bucket logic
+        ├── lib.rs              # Builder, DB init, worker spawning, core re-exports
         ├── platform.rs         # Active window + idle (Windows-only)
         ├── tracker.rs          # 10s background sampling loop
         ├── server.rs           # Loopback HTTP endpoint for extension
         ├── ingest.rs           # Extension sample parsing + storage
-        ├── classify.rs         # Rule-based classification
-        ├── projects.rs         # Project matching + confidence
-        ├── rules.rs            # Hybrid classifier (rule + LLM + manual)
         ├── smart.rs            # Screen OCR + sensitive data filtering
-        ├── llm.rs              # Ollama background worker
-        ├── scoring.rs          # Daily score computation
         ├── accountability.rs   # Distraction/focus/EOD watcher
         ├── output.rs           # Proof-of-output folder watcher
-        ├── streaks.rs          # Streak definitions + run maths
-        ├── lockin.rs           # Tomorrow's lock-in plan (LLM + fallback)
         ├── commands.rs         # All #[tauri::command] handlers
-        └── settings.rs         # Settings key/value store
+        └── sync.rs             # Tempo Hub desktop sync client
 ```
 
 ---
