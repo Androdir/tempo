@@ -24,6 +24,20 @@ pub fn today() -> String {
     Local::now().format("%Y-%m-%d").to_string()
 }
 
+fn category_buckets(conn: &Connection) -> HashMap<String, String> {
+    list_category_definitions(conn)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|c| (c.id, c.bucket))
+        .collect()
+}
+
+fn bucket_for_category(map: &HashMap<String, String>, category: &str) -> String {
+    map.get(category)
+        .cloned()
+        .unwrap_or_else(|| bucket_for(category).to_string())
+}
+
 pub fn load_rules(conn: &Connection) -> Result<HashMap<String, String>, String> {
     let mut stmt = conn
         .prepare("SELECT app_name, category FROM category_rules")
@@ -374,6 +388,7 @@ pub fn summary_for_day(conn: &Connection, day: &str) -> Result<TodaySummary, Str
     let domain_rules = domain_category_map(conn)?;
     let projects = load_projects(conn)?;
     let browser_rows = query_browser_rows(conn, day)?;
+    let bucket_map = category_buckets(conn);
 
     let mut per_category: HashMap<String, i64> = HashMap::new();
     let mut per_bucket: HashMap<String, i64> = HashMap::new();
@@ -393,8 +408,9 @@ pub fn summary_for_day(conn: &Connection, day: &str) -> Result<TodaySummary, Str
         let extra = browser_extra(row.summary.as_deref(), &row.keywords);
         let (cat, _r, _pm) =
             projects::resolve(&projects, &row.domain, &row.title, &extra, &base.category, &base.reason);
+        let cat = category_or_fallback(conn, &cat);
         *per_category.entry(cat.clone()).or_insert(0) += row.duration;
-        *per_bucket.entry(bucket_for(&cat).to_string()).or_insert(0) += row.duration;
+        *per_bucket.entry(bucket_for_category(&bucket_map, &cat)).or_insert(0) += row.duration;
         let entry = domain_secs.entry(row.domain.clone()).or_insert((0, 0));
         entry.0 += row.duration;
         entry.1 += 1;
@@ -411,7 +427,7 @@ pub fn summary_for_day(conn: &Connection, day: &str) -> Result<TodaySummary, Str
         app_active += *secs;
         let cat_key = category.clone().unwrap_or_else(|| "uncategorized".to_string());
         *per_category.entry(cat_key.clone()).or_insert(0) += *secs;
-        *per_bucket.entry(bucket_for(&cat_key).to_string()).or_insert(0) += *secs;
+        *per_bucket.entry(bucket_for_category(&bucket_map, &cat_key)).or_insert(0) += *secs;
         per_app.push(AppUsage { app_name: name.clone(), seconds: *secs, category });
     }
 
@@ -494,6 +510,7 @@ pub fn compute_stats_for_day(conn: &Connection, day: &str) -> Result<scoring::St
     let llm_cache = llm::load_cache_for_day(conn, &day);
     let manual = load_manual_corrections(conn, &day)?;
     let blocks = collect_blocks_for_day(conn, &day)?;
+    let bucket_map = category_buckets(conn);
 
     let mut cat_seconds: HashMap<String, i64> = HashMap::new();
     let mut instagram_seconds = 0i64;
@@ -504,8 +521,8 @@ pub fn compute_stats_for_day(conn: &Connection, day: &str) -> Result<scoring::St
         if b.seconds <= 0 {
             continue;
         }
-        let cat = final_category(b, &manual, &llm_cache);
-        let bucket = bucket_for(&cat);
+        let cat = category_or_fallback(conn, &final_category(b, &manual, &llm_cache));
+        let bucket = bucket_for_category(&bucket_map, &cat);
         *cat_seconds.entry(cat).or_insert(0) += b.seconds;
         if bucket != "productive" {
             if let Some(d) = &b.domain {
@@ -715,7 +732,7 @@ pub fn day_metrics(conn: &Connection, day: &str) -> crate::streaks::DayMetrics {
             if b.seconds <= 0 {
                 continue;
             }
-            let cat = final_category(b, &manual, &llm);
+            let cat = category_or_fallback(conn, &final_category(b, &manual, &llm));
             let bucket = bucket_for(&cat);
             let min = b.seconds / 60;
             *m.cat_minutes.entry(cat).or_insert(0) += min;
@@ -894,6 +911,7 @@ pub fn timeline_for_day(conn: &Connection, day: &str, max_gap: i64) -> Result<Ti
     };
     let manual = load_manual_corrections(conn, day)?;
     let llm_cache = llm::load_cache_for_day(conn, day);
+    let bucket_map = category_buckets(conn);
     let smart_interval =
         settings::get_int(conn, settings::SMART_INTERVAL, settings::DEFAULT_SMART_INTERVAL).max(1);
 
@@ -933,7 +951,8 @@ pub fn timeline_for_day(conn: &Connection, day: &str, max_gap: i64) -> Result<Ti
                     }
                 })
                 .clone();
-            (key, val)
+            let (category, project, pconf, conf, classifier) = val;
+            (key, (category_or_fallback(conn, &category), project, pconf, conf, classifier))
         };
 
         {
@@ -959,7 +978,7 @@ pub fn timeline_for_day(conn: &Connection, day: &str, max_gap: i64) -> Result<Ti
                 let Some(ts) = parse_utc(&ts_s) else { continue };
                 let (key, (category, project, pconf, conf, classifier)) =
                     classify("app", &app, &title, None, None, None, &[]);
-                let bucket = bucket_for(&category).to_string();
+                let bucket = bucket_for_category(&bucket_map, &category);
                 desk.push(TlSample {
                     ts, source: "desktop".to_string(), label: app, title, idle,
                     eff_seconds: secs.max(1), is_web: false, summary: None, category, bucket,
@@ -996,7 +1015,7 @@ pub fn timeline_for_day(conn: &Connection, day: &str, max_gap: i64) -> Result<Ti
                 let keywords = parse_keywords(kw);
                 let (key, (category, project, pconf, conf, classifier)) =
                     classify("web", &domain, &title, Some(&domain), ctype.as_deref(), summary.as_deref(), &keywords);
-                let bucket = bucket_for(&category).to_string();
+                let bucket = bucket_for_category(&bucket_map, &category);
                 web.push(TlSample {
                     ts, source: "browser".to_string(), label: domain, title, idle,
                     eff_seconds: secs.max(1), is_web: true, summary, category, bucket,
@@ -1030,7 +1049,7 @@ pub fn timeline_for_day(conn: &Connection, day: &str, max_gap: i64) -> Result<Ti
                 let keywords = parse_keywords(kw);
                 let (key, (category, project, pconf, conf, classifier)) =
                     classify("screen", &app, &title, None, None, ocr.as_deref(), &keywords);
-                let bucket = bucket_for(&category).to_string();
+                let bucket = bucket_for_category(&bucket_map, &category);
                 scr.push(TlSample {
                     ts, source: "screen".to_string(), label: app, title, idle,
                     eff_seconds: smart_interval, is_web: false, summary: ocr, category, bucket,
@@ -1171,6 +1190,7 @@ pub fn weekly_review(conn: &Connection) -> Result<WeeklyReview, String> {
         let llm_cache = llm::load_cache_for_day(conn, &day);
         let manual = load_manual_corrections(conn, &day)?;
         let blocks = collect_blocks_for_day(conn, &day)?;
+        let bucket_map = category_buckets(conn);
 
         let mut p = 0i64;
         let mut d = 0i64;
@@ -1179,13 +1199,13 @@ pub fn weekly_review(conn: &Connection) -> Result<WeeklyReview, String> {
             if b.seconds <= 0 {
                 continue;
             }
-            let cat = final_category(b, &manual, &llm_cache);
-            let bucket = bucket_for(&cat);
+            let cat = category_or_fallback(conn, &final_category(b, &manual, &llm_cache));
+            let bucket = bucket_for_category(&bucket_map, &cat);
             tracked += b.seconds;
             if cat == "study" {
                 study += b.seconds;
             }
-            match bucket {
+            match bucket.as_str() {
                 "productive" => p += b.seconds,
                 "distracting" => {
                     d += b.seconds;
@@ -1280,13 +1300,14 @@ pub fn top_distraction_for_day(conn: &Connection, day: &str) -> Option<(String, 
     let blocks = collect_blocks_for_day(conn, day).ok()?;
     let manual = load_manual_corrections(conn, day).unwrap_or_default();
     let llm = llm::load_cache_for_day(conn, day);
+    let bucket_map = category_buckets(conn);
     let mut best: Option<(String, i64)> = None;
     for b in &blocks {
         if b.seconds <= 0 {
             continue;
         }
-        let cat = final_category(b, &manual, &llm);
-        if bucket_for(&cat) == "distracting" {
+        let cat = category_or_fallback(conn, &final_category(b, &manual, &llm));
+        if bucket_for_category(&bucket_map, &cat) == "distracting" {
             let label = b.domain.clone().unwrap_or_else(|| b.label.clone());
             let min = b.seconds / 60;
             if best.as_ref().map_or(true, |(_, m)| min > *m) {
@@ -1596,7 +1617,7 @@ fn build_review_input(conn: &Connection) -> Result<(ScoreReport, ReviewInput), S
         if b.seconds <= 0 {
             continue;
         }
-        let cat = final_category(b, &manual, &llm_cache);
+        let cat = category_or_fallback(conn, &final_category(b, &manual, &llm_cache));
         let bucket = bucket_for(&cat);
         *cat_seconds.entry(cat).or_insert(0) += b.seconds;
         if bucket != "productive" {

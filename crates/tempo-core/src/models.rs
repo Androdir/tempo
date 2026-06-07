@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
+use rusqlite::{params, Connection};
 
-/// The six categories the user may assign. Mirrors CATEGORY_LIST in the frontend.
+const CATEGORY_DEFAULTS_SEEDED: &str = "category_defaults_seeded";
+
+/// Built-in starter categories. Users can edit these and add their own rows in
+/// `category_definitions`.
 pub const CATEGORIES: [&str; 6] = [
     "productive",
     "study",
@@ -15,7 +19,8 @@ pub fn is_valid_category(c: &str) -> bool {
 }
 
 /// Roll a fine-grained category up into one of the three dashboard buckets.
-/// Keep this in sync with CATEGORY_META in the frontend (`categories.ts`).
+/// Fallback bucketing for older/static paths. User-edited category buckets come
+/// from `category_definitions` where a database connection is available.
 pub fn bucket_for(category: &str) -> &'static str {
     match category {
         "productive" | "study" | "business" => "productive",
@@ -23,6 +28,170 @@ pub fn bucket_for(category: &str) -> &'static str {
         // neutral, recovery, and anything uncategorized
         _ => "neutral",
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CategoryDefinition {
+    pub id: String,
+    pub label: String,
+    pub color: String,
+    pub bucket: String,
+    pub blurb: String,
+    pub built_in: bool,
+}
+
+const DEFAULT_CATEGORY_DEFS: &[(&str, &str, &str, &str, &str)] = &[
+    ("productive", "Productive", "#16a34a", "productive", "Deep, focused work"),
+    ("study", "Study", "#2563eb", "productive", "Learning & research"),
+    ("business", "Business", "#0d9488", "productive", "Admin, email, ops"),
+    ("neutral", "Neutral", "#64748b", "neutral", "Necessary but neutral"),
+    ("distraction", "Distraction", "#dc2626", "distracting", "Off-task time"),
+    ("recovery", "Recovery", "#9333ea", "neutral", "Intentional rest"),
+];
+
+pub fn ensure_category_defaults(conn: &Connection) -> rusqlite::Result<()> {
+    let already_seeded = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            [CATEGORY_DEFAULTS_SEEDED],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+        .is_some_and(|v| v == "1");
+    if already_seeded {
+        return Ok(());
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    for (i, (id, label, color, bucket, blurb)) in DEFAULT_CATEGORY_DEFS.iter().enumerate() {
+        conn.execute(
+            "INSERT OR IGNORE INTO category_definitions
+               (id, label, color, bucket, blurb, built_in, sort_order, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7)",
+            params![id, label, color, bucket, blurb, i as i64, now],
+        )?;
+    }
+    conn.execute(
+        "INSERT INTO app_settings (key, value) VALUES (?1, '1')
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [CATEGORY_DEFAULTS_SEEDED],
+    )?;
+    Ok(())
+}
+
+pub fn category_exists(conn: &Connection, id: &str) -> bool {
+    let id = id.trim();
+    if id.is_empty() {
+        return false;
+    }
+    let _ = ensure_category_defaults(conn);
+    conn.query_row("SELECT 1 FROM category_definitions WHERE id = ?1", [id], |_| Ok(()))
+        .is_ok()
+}
+
+pub fn fallback_category(conn: &Connection, excluded: Option<&str>) -> Option<String> {
+    let _ = ensure_category_defaults(conn);
+    let excluded = excluded.unwrap_or("");
+    conn.query_row(
+        "SELECT id FROM category_definitions
+         WHERE id != ?1
+         ORDER BY CASE bucket WHEN 'neutral' THEN 0 WHEN 'productive' THEN 1 ELSE 2 END,
+                  sort_order, label
+         LIMIT 1",
+        [excluded],
+        |r| r.get(0),
+    )
+    .ok()
+}
+
+pub fn category_or_fallback(conn: &Connection, category: &str) -> String {
+    if category_exists(conn, category) {
+        category.to_string()
+    } else {
+        fallback_category(conn, None).unwrap_or_else(|| "uncategorized".to_string())
+    }
+}
+
+pub fn list_category_definitions(conn: &Connection) -> rusqlite::Result<Vec<CategoryDefinition>> {
+    ensure_category_defaults(conn)?;
+    let mut stmt = conn.prepare(
+        "SELECT id, label, color, bucket, blurb, built_in
+         FROM category_definitions ORDER BY sort_order, label",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(CategoryDefinition {
+            id: r.get(0)?,
+            label: r.get(1)?,
+            color: r.get(2)?,
+            bucket: r.get(3)?,
+            blurb: r.get(4)?,
+            built_in: r.get::<_, i64>(5)? != 0,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn upsert_category_definition(conn: &Connection, c: &CategoryDefinition) -> rusqlite::Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let built_in = is_valid_category(&c.id);
+    let sort: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM category_definitions",
+        [],
+        |r| r.get(0),
+    ).unwrap_or(0);
+    conn.execute(
+        "INSERT INTO category_definitions (id, label, color, bucket, blurb, built_in, sort_order, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(id) DO UPDATE SET
+             label = excluded.label,
+             color = excluded.color,
+             bucket = excluded.bucket,
+             blurb = excluded.blurb,
+             updated_at = excluded.updated_at",
+        params![
+            c.id,
+            c.label,
+            c.color,
+            c.bucket,
+            c.blurb,
+            built_in as i64,
+            sort,
+            now
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn delete_category_definition(conn: &Connection, id: &str) -> Result<(), String> {
+    let id = id.trim().to_ascii_lowercase();
+    if id.is_empty() {
+        return Err("Category id is required".into());
+    }
+    if !category_exists(conn, &id) {
+        return Ok(());
+    }
+
+    let fallback = fallback_category(conn, Some(&id));
+    let Some(fallback) = fallback else {
+        return Err("At least one category must remain".into());
+    };
+
+    conn.execute("DELETE FROM category_definitions WHERE id = ?1", [&id])
+        .map_err(|e| e.to_string())?;
+    conn.execute("UPDATE category_rules SET category = ?2 WHERE category = ?1", params![&id, &fallback])
+        .map_err(|e| e.to_string())?;
+    conn.execute("UPDATE domain_rules SET category = NULL WHERE category = ?1", [&id])
+        .map_err(|e| e.to_string())?;
+    conn.execute("UPDATE projects SET category = ?2 WHERE category = ?1", params![&id, &fallback])
+        .map_err(|e| e.to_string())?;
+    conn.execute("UPDATE manual_corrections SET category = ?2 WHERE category = ?1", params![&id, &fallback])
+        .map_err(|e| e.to_string())?;
+    conn.execute("UPDATE smart_activity SET category = ?2 WHERE category = ?1", params![&id, &fallback])
+        .map_err(|e| e.to_string())?;
+    conn.execute("UPDATE llm_classification SET category = ?2 WHERE category = ?1", params![&id, &fallback])
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[derive(Serialize)]

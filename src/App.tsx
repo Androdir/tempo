@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Sidebar, { type Page } from "./components/Sidebar";
 import AccountabilityLayer from "./components/AccountabilityLayer";
 import Dashboard from "./pages/Dashboard";
@@ -28,12 +28,17 @@ function initialTheme(): Theme {
 export default function App() {
   const [page, setPage] = useState<Page>("dashboard");
   const [theme, setTheme] = useState<Theme>(initialTheme);
+  const mainRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     document.documentElement.style.colorScheme = theme;
     window.localStorage.setItem("tempo_theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    if (mainRef.current) mainRef.current.scrollTop = 0;
+  }, [page]);
 
   return (
     <div className="app-shell">
@@ -43,7 +48,7 @@ export default function App() {
         onNavigate={setPage}
         onToggleTheme={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
       />
-      <main className="main">
+      <main className="main" ref={mainRef}>
         {page === "dashboard" && <Dashboard onNavigate={setPage} />}
         {page === "goals" && <Goals />}
         {page === "focus" && <Focus />}

@@ -1,16 +1,21 @@
-import type { Bucket, Category } from "./types";
+import type { Bucket, Category, CategoryDefinition } from "./types";
 
-// The six categories the user can assign, in display order.
-export const CATEGORY_LIST: Category[] = [
-  "productive",
-  "study",
-  "business",
-  "neutral",
-  "distraction",
-  "recovery",
+export type CategoryMeta = Omit<CategoryDefinition, "id" | "builtIn">;
+
+export const DEFAULT_CATEGORY_DEFINITIONS: CategoryDefinition[] = [
+  { id: "productive", label: "Productive", color: "#16a34a", bucket: "productive", blurb: "Deep, focused work", builtIn: true },
+  { id: "study", label: "Study", color: "#2563eb", bucket: "productive", blurb: "Learning & research", builtIn: true },
+  { id: "business", label: "Business", color: "#0d9488", bucket: "productive", blurb: "Admin, email, ops", builtIn: true },
+  { id: "neutral", label: "Neutral", color: "#64748b", bucket: "neutral", blurb: "Necessary but neutral", builtIn: true },
+  { id: "distraction", label: "Distraction", color: "#dc2626", bucket: "distracting", blurb: "Off-task time", builtIn: true },
+  { id: "recovery", label: "Recovery", color: "#9333ea", bucket: "neutral", blurb: "Intentional rest", builtIn: true },
 ];
 
-export interface CategoryMeta {
+// Default categories are still available immediately; pages can register the
+// DB-backed definitions after loading.
+export let CATEGORY_LIST: Category[] = DEFAULT_CATEGORY_DEFINITIONS.map((c) => c.id);
+
+export interface SpecialCategoryMeta {
   label: string;
   color: string;
   bucket: Bucket;
@@ -19,16 +24,30 @@ export interface CategoryMeta {
 
 // Single source of truth for category -> color + which high-level bucket it
 // rolls up into. Keep this in sync with `bucket_for()` in the Rust backend.
-export const CATEGORY_META: Record<string, CategoryMeta> = {
-  productive: { label: "Productive", color: "#16a34a", bucket: "productive", blurb: "Deep, focused work" },
-  study: { label: "Study", color: "#2563eb", bucket: "productive", blurb: "Learning & research" },
-  business: { label: "Business", color: "#0d9488", bucket: "productive", blurb: "Admin, email, ops" },
-  neutral: { label: "Neutral", color: "#64748b", bucket: "neutral", blurb: "Necessary but neutral" },
-  distraction: { label: "Distraction", color: "#dc2626", bucket: "distracting", blurb: "Off-task time" },
-  recovery: { label: "Recovery", color: "#9333ea", bucket: "neutral", blurb: "Intentional rest" },
+export let CATEGORY_META: Record<string, SpecialCategoryMeta> = {
+  ...Object.fromEntries(
+    DEFAULT_CATEGORY_DEFINITIONS.map((c) => [
+      c.id,
+      { label: c.label, color: c.color, bucket: c.bucket, blurb: c.blurb },
+    ]),
+  ),
   uncategorized: { label: "Uncategorized", color: "#cbd5e1", bucket: "neutral", blurb: "Not tagged yet" },
   ignore: { label: "Ignored", color: "#b0b7c3", bucket: "neutral", blurb: "Excluded by you" },
 };
+
+export function registerCategoryDefinitions(defs: CategoryDefinition[]) {
+  CATEGORY_LIST = defs.map((c) => c.id);
+  CATEGORY_META = {
+    ...Object.fromEntries(
+      defs.map((c) => [
+        c.id,
+        { label: c.label, color: c.color, bucket: c.bucket, blurb: c.blurb },
+      ]),
+    ),
+    uncategorized: CATEGORY_META.uncategorized,
+    ignore: CATEGORY_META.ignore,
+  };
+}
 
 export const BUCKET_LIST: Bucket[] = ["productive", "neutral", "distracting"];
 

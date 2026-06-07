@@ -1,11 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
-import { categoryMeta } from "./categories";
+import { categoryMeta, DEFAULT_CATEGORY_DEFINITIONS, registerCategoryDefinitions } from "./categories";
 import type {
   ActivityDetail,
   ActivityLogEntry,
   BrowserActivityView,
   CaptureMode,
   Category,
+  CategoryDefinition,
   AccountabilitySettings,
   CategoryRule,
   CheckinState,
@@ -111,6 +112,47 @@ export async function getCategoryRules(): Promise<CategoryRule[]> {
   return [...mockCategories]
     .filter(([, c]) => c)
     .map(([appName, category]) => ({ appName, category: category as Category }));
+}
+
+export async function getCategoryDefinitions(): Promise<CategoryDefinition[]> {
+  if (isTauri() || isRemote()) {
+    const defs = await callBackend<CategoryDefinition[]>("get_category_definitions");
+    registerCategoryDefinitions(defs);
+    return defs;
+  }
+  registerCategoryDefinitions(mockCategoryDefs);
+  return mockCategoryDefs.map((c) => ({ ...c }));
+}
+
+export async function upsertCategoryDefinition(category: CategoryDefinition): Promise<void> {
+  if (isTauri() || isRemote()) {
+    await callBackend("upsert_category_definition", { category });
+    return;
+  }
+  const i = mockCategoryDefs.findIndex((c) => c.id === category.id);
+  if (i >= 0) mockCategoryDefs[i] = { ...category, builtIn: mockCategoryDefs[i].builtIn };
+  else mockCategoryDefs.push({ ...category, builtIn: false });
+  registerCategoryDefinitions(mockCategoryDefs);
+}
+
+export async function deleteCategoryDefinition(id: string): Promise<void> {
+  if (isTauri() || isRemote()) {
+    await callBackend("delete_category_definition", { id });
+    return;
+  }
+  if (mockCategoryDefs.length <= 1) throw new Error("At least one category must remain");
+  mockCategoryDefs = mockCategoryDefs.filter((c) => c.id !== id);
+  const fallback = mockCategoryDefs.find((c) => c.bucket === "neutral")?.id ?? mockCategoryDefs[0]?.id ?? "uncategorized";
+  for (const [app, category] of mockCategories.entries()) {
+    if (category === id) mockCategories.set(app, fallback);
+  }
+  for (const [domain, rule] of mockDomainRules.entries()) {
+    if (rule.category === id) mockDomainRules.set(domain, { ...rule, category: null });
+  }
+  for (let i = 0; i < mockProjects.length; i += 1) {
+    if (mockProjects[i].category === id) mockProjects[i] = { ...mockProjects[i], category: fallback };
+  }
+  registerCategoryDefinitions(mockCategoryDefs);
 }
 
 export async function setCategoryRule(
@@ -373,14 +415,6 @@ export async function setDailyNote(notes: string): Promise<void> {
   mockNotes = notes;
 }
 
-export async function insertSampleData(): Promise<void> {
-  if (isTauri()) {
-    await invoke("insert_sample_data");
-    return;
-  }
-  // Browser preview already starts with sample data, so this is a no-op.
-}
-
 /**
  * Subscribe to the backend's "a new sample was recorded" event so the
  * dashboard can refresh live. Returns an unsubscribe function. No-op in the
@@ -521,6 +555,7 @@ function localDateIso(d = new Date()): string {
 const mockCategories = new Map<string, Category | null>();
 const mockAppAi = new Map<string, boolean>();
 const mockSeconds = new Map<string, number>();
+let mockCategoryDefs: CategoryDefinition[] = DEFAULT_CATEGORY_DEFINITIONS.map((c) => ({ ...c }));
 
 function mockTrackedApps(): TrackedApp[] {
   return [...mockSeconds]

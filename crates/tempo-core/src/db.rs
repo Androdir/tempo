@@ -30,6 +30,19 @@ CREATE TABLE IF NOT EXISTS category_rules (
     updated_at TEXT NOT NULL
 );
 
+-- Editable category definitions. The six built-ins are seeded as editable rows;
+-- users can add more categories that still roll up into one of the three buckets.
+CREATE TABLE IF NOT EXISTS category_definitions (
+    id         TEXT PRIMARY KEY,
+    label      TEXT NOT NULL,
+    color      TEXT NOT NULL,
+    bucket     TEXT NOT NULL DEFAULT 'neutral',
+    blurb      TEXT NOT NULL DEFAULT '',
+    built_in   INTEGER NOT NULL DEFAULT 0,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+
 -- One row per ~10s sample of the active browser tab (from the extension).
 CREATE TABLE IF NOT EXISTS browser_activity (
     id                      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -332,6 +345,19 @@ fn migrate(conn: &Connection) {
             [],
         );
     }
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS category_definitions (
+            id         TEXT PRIMARY KEY,
+            label      TEXT NOT NULL,
+            color      TEXT NOT NULL,
+            bucket     TEXT NOT NULL DEFAULT 'neutral',
+            blurb      TEXT NOT NULL DEFAULT '',
+            built_in   INTEGER NOT NULL DEFAULT 0,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        )",
+        [],
+    );
     let _ = conn.execute("ALTER TABLE goals ADD COLUMN recurring INTEGER NOT NULL DEFAULT 0", []);
 }
 

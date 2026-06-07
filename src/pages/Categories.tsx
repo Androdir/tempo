@@ -1,21 +1,22 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  deleteCategoryDefinition,
   deleteCategoryRule,
+  getCategoryDefinitions,
   getTrackedApps,
   getTrackedDomains,
   setCategoryRule,
   setDomainRule,
+  upsertCategoryDefinition,
 } from "../api";
 import {
   BUCKET_LIST,
   BUCKET_META,
   captureModeMeta,
-  CATEGORY_LIST,
-  CATEGORY_META,
 } from "../categories";
 import { AppGlyph } from "../components/ui";
 import { formatDuration } from "../format";
-import type { Category, TrackedApp, TrackedDomain } from "../types";
+import type { Bucket, Category, CategoryDefinition, TrackedApp, TrackedDomain } from "../types";
 
 type Tab = "apps" | "websites";
 
@@ -26,12 +27,22 @@ export default function Categories() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
+  const [categoryDefs, setCategoryDefs] = useState<CategoryDefinition[]>([]);
+  const [draft, setDraft] = useState<CategoryDefinition>({
+    id: "",
+    label: "",
+    color: "#64748b",
+    bucket: "neutral",
+    blurb: "",
+    builtIn: false,
+  });
 
   const load = useCallback(async () => {
     try {
-      const [a, d] = await Promise.all([getTrackedApps(), getTrackedDomains()]);
+      const [a, d, defs] = await Promise.all([getTrackedApps(), getTrackedDomains(), getCategoryDefinitions()]);
       setApps(a);
       setDomains(d);
+      setCategoryDefs(defs);
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -39,6 +50,44 @@ export default function Categories() {
       setLoading(false);
     }
   }, []);
+
+  function editCategory(c: CategoryDefinition) {
+    setDraft({ ...c });
+  }
+
+  async function saveCategory() {
+    const id = draft.id.trim().toLowerCase().replace(/\s+/g, "-");
+    if (!id || !draft.label.trim()) {
+      setError("Category id and label are required");
+      return;
+    }
+    try {
+      await upsertCategoryDefinition({
+        ...draft,
+        id,
+        label: draft.label.trim(),
+        color: draft.color || "#64748b",
+        blurb: draft.blurb.trim(),
+      });
+      setDraft({ id: "", label: "", color: "#64748b", bucket: "neutral", blurb: "", builtIn: false });
+      await load();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function removeCategory(c: CategoryDefinition) {
+    if (!confirm(`Delete category "${c.label}"? Existing rules and projects will move to a remaining fallback category.`)) return;
+    try {
+      await deleteCategoryDefinition(c.id);
+      if (draft.id === c.id) {
+        setDraft({ id: "", label: "", color: "#64748b", bucket: "neutral", blurb: "", builtIn: false });
+      }
+      await load();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
 
   useEffect(() => {
     load();
@@ -120,7 +169,16 @@ export default function Categories() {
         </div>
       </div>
 
-      <BucketLegend />
+      <CategoryManager
+        defs={categoryDefs}
+        draft={draft}
+        onDraft={setDraft}
+        onEdit={editCategory}
+        onSave={saveCategory}
+        onDelete={removeCategory}
+      />
+
+      <BucketLegend defs={categoryDefs} />
 
       {error && <div className="error-box section-gap">{error}</div>}
 
@@ -129,6 +187,7 @@ export default function Categories() {
           <div className="loading">Loading…</div>
         ) : tab === "apps" ? (
           <CategoryTable
+            categories={categoryDefs}
             empty={apps.length === 0}
             emptyTitle="No apps tracked yet"
             emptyHint="Once the tracker has seen a few apps, they'll appear here."
@@ -146,6 +205,7 @@ export default function Categories() {
           />
         ) : (
           <CategoryTable
+            categories={categoryDefs}
             empty={domains.length === 0}
             emptyTitle="No websites tracked yet"
             emptyHint="Install the browser extension (extension/README.md) to see websites here."
@@ -184,11 +244,13 @@ interface Row {
 
 function CategoryTable({
   rows,
+  categories,
   empty,
   emptyTitle,
   emptyHint,
 }: {
   rows: Row[];
+  categories: CategoryDefinition[];
   empty: boolean;
   emptyTitle: string;
   emptyHint: string;
@@ -240,8 +302,8 @@ function CategoryTable({
                 style={{ width: "100%" }}
               >
                 <option value="">Uncategorized</option>
-                {CATEGORY_LIST.map((c) => (
-                  <option key={c} value={c}>{CATEGORY_META[c].label}</option>
+                {categories.map((c) => (
+                  <option key={c.id} value={c.id}>{c.label}</option>
                 ))}
               </select>
             </td>
@@ -270,11 +332,88 @@ function CategoryTable({
   );
 }
 
-function BucketLegend() {
+function CategoryManager({
+  defs,
+  draft,
+  onDraft,
+  onEdit,
+  onSave,
+  onDelete,
+}: {
+  defs: CategoryDefinition[];
+  draft: CategoryDefinition;
+  onDraft: (c: CategoryDefinition) => void;
+  onEdit: (c: CategoryDefinition) => void;
+  onSave: () => void;
+  onDelete: (c: CategoryDefinition) => void;
+}) {
+  return (
+    <div className="card card-pad">
+      <h2 className="card-title">Edit categories</h2>
+      <p className="card-hint">Keep the defaults, rename them, or add your own categories.</p>
+      <div className="category-editor">
+        <input
+          className="search"
+          placeholder="category-id"
+          value={draft.id}
+          disabled={draft.builtIn}
+          onChange={(e) => onDraft({ ...draft, id: e.target.value })}
+        />
+        <input
+          className="search"
+          placeholder="Label"
+          value={draft.label}
+          onChange={(e) => onDraft({ ...draft, label: e.target.value })}
+        />
+        <input
+          className="color-input"
+          type="color"
+          value={draft.color}
+          onChange={(e) => onDraft({ ...draft, color: e.target.value })}
+          aria-label="Category color"
+        />
+        <select className="select" value={draft.bucket} onChange={(e) => onDraft({ ...draft, bucket: e.target.value as Bucket })}>
+          {BUCKET_LIST.map((b) => (
+            <option key={b} value={b}>{BUCKET_META[b].label}</option>
+          ))}
+        </select>
+        <input
+          className="search"
+          placeholder="Short description"
+          value={draft.blurb}
+          onChange={(e) => onDraft({ ...draft, blurb: e.target.value })}
+        />
+        <button className="btn btn-primary" onClick={onSave}>
+          {draft.id ? "Save" : "Add"}
+        </button>
+      </div>
+      <div className="category-pills">
+        {defs.map((c) => (
+          <span className="category-pill" key={c.id}>
+            <span className="dot" style={{ background: c.color }} />
+            <button className="link-inline" onClick={() => onEdit(c)}>{c.label}</button>
+            <span className="muted-num">{BUCKET_META[c.bucket].label}</span>
+            <button
+              className="icon-btn"
+              onClick={() => onDelete(c)}
+              disabled={defs.length <= 1}
+              title={defs.length <= 1 ? "At least one category must remain" : "Delete category"}
+              aria-label={`Delete ${c.label}`}
+            >
+              ×
+            </button>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function BucketLegend({ defs }: { defs: CategoryDefinition[] }) {
   return (
     <div className="card card-pad">
       <h2 className="card-title">How categories roll up</h2>
-      <p className="card-hint">The six categories group into three buckets on your dashboard.</p>
+      <p className="card-hint">Categories group into three dashboard buckets.</p>
       <div className="bucket-legend">
         {BUCKET_LIST.map((bucket) => (
           <div className="bucket-col" key={bucket}>
@@ -283,11 +422,11 @@ function BucketLegend() {
               {BUCKET_META[bucket].label}
             </div>
             <div className="bucket-cats">
-              {CATEGORY_LIST.filter((c) => CATEGORY_META[c].bucket === bucket).map((c) => (
-                <div className="bucket-cat" key={c}>
-                  <span className="dot" style={{ background: CATEGORY_META[c].color }} />
-                  <span>{CATEGORY_META[c].label}</span>
-                  <span className="bucket-cat-blurb">{CATEGORY_META[c].blurb}</span>
+              {defs.filter((c) => c.bucket === bucket).map((c) => (
+                <div className="bucket-cat" key={c.id}>
+                  <span className="dot" style={{ background: c.color }} />
+                  <span>{c.label}</span>
+                  <span className="bucket-cat-blurb">{c.blurb}</span>
                 </div>
               ))}
             </div>

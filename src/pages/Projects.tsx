@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { createProject, deleteProject, getProjects, updateProject } from "../api";
-import { CATEGORY_LIST, CATEGORY_META } from "../categories";
+import { createProject, deleteProject, getCategoryDefinitions, getProjects, updateProject } from "../api";
 import { CategoryBadge } from "../components/ui";
-import type { Category, Project } from "../types";
+import type { Category, CategoryDefinition, Project } from "../types";
 
 const BLANK = {
   id: 0,
@@ -23,12 +22,15 @@ function fromList(a: string[]): string {
 
 export default function Projects() {
   const [projects, setProjects] = useState<Project[]>([]);
+  const [categories, setCategories] = useState<CategoryDefinition[]>([]);
   const [form, setForm] = useState(BLANK);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      setProjects(await getProjects());
+      const [p, c] = await Promise.all([getProjects(), getCategoryDefinitions()]);
+      setProjects(p);
+      setCategories(c);
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -119,8 +121,8 @@ export default function Projects() {
               value={form.category}
               onChange={(e) => setForm({ ...form, category: e.target.value as Category })}
             >
-              {CATEGORY_LIST.map((c) => (
-                <option key={c} value={c}>{CATEGORY_META[c].label}</option>
+              {categories.map((c) => (
+                <option key={c.id} value={c.id}>{c.label}</option>
               ))}
             </select>
           </label>

@@ -1,9 +1,9 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
-import { correctActivity, getOutputEvents, getTimelineForDay } from "../api";
-import { CATEGORY_LIST, CATEGORY_META, categoryMeta } from "../categories";
+import { correctActivity, getCategoryDefinitions, getOutputEvents, getTimelineForDay } from "../api";
+import { categoryMeta } from "../categories";
 import { AppGlyph, CategoryBadge, ProjectTag, StatCard } from "../components/ui";
 import { formatDuration } from "../format";
-import type { OutputEvent, TimelineBlock, TimelineDay } from "../types";
+import type { CategoryDefinition, OutputEvent, TimelineBlock, TimelineDay } from "../types";
 import { outputMeta } from "./OutputEvents";
 
 const GAP_OPTIONS = [
@@ -84,12 +84,18 @@ export default function Timeline() {
   const [correctingKey, setCorrectingKey] = useState<string | null>(null);
 
   const [outputs, setOutputs] = useState<OutputEvent[]>([]);
+  const [categories, setCategories] = useState<CategoryDefinition[]>([]);
 
   const load = useCallback(async () => {
     try {
-      const [tl, ev] = await Promise.all([getTimelineForDay(day, gap), getOutputEvents(day)]);
+      const [tl, ev, cats] = await Promise.all([
+        getTimelineForDay(day, gap),
+        getOutputEvents(day),
+        getCategoryDefinitions(),
+      ]);
       setData(tl);
       setOutputs(ev);
+      setCategories(cats);
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -125,6 +131,9 @@ export default function Timeline() {
       }),
     [blocks, sourceF, projectF, labelF, catF],
   );
+  const hasOutputs =
+    data?.goals.length ||
+    Object.values(data?.outputs ?? {}).some((v) => (typeof v === "number" ? v > 0 : Boolean(v)));
 
   const maxDur = useMemo(
     () => Math.max(60, ...visible.map((b) => b.durationSeconds)),
@@ -253,10 +262,10 @@ export default function Timeline() {
             {correctingKey === b.blockKey && (
               <div className="correct-bar tl-correct">
                 <span className="correct-label">Mark as</span>
-                {CATEGORY_LIST.map((c) => (
-                  <button key={c} className="correct-btn" onClick={() => doCorrect(b, c)}>
-                    <span className="dot" style={{ background: CATEGORY_META[c].color }} />
-                    {CATEGORY_META[c].label}
+                {categories.map((c) => (
+                  <button key={c.id} className="correct-btn" onClick={() => doCorrect(b, c.id)}>
+                    <span className="dot" style={{ background: c.color }} />
+                    {c.label}
                   </button>
                 ))}
                 <button className="correct-btn ignore" onClick={() => doCorrect(b, "ignore")}>
@@ -310,12 +319,12 @@ export default function Timeline() {
             <StatCard
               label="Productive"
               value={formatDuration(data.productiveSeconds)}
-              chip={CATEGORY_META.productive.color}
+              chip={categoryMeta("productive").color}
             />
             <StatCard
               label="Distraction"
               value={formatDuration(data.distractedSeconds)}
-              chip={CATEGORY_META.distraction.color}
+              chip={categoryMeta("distraction").color}
             />
             <StatCard
               label="First productive"
@@ -324,23 +333,25 @@ export default function Timeline() {
             />
           </div>
 
-          {/* Outputs (self-reported; no per-event time, so shown as a strip). */}
-          <div className="card card-pad tl-outputs">
-            <span className="tl-outputs-title">📤 Outputs today</span>
-            {OUTPUT_CHIPS.map((o) => {
-              const raw = data.outputs[o.key];
-              const on = typeof raw === "number" ? raw > 0 : raw;
-              const text = typeof raw === "number" && raw > 0 ? `${o.label} ×${raw}` : o.label;
-              return (
-                <span key={o.key} className={`tl-out-chip ${on ? "on" : ""}`}>
-                  {o.icon} {text}
-                </span>
-              );
-            })}
-            {data.goals.length > 0 && (
-              <span className="tl-goals" title="Today's goals">🎯 {data.goals.join(" · ")}</span>
-            )}
-          </div>
+          {hasOutputs ? (
+            <div className="card card-pad tl-outputs">
+              <span className="tl-outputs-title">📤 Outputs today</span>
+              {OUTPUT_CHIPS.map((o) => {
+                const raw = data.outputs[o.key];
+                const on = typeof raw === "number" ? raw > 0 : raw;
+                if (!on) return null;
+                const text = typeof raw === "number" && raw > 0 ? `${o.label} ×${raw}` : o.label;
+                return (
+                  <span key={o.key} className="tl-out-chip on">
+                    {o.icon} {text}
+                  </span>
+                );
+              })}
+              {data.goals.length > 0 && (
+                <span className="tl-goals" title="Today's goals">🎯 {data.goals.join(" · ")}</span>
+              )}
+            </div>
+          ) : null}
 
           {/* Filters */}
           <div className="tl-filters">
@@ -376,7 +387,7 @@ export default function Timeline() {
               <div className="empty">
                 <div className="empty-glyph">📈</div>
                 <h3>No blocks for this view</h3>
-                <p>Use your computer (or load sample data on the Dashboard), or loosen the filters.</p>
+                <p>Use your computer for a bit, or loosen the filters.</p>
               </div>
             ) : (
               items.map((it) => (it.kind === "output" ? renderOutput(it.o) : renderBlock(it.b)))

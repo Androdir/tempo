@@ -72,16 +72,59 @@ pub fn get_category_rules(db: State<'_, Db>) -> Result<Vec<CategoryRule>, String
 }
 
 #[tauri::command]
+pub fn get_category_definitions(db: State<'_, Db>) -> Result<Vec<CategoryDefinition>, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    crate::models::list_category_definitions(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn upsert_category_definition(
+    db: State<'_, Db>,
+    category: CategoryDefinition,
+) -> Result<(), String> {
+    let id = category.id.trim().to_ascii_lowercase();
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-') {
+        return Err("Category id must use lowercase letters, numbers, dashes or underscores".into());
+    }
+    if category.label.trim().is_empty() {
+        return Err("Category label is required".into());
+    }
+    if !["productive", "neutral", "distracting"].contains(&category.bucket.as_str()) {
+        return Err("Bucket must be productive, neutral or distracting".into());
+    }
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    crate::models::upsert_category_definition(
+        &conn,
+        &CategoryDefinition {
+            id,
+            label: category.label.trim().to_string(),
+            color: category.color.trim().to_string(),
+            bucket: category.bucket,
+            blurb: category.blurb.trim().to_string(),
+            built_in: category.built_in,
+        },
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_category_definition(db: State<'_, Db>, id: String) -> Result<(), String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    crate::models::delete_category_definition(&conn, &id.trim().to_ascii_lowercase())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn set_category_rule(
     db: State<'_, Db>,
     app_name: String,
     category: String,
     ai_review: bool,
 ) -> Result<(), String> {
-    if !is_valid_category(&category) {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    if !crate::models::category_exists(&conn, &category) {
         return Err(format!("Unknown category: {category}"));
     }
-    let conn = db.lock().map_err(|e| e.to_string())?;
     let now = Utc::now().to_rfc3339();
     conn.execute(
         "INSERT INTO category_rules (app_name, category, ai_review, updated_at)
@@ -289,6 +332,7 @@ pub fn get_activity_details(db: State<'_, Db>, id: i64) -> Result<ActivityDetail
         } else {
             (v.category.clone(), v.reason.clone(), rule_project, "rule".to_string(), None)
         };
+    let category = category_or_fallback(&conn, &category);
 
     Ok(ActivityDetail {
         id,
@@ -368,13 +412,13 @@ pub fn set_domain_rule(
     if !["text", "meta", "never"].contains(&capture_mode.as_str()) {
         return Err(format!("Invalid capture mode: {capture_mode}"));
     }
+    let conn = db.lock().map_err(|e| e.to_string())?;
     if let Some(c) = category.as_deref() {
-        if !c.is_empty() && !is_valid_category(c) {
+        if !c.is_empty() && !crate::models::category_exists(&conn, c) {
             return Err(format!("Unknown category: {c}"));
         }
     }
     let category = category.filter(|c| !c.is_empty());
-    let conn = db.lock().map_err(|e| e.to_string())?;
     settings::upsert_domain_rule(&conn, &domain, category.as_deref(), &capture_mode, ai_review)
         .map_err(|e| e.to_string())
 }
@@ -476,6 +520,7 @@ pub fn reset_database(db: State<'_, Db>) -> Result<i64, String> {
         "DELETE FROM domain_rules",
         "DELETE FROM browser_activity",
         "DELETE FROM category_rules",
+        "DELETE FROM category_definitions",
         "DELETE FROM activity_log",
     ];
     let mut removed = 0i64;
@@ -486,6 +531,7 @@ pub fn reset_database(db: State<'_, Db>) -> Result<i64, String> {
     tx.commit().map_err(|e| e.to_string())?;
 
     settings::ensure_defaults(&conn).map_err(|e| e.to_string())?;
+    crate::models::ensure_category_defaults(&conn).map_err(|e| e.to_string())?;
     Ok(removed)
 }
 
@@ -574,11 +620,11 @@ pub fn get_llm_errors(db: State<'_, Db>) -> Result<Vec<LlmError>, String> {
 
 // --------------------------------------------------------- projects / goals
 
-fn validate_project(p: &Project) -> Result<(), String> {
+fn validate_project(conn: &Connection, p: &Project) -> Result<(), String> {
     if p.name.trim().is_empty() {
         return Err("Project name is required".into());
     }
-    if !is_valid_category(&p.category) {
+    if !crate::models::category_exists(conn, &p.category) {
         return Err(format!("Unknown category: {}", p.category));
     }
     Ok(())
@@ -592,18 +638,18 @@ pub fn get_projects(db: State<'_, Db>) -> Result<Vec<Project>, String> {
 
 #[tauri::command]
 pub fn create_project(db: State<'_, Db>, project: Project) -> Result<i64, String> {
-    validate_project(&project)?;
     let conn = db.lock().map_err(|e| e.to_string())?;
+    validate_project(&conn, &project)?;
     projects::create_project(&conn, &project).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn update_project(db: State<'_, Db>, project: Project) -> Result<(), String> {
-    validate_project(&project)?;
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    validate_project(&conn, &project)?;
     if project.id <= 0 {
         return Err("Missing project id".into());
     }
-    let conn = db.lock().map_err(|e| e.to_string())?;
     projects::update_project(&conn, &project).map_err(|e| e.to_string())
 }
 
@@ -664,6 +710,7 @@ pub fn get_recent_activity(db: State<'_, Db>) -> Result<Vec<ActivityLogEntry>, S
                         None,
                     )
                 };
+            let category = category_or_fallback(&conn, &category);
             ActivityLogEntry {
                 source: b.source,
                 label: b.label,
@@ -700,10 +747,10 @@ pub fn correct_activity(
     title: String,
     category: String,
 ) -> Result<(), String> {
-    if !is_valid_category(&category) && category != "ignore" {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    if !crate::models::category_exists(&conn, &category) && category != "ignore" {
         return Err(format!("Unknown category: {category}"));
     }
-    let conn = db.lock().map_err(|e| e.to_string())?;
     let now = Utc::now().to_rfc3339();
     let day = today();
 
@@ -718,7 +765,7 @@ pub fn correct_activity(
 
     // Turn the correction into a reusable rule so future blocks (and the
     // dashboard) follow it. "ignore" is per-block only — no rule.
-    if is_valid_category(&category) {
+    if crate::models::category_exists(&conn, &category) {
         if source == "web" {
             conn.execute(
                 "INSERT INTO domain_rules (domain, category, capture_mode, ai_review, updated_at)
@@ -1279,96 +1326,6 @@ pub fn set_daily_note(db: State<'_, Db>, notes: String) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     conn.execute("UPDATE daily_checkin SET notes = ?1 WHERE day = ?2", params![notes, day])
         .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-#[tauri::command]
-pub fn insert_sample_data(db: State<'_, Db>) -> Result<(), String> {
-    let conn = db.lock().map_err(|e| e.to_string())?;
-    let day = today();
-    let now = Utc::now();
-
-    // Desktop app samples.
-    let samples = [
-        ("Visual Studio Code", "lib.rs — productivity-tracker", 62, "productive"),
-        ("Figma", "Dashboard mockups", 18, "productive"),
-        ("Notion", "Study notes — Rust", 24, "study"),
-        ("Slack", "#team", 15, "business"),
-        ("YouTube", "Lo-fi beats to focus", 19, "distraction"),
-        ("Spotify", "Focus playlist", 11, "recovery"),
-    ];
-    for (i, (app, title, minutes, category)) in samples.iter().enumerate() {
-        let ts = (now - Duration::minutes((i as i64 + 1) * 30)).to_rfc3339();
-        conn.execute(
-            "INSERT INTO activity_log
-               (timestamp, day, app_name, window_title, duration_seconds, is_idle)
-             VALUES (?1, ?2, ?3, ?4, ?5, 0)",
-            params![ts, day, app, title, (*minutes as i64) * 60],
-        )
-        .map_err(|e| e.to_string())?;
-        conn.execute(
-            "INSERT INTO category_rules (app_name, category, updated_at)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(app_name) DO UPDATE SET
-                 category = excluded.category, updated_at = excluded.updated_at",
-            params![app, category, now.to_rfc3339()],
-        )
-        .map_err(|e| e.to_string())?;
-    }
-
-    // Browser samples (with content, to demo classification + details).
-    let pages: &[(&str, &str, &str, i64, &str, &str, &[&str])] = &[
-        (
-            "chatgpt.com",
-            "https://chatgpt.com/c/demo-1",
-            "Hungarian Algorithm — assignment problem",
-            18,
-            "chat",
-            "Walkthrough of the Hungarian Algorithm for the assignment problem and minimum cost matching, with a worked example.",
-            &["hungarian algorithm", "assignment problem", "minimum cost", "matching"],
-        ),
-        (
-            "youtube.com",
-            "https://youtube.com/watch?v=demo",
-            "Short-form editing: hooks & retention",
-            14,
-            "video",
-            "Breakdown of short-form editing, opening hooks, retention curves, and viral analysis for creators.",
-            &["short-form editing", "hooks", "retention", "viral analysis"],
-        ),
-        (
-            "instagram.com",
-            "https://instagram.com/reels",
-            "Reels",
-            12,
-            "social_feed",
-            "Endless Reels and Explore feed of short clips.",
-            &["reels", "explore", "feed"],
-        ),
-        (
-            "github.com",
-            "https://github.com/me/tempo",
-            "tempo — src/lib.rs",
-            9,
-            "docs_editor",
-            "Rust source for the Tauri productivity tracker.",
-            &["rust", "tauri", "sqlite"],
-        ),
-    ];
-    for (i, (domain, url, title, minutes, ctype, summary, kws)) in pages.iter().enumerate() {
-        let ts = (now - Duration::minutes((i as i64 + 1) * 20)).to_rfc3339();
-        let kw_json = serde_json::to_string(kws).unwrap_or_else(|_| "[]".to_string());
-        conn.execute(
-            "INSERT INTO browser_activity
-               (timestamp, day, domain, url, page_title, duration_seconds,
-                content_capture_enabled, content_type, raw_text_excerpt,
-                content_summary, detected_keywords, is_idle)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, NULL, ?8, ?9, 0)",
-            params![ts, day, domain, url, title, (*minutes as i64) * 60, ctype, summary, kw_json],
-        )
-        .map_err(|e| e.to_string())?;
-    }
-
     Ok(())
 }
 

@@ -16,7 +16,7 @@ use tiny_http::{Header, Method, Request, Response, Server};
 
 use tempo_core::db::{self, Db};
 use tempo_core::events::{self, EventBatch};
-use tempo_core::models::{is_valid_category, CheckinState, Goal, LockinPlan};
+use tempo_core::models::{self, CheckinState, Goal, LockinPlan};
 use tempo_core::{aggregate, projects, scoring, settings};
 
 struct Config {
@@ -54,6 +54,7 @@ fn main() {
     {
         let conn = database.lock().expect("db lock");
         let _ = settings::ensure_defaults(&conn);
+        let _ = models::ensure_category_defaults(&conn);
         apply_llm_env(&conn);
     }
 
@@ -260,11 +261,32 @@ fn api_route(
     }
 }
 
-fn validate_project(p: &projects::Project) -> Result<(), String> {
+fn validate_category_definition(category: models::CategoryDefinition) -> Result<models::CategoryDefinition, String> {
+    let id = category.id.trim().to_ascii_lowercase();
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-') {
+        return Err("Category id must use lowercase letters, numbers, dashes or underscores".into());
+    }
+    if category.label.trim().is_empty() {
+        return Err("Category label is required".into());
+    }
+    if !["productive", "neutral", "distracting"].contains(&category.bucket.as_str()) {
+        return Err("Bucket must be productive, neutral or distracting".into());
+    }
+    Ok(models::CategoryDefinition {
+        id,
+        label: category.label.trim().to_string(),
+        color: category.color.trim().to_string(),
+        bucket: category.bucket,
+        blurb: category.blurb.trim().to_string(),
+        built_in: category.built_in,
+    })
+}
+
+fn validate_project(conn: &Connection, p: &projects::Project) -> Result<(), String> {
     if p.name.trim().is_empty() {
         return Err("Project name is required".into());
     }
-    if !is_valid_category(&p.category) {
+    if !models::category_exists(conn, &p.category) {
         return Err(format!("Unknown category: {}", p.category));
     }
     Ok(())
@@ -470,19 +492,35 @@ fn dispatch(conn: &Connection, cmd: &str, args: &Value) -> Result<Value, String>
             let out: Vec<_> = rows.filter_map(Result::ok).collect();
             Ok(serde_json::to_value(out).unwrap())
         }
+        "get_category_definitions" => {
+            Ok(serde_json::to_value(models::list_category_definitions(conn).map_err(|e| e.to_string())?).unwrap())
+        }
+        "upsert_category_definition" => {
+            let category: models::CategoryDefinition =
+                serde_json::from_value(args.get("category").cloned().ok_or("missing category")?)
+                    .map_err(|e| e.to_string())?;
+            let category = validate_category_definition(category)?;
+            models::upsert_category_definition(conn, &category).map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "delete_category_definition" => {
+            let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing id")?;
+            models::delete_category_definition(conn, &id.trim().to_ascii_lowercase()).map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
         "get_projects" => Ok(serde_json::to_value(projects::list_projects(conn).map_err(|e| e.to_string())?).unwrap()),
         "create_project" => {
             let project: projects::Project =
                 serde_json::from_value(args.get("project").cloned().ok_or("missing project")?)
                     .map_err(|e| e.to_string())?;
-            validate_project(&project)?;
+            validate_project(conn, &project)?;
             Ok(serde_json::to_value(projects::create_project(conn, &project).map_err(|e| e.to_string())?).unwrap())
         }
         "update_project" => {
             let project: projects::Project =
                 serde_json::from_value(args.get("project").cloned().ok_or("missing project")?)
                     .map_err(|e| e.to_string())?;
-            validate_project(&project)?;
+            validate_project(conn, &project)?;
             if project.id <= 0 {
                 return Err("Missing project id".into());
             }

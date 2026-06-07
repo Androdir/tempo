@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { getBrowserActivity } from "../api";
+import { getBrowserActivity, getCategoryDefinitions } from "../api";
 import { categoryMeta, contentTypeMeta } from "../categories";
 import ActivityDetailsDrawer from "../components/ActivityDetailsDrawer";
 import { AppGlyph, BarRow, CategoryBadge } from "../components/ui";
@@ -13,7 +13,8 @@ export default function BrowserActivity() {
 
   const load = useCallback(async () => {
     try {
-      setData(await getBrowserActivity());
+      const [activity] = await Promise.all([getBrowserActivity(), getCategoryDefinitions()]);
+      setData(activity);
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -56,8 +57,7 @@ export default function BrowserActivity() {
             <h3>No browser activity yet</h3>
             <p>
               Install the Tempo browser extension (see <code>extension/README.md</code>) and
-              browse while Chrome is focused — visits will appear here. You can also load sample
-              data from the Dashboard.
+              browse while Chrome is focused. Visits will appear here automatically.
             </p>
           </div>
         </div>

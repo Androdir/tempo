@@ -1,10 +1,10 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
-import { correctActivity, getRecentActivity } from "../api";
-import { CATEGORY_LIST, CATEGORY_META, contentTypeMeta } from "../categories";
+import { correctActivity, getCategoryDefinitions, getRecentActivity } from "../api";
+import { contentTypeMeta } from "../categories";
 import ActivityDetailsDrawer from "../components/ActivityDetailsDrawer";
 import { AppGlyph, CategoryBadge, ProjectTag } from "../components/ui";
 import { formatDuration } from "../format";
-import type { ActivityLogEntry } from "../types";
+import type { ActivityLogEntry, CategoryDefinition } from "../types";
 
 type Filter = "all" | "app" | "web" | "screen";
 
@@ -29,10 +29,13 @@ export default function ActivityLog() {
   const [openId, setOpenId] = useState<number | null>(null);
   const [filter, setFilter] = useState<Filter>("all");
   const [correctingKey, setCorrectingKey] = useState<string | null>(null);
+  const [categories, setCategories] = useState<CategoryDefinition[]>([]);
 
   const load = useCallback(async () => {
     try {
-      setEntries(await getRecentActivity());
+      const [items, cats] = await Promise.all([getRecentActivity(), getCategoryDefinitions()]);
+      setEntries(items);
+      setCategories(cats);
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -88,7 +91,7 @@ export default function ActivityLog() {
           <div className="empty">
             <div className="empty-glyph">🗂️</div>
             <h3>No activity yet</h3>
-            <p>Use your computer (or load sample data on the Dashboard) and activity will appear here.</p>
+            <p>Use your computer for a bit and activity will appear here.</p>
           </div>
         ) : (
           <table className="app-table">
@@ -162,10 +165,10 @@ export default function ActivityLog() {
                         <td colSpan={5}>
                           <div className="correct-bar">
                             <span className="correct-label">Mark as</span>
-                            {CATEGORY_LIST.map((c) => (
-                              <button key={c} className="correct-btn" onClick={() => doCorrect(e, c)}>
-                                <span className="dot" style={{ background: CATEGORY_META[c].color }} />
-                                {CATEGORY_META[c].label}
+                            {categories.map((c) => (
+                              <button key={c.id} className="correct-btn" onClick={() => doCorrect(e, c.id)}>
+                                <span className="dot" style={{ background: c.color }} />
+                                {c.label}
                               </button>
                             ))}
                             <button className="correct-btn ignore" onClick={() => doCorrect(e, "ignore")}>

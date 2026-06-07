@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   getDeviceBreakdown,
+  getCategoryDefinitions,
   getGoals,
   getLockinPlan,
   getOutputEvents,
   getStreaks,
   getTodaySummary,
-  insertSampleData,
   onOutputsUpdated,
   onTrackingUpdated,
   toggleGoal,
@@ -28,12 +28,11 @@ function localTodayIso(): string {
 export default function Dashboard({ onNavigate }: { onNavigate: (p: Page) => void }) {
   const [summary, setSummary] = useState<TodaySummary | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [seeding, setSeeding] = useState(false);
   const firstLoad = useRef(true);
 
   const load = useCallback(async () => {
     try {
-      const data = await getTodaySummary();
+      const [data] = await Promise.all([getTodaySummary(), getCategoryDefinitions()]);
       setSummary(data);
       setError(null);
     } catch (e) {
@@ -53,16 +52,6 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: Page) => voi
       unlistenPromise.then((un) => un());
     };
   }, [load]);
-
-  async function seed() {
-    setSeeding(true);
-    try {
-      await insertSampleData();
-      await load();
-    } finally {
-      setSeeding(false);
-    }
-  }
 
   if (!summary && firstLoad.current) {
     return <div className="loading">Loading today's activity…</div>;
@@ -108,12 +97,8 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: Page) => voi
             <h3>No activity tracked yet</h3>
             <p>
               The tracker records the active window every 10 seconds while the app
-              is running. Come back in a moment — or load some sample data to see
-              how the dashboard looks.
+              is running. Come back in a moment and your activity will appear here.
             </p>
-            <button className="btn btn-primary" onClick={seed} disabled={seeding} style={{ marginTop: 8 }}>
-              {seeding ? "Loading…" : "Load sample data"}
-            </button>
           </div>
         </div>
       ) : (

@@ -3,6 +3,7 @@ import {
   deleteAllCapturedContent,
   deleteDomainRule,
   getAccountabilitySettings,
+  getCategoryDefinitions,
   getDomainRules,
   getLlmSettings,
   getPrivacySettings,
@@ -18,11 +19,12 @@ import {
 } from "../api";
 import { previewToast } from "../components/AccountabilityLayer";
 import SyncSettings from "../components/SyncSettings";
-import { CAPTURE_MODE_META, captureModeMeta, CATEGORY_LIST, CATEGORY_META } from "../categories";
+import { CAPTURE_MODE_META, captureModeMeta } from "../categories";
 import type {
   AccountabilitySettings,
   CaptureMode,
   Category,
+  CategoryDefinition,
   DomainRule,
   LlmSettings,
   OllamaTestResult,
@@ -34,6 +36,7 @@ const CAPTURE_MODES: CaptureMode[] = ["text", "meta", "never"];
 export default function PrivacySettings() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [rules, setRules] = useState<DomainRule[]>([]);
+  const [categories, setCategories] = useState<CategoryDefinition[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [resetting, setResetting] = useState(false);
@@ -58,11 +61,12 @@ export default function PrivacySettings() {
 
   const load = useCallback(async () => {
     try {
-      const [s, r, l, a] = await Promise.all([
+      const [s, r, l, a, c] = await Promise.all([
         getPrivacySettings(),
         getDomainRules(),
         getLlmSettings(),
         getAccountabilitySettings(),
+        getCategoryDefinitions(),
       ]);
       setSettings(s);
       setMaxLen(String(s.maxTextLength));
@@ -70,6 +74,7 @@ export default function PrivacySettings() {
       setRetention(String(s.retentionDays));
       setIdleThreshold(String(s.idleThresholdSeconds));
       setRules(r);
+      setCategories(c);
       setLlm(l);
       setLlmUrl(l.url);
       setLlmModel(l.model);
@@ -537,8 +542,8 @@ export default function PrivacySettings() {
           />
           <select className="select" value={newCat} onChange={(e) => setNewCat(e.target.value as Category | "")}>
             <option value="">No category</option>
-            {CATEGORY_LIST.map((c) => (
-              <option key={c} value={c}>{CATEGORY_META[c].label}</option>
+            {categories.map((c) => (
+              <option key={c.id} value={c.id}>{c.label}</option>
             ))}
           </select>
           <select className="select" value={newMode} onChange={(e) => setNewMode(e.target.value as CaptureMode)}>
@@ -576,8 +581,8 @@ export default function PrivacySettings() {
                     onChange={(e) => saveRule(r.domain, (e.target.value || null) as Category | null, r.captureMode, r.aiReview)}
                   >
                     <option value="">No category</option>
-                    {CATEGORY_LIST.map((c) => (
-                      <option key={c} value={c}>{CATEGORY_META[c].label}</option>
+                    {categories.map((c) => (
+                      <option key={c.id} value={c.id}>{c.label}</option>
                     ))}
                   </select>
                 </td>

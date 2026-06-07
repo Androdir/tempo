@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
-import { correctActivity, getActivityDetails } from "../api";
-import { CATEGORY_LIST, CATEGORY_META, contentTypeMeta } from "../categories";
+import { correctActivity, getActivityDetails, getCategoryDefinitions } from "../api";
+import { contentTypeMeta } from "../categories";
 import { CategoryBadge, ProjectTag } from "./ui";
 import { formatDuration } from "../format";
-import type { ActivityDetail } from "../types";
+import type { ActivityDetail, CategoryDefinition } from "../types";
 
 export default function ActivityDetailsDrawer({
   id,
@@ -15,6 +15,7 @@ export default function ActivityDetailsDrawer({
   onCorrected?: () => void;
 }) {
   const [detail, setDetail] = useState<ActivityDetail | null>(null);
+  const [categories, setCategories] = useState<CategoryDefinition[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const loadDetail = useCallback(() => {
@@ -22,6 +23,7 @@ export default function ActivityDetailsDrawer({
     getActivityDetails(id)
       .then(setDetail)
       .catch((e) => setError(String(e)));
+    getCategoryDefinitions().then(setCategories).catch(() => {});
   }, [id]);
 
   useEffect(() => {
@@ -107,10 +109,10 @@ export default function ActivityDetailsDrawer({
             <div className="detail-section">
               <div className="detail-section-title">Correct this activity</div>
               <div className="correct-bar wrap">
-                {CATEGORY_LIST.map((c) => (
-                  <button key={c} className="correct-btn" onClick={() => doCorrect(c)}>
-                    <span className="dot" style={{ background: CATEGORY_META[c].color }} />
-                    {CATEGORY_META[c].label}
+                {categories.map((c) => (
+                  <button key={c.id} className="correct-btn" onClick={() => doCorrect(c.id)}>
+                    <span className="dot" style={{ background: c.color }} />
+                    {c.label}
                   </button>
                 ))}
                 <button className="correct-btn ignore" onClick={() => doCorrect("ignore")}>Ignore</button>

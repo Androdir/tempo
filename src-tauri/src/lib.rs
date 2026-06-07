@@ -33,6 +33,8 @@ pub fn run() {
                 let conn = database.lock().map_err(|e| e.to_string())?;
                 settings::ensure_defaults(&conn)
                     .map_err(|e| format!("failed to seed settings: {e}"))?;
+                models::ensure_category_defaults(&conn)
+                    .map_err(|e| format!("failed to seed categories: {e}"))?;
                 // Enforce data retention once at startup.
                 let retention =
                     settings::get_int(&conn, settings::RETENTION_DAYS, settings::DEFAULT_RETENTION_DAYS);
@@ -63,10 +65,12 @@ pub fn run() {
             commands::get_today_summary,
             commands::get_tracked_apps,
             commands::get_category_rules,
+            commands::get_category_definitions,
+            commands::upsert_category_definition,
+            commands::delete_category_definition,
             commands::set_category_rule,
             commands::delete_category_rule,
             commands::get_daily_review,
-            commands::insert_sample_data,
             commands::get_browser_activity,
             commands::get_activity_details,
             commands::get_domain_rules,

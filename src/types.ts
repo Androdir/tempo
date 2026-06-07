@@ -1,15 +1,18 @@
 // Shared types. Field names are camelCase to match the Rust backend, whose
 // serde structs are annotated with `#[serde(rename_all = "camelCase")]`.
 
-export type Category =
-  | "productive"
-  | "study"
-  | "business"
-  | "neutral"
-  | "distraction"
-  | "recovery";
+export type Category = string;
 
 export type Bucket = "productive" | "neutral" | "distracting";
+
+export interface CategoryDefinition {
+  id: string;
+  label: string;
+  color: string;
+  bucket: Bucket;
+  blurb: string;
+  builtIn: boolean;
+}
 
 /** One app's active time today. `category` is null when the user hasn't tagged it. */
 export interface AppUsage {
