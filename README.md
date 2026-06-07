@@ -676,6 +676,11 @@ database** and view **one shared dashboard**. Local-only mode keeps working unch
 
 ### Set everything up (desktop · Raspberry Pi 500 · phone)
 
+> **New to this, or setting up a Pi with no monitor?** There's a full beginner, copy-paste,
+> *headless* walkthrough (flash the SD card → SSH in → Docker → Tailscale → pair devices) in
+> **[docs/raspberry-pi-setup.md](docs/raspberry-pi-setup.md)**. The summary below is the short
+> version.
+
 Pick your level — each builds on the last:
 
 - **Just the desktop?** Install the desktop app ([Running the app](#running-the-app)) and you're
