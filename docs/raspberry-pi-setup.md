@@ -185,9 +185,9 @@ and `docker compose up -d` again. Only LAN/Tailscale addresses are accepted (clo
 ## Day-to-day
 
 ```bash
-docker compose logs -f tempo-hub   # watch logs
-docker compose restart tempo-hub   # restart
-docker compose pull && docker compose up -d --build   # update after a git pull
+docker compose logs -f tempo-hub                # watch logs
+docker compose restart tempo-hub                # restart
+git pull && docker compose up -d --build        # update to the latest code (data is preserved)
 ```
 Your data lives on the `tempo-data` Docker volume and survives rebuilds. Back it up by copying
 `/var/lib/docker/volumes/` periodically, or `docker compose cp tempo-hub:/data ./backup`.
