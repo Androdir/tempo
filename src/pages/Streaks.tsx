@@ -102,36 +102,42 @@ export default function Streaks() {
         <div className="card card-pad">
           <h2 className="card-title">Manage streaks</h2>
           <p className="card-hint">Turn streaks on/off and tune the thresholds that count as a “win”.</p>
-          <ul className="streak-manage-list">
-            {defs.map((d) => (
-              <li key={d.id} className="streak-manage-row">
-                <span className="folder-icon">{streakIcon(d.id)}</span>
-                <span className="streak-manage-name">{d.name}</span>
-                {THRESHOLD_KINDS.has(d.kind) && (
-                  <label className="folder-num">
-                    <input
-                      className="pf-input"
-                      type="number"
-                      min={1}
-                      defaultValue={d.threshold}
-                      onBlur={(e) => {
-                        const v = parseInt(e.target.value, 10);
-                        if (v > 0 && v !== d.threshold) setThreshold(d.id, v);
-                      }}
-                      onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
-                    />
-                    min
-                  </label>
-                )}
-                <button
-                  className={`pill-toggle ${d.enabled ? "on" : ""}`}
-                  onClick={() => toggle(d.id, !d.enabled)}
-                >
-                  {d.enabled ? "On" : "Off"}
-                </button>
-              </li>
-            ))}
-          </ul>
+          {defs.length === 0 ? (
+            <p className="muted-num" style={{ marginBottom: 0 }}>
+              No streaks created yet.
+            </p>
+          ) : (
+            <ul className="streak-manage-list">
+              {defs.map((d) => (
+                <li key={d.id} className="streak-manage-row">
+                  <span className="folder-icon">{streakIcon(d.id)}</span>
+                  <span className="streak-manage-name">{d.name}</span>
+                  {THRESHOLD_KINDS.has(d.kind) && (
+                    <label className="folder-num">
+                      <input
+                        className="pf-input"
+                        type="number"
+                        min={1}
+                        defaultValue={d.threshold}
+                        onBlur={(e) => {
+                          const v = parseInt(e.target.value, 10);
+                          if (v > 0 && v !== d.threshold) setThreshold(d.id, v);
+                        }}
+                        onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
+                      />
+                      min
+                    </label>
+                  )}
+                  <button
+                    className={`pill-toggle ${d.enabled ? "on" : ""}`}
+                    onClick={() => toggle(d.id, !d.enabled)}
+                  >
+                    {d.enabled ? "On" : "Off"}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
 
@@ -141,8 +147,8 @@ export default function Streaks() {
         <div className="card">
           <div className="empty">
             <div className="empty-glyph">🗓️</div>
-            <h3>No streaks enabled</h3>
-            <p>Enable some in “Manage streaks”, then log a check-in or ship an output to start a run.</p>
+            <h3>No streaks yet</h3>
+            <p>Create streaks when you know what habits you want to track.</p>
           </div>
         </div>
       ) : (

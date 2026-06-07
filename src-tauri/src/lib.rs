@@ -33,10 +33,6 @@ pub fn run() {
                 let conn = database.lock().map_err(|e| e.to_string())?;
                 settings::ensure_defaults(&conn)
                     .map_err(|e| format!("failed to seed settings: {e}"))?;
-                projects::ensure_default_projects(&conn)
-                    .map_err(|e| format!("failed to seed projects: {e}"))?;
-                streaks::ensure_defaults(&conn)
-                    .map_err(|e| format!("failed to seed streaks: {e}"))?;
                 // Enforce data retention once at startup.
                 let retention =
                     settings::get_int(&conn, settings::RETENTION_DAYS, settings::DEFAULT_RETENTION_DAYS);
@@ -137,6 +133,7 @@ pub fn run() {
             commands::set_distraction_intentional,
             commands::get_weekly_review,
             commands::prune_old_data,
+            commands::reset_database,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

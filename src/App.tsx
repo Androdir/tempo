@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Sidebar, { type Page } from "./components/Sidebar";
 import AccountabilityLayer from "./components/AccountabilityLayer";
 import Dashboard from "./pages/Dashboard";
@@ -16,12 +16,33 @@ import WeeklyReview from "./pages/WeeklyReview";
 import Streaks from "./pages/Streaks";
 import PrivacySettings from "./pages/PrivacySettings";
 
+type Theme = "light" | "dark";
+
+function initialTheme(): Theme {
+  if (typeof window === "undefined") return "light";
+  const saved = window.localStorage.getItem("tempo_theme");
+  if (saved === "light" || saved === "dark") return saved;
+  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
 export default function App() {
   const [page, setPage] = useState<Page>("dashboard");
+  const [theme, setTheme] = useState<Theme>(initialTheme);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.style.colorScheme = theme;
+    window.localStorage.setItem("tempo_theme", theme);
+  }, [theme]);
 
   return (
     <div className="app-shell">
-      <Sidebar page={page} onNavigate={setPage} />
+      <Sidebar
+        page={page}
+        theme={theme}
+        onNavigate={setPage}
+        onToggleTheme={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+      />
       <main className="main">
         {page === "dashboard" && <Dashboard onNavigate={setPage} />}
         {page === "goals" && <Goals />}

@@ -100,7 +100,7 @@ export default function Categories() {
   );
 
   return (
-    <>
+    <div className="categories-page">
       <div className="page-head">
         <div>
           <h1 className="page-title">Categories</h1>
@@ -166,7 +166,7 @@ export default function Categories() {
           />
         )}
       </div>
-    </>
+    </div>
   );
 }
 

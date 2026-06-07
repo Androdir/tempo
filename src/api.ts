@@ -235,10 +235,7 @@ export async function getDeviceBreakdown(day: string): Promise<DeviceUsage[]> {
 }
 
 function mockDeviceBreakdown(): DeviceUsage[] {
-  return [
-    { deviceId: "desktop", name: "Desktop", platform: "windows", activeSeconds: 15600, topLabel: "Visual Studio Code", topLabelSeconds: 9000 },
-    { deviceId: "phone", name: "Pixel", platform: "android", activeSeconds: 4800, topLabel: "YouTube", topLabelSeconds: 1500 },
-  ];
+  return [];
 }
 
 export async function getStreakDefinitions(): Promise<StreakDefinition[]> {
@@ -476,14 +473,14 @@ export async function endFocusSession(): Promise<void> {
 export async function getFocusSummary(id: number): Promise<FocusSummary> {
   if (isTauri() || isRemote()) return callBackend<FocusSummary>("get_focus_summary", { id });
   return {
-    goal: mockFocus?.goal ?? "Ship the focus feature",
-    durationMinutes: mockFocus?.durationMinutes ?? 50,
+    goal: mockFocus?.goal ?? "",
+    durationMinutes: mockFocus?.durationMinutes ?? 0,
     status: mockFocus?.status ?? "completed",
-    focusedSeconds: 41 * 60,
-    distractedSeconds: 6 * 60,
-    otherSeconds: 3 * 60,
-    topDistraction: "instagram.com",
-    adherence: 82,
+    focusedSeconds: 0,
+    distractedSeconds: 0,
+    otherSeconds: 0,
+    topDistraction: null,
+    adherence: 0,
   };
 }
 
@@ -505,6 +502,11 @@ export async function pruneOldData(): Promise<number> {
   return 0;
 }
 
+export async function resetDatabase(): Promise<number> {
+  if (isTauri()) return invoke<number>("reset_database");
+  return 0;
+}
+
 // ---------------------------------------------------------------------------
 // Browser-preview mock data (not used inside the Tauri app)
 // ---------------------------------------------------------------------------
@@ -516,27 +518,9 @@ function localDateIso(d = new Date()): string {
   return `${y}-${m}-${day}`;
 }
 
-const mockCategories = new Map<string, Category | null>([
-  ["Visual Studio Code", "productive"],
-  ["Google Chrome", null],
-  ["Notion", "study"],
-  ["Slack", "business"],
-  ["YouTube", "distraction"],
-  ["Spotify", "recovery"],
-  ["Figma", "productive"],
-]);
-
-const mockAppAi = new Map<string, boolean>([["Google Chrome", true]]);
-
-const mockSeconds = new Map<string, number>([
-  ["Visual Studio Code", 3600],
-  ["Google Chrome", 1500],
-  ["Notion", 1200],
-  ["Slack", 900],
-  ["YouTube", 1100],
-  ["Spotify", 600],
-  ["Figma", 800],
-]);
+const mockCategories = new Map<string, Category | null>();
+const mockAppAi = new Map<string, boolean>();
+const mockSeconds = new Map<string, number>();
 
 function mockTrackedApps(): TrackedApp[] {
   return [...mockSeconds]
@@ -574,7 +558,7 @@ function mockSummary(): TodaySummary {
   return {
     date: localDateIso(),
     totalActiveSeconds: totalActive,
-    totalIdleSeconds: 1400,
+    totalIdleSeconds: 0,
     totalBrowserSeconds: browserSeconds,
     perApp: apps.sort((a, b) => b.seconds - a.seconds),
     perWebsite: websites.sort((a, b) => b.seconds - a.seconds),
@@ -590,19 +574,11 @@ function mockSummary(): TodaySummary {
 let mockNotes = "";
 let mockReview: DailyAiReview = {
   date: localDateIso(),
-  verdict: "Solid day. Not flawless, but you moved.",
-  wins: [
-    "90+ min editing / business work",
-    "60+ min coding / building",
-    "Completed main daily goal",
-  ],
-  problems: [
-    "Music / pacing / recovery over 60 min (70m)",
-    "Instagram distraction over 30 min (35m)",
-    "Missed: 60+ min studying",
-  ],
-  tomorrow: "Cut Instagram below 30m to save 15 points.",
-  roast: "instagram.com ate 35m of your day. Riveting content, I'm sure.",
+  verdict: "No activity tracked yet.",
+  wins: [],
+  problems: [],
+  tomorrow: "Add goals or start tracking to generate a review.",
+  roast: "",
   source: "fallback",
   model: null,
   generatedAt: null,
@@ -681,14 +657,7 @@ export async function deleteAllCapturedContent(): Promise<number> {
 // Browser-preview mock data
 // ---------------------------------------------------------------------------
 
-const mockDomainRules = new Map<string, DomainRule>([
-  ["chatgpt.com", { domain: "chatgpt.com", category: "neutral", captureMode: "text", aiReview: true }],
-  ["youtube.com", { domain: "youtube.com", category: "neutral", captureMode: "meta", aiReview: false }],
-  ["instagram.com", { domain: "instagram.com", category: "distraction", captureMode: "meta", aiReview: false }],
-  ["github.com", { domain: "github.com", category: "productive", captureMode: "text", aiReview: false }],
-  ["remnote.com", { domain: "remnote.com", category: "study", captureMode: "text", aiReview: false }],
-  ["chase.com", { domain: "chase.com", category: null, captureMode: "never", aiReview: false }],
-]);
+const mockDomainRules = new Map<string, DomainRule>();
 
 let mockPrivacy: PrivacySettings = {
   capturePageContent: false,
@@ -741,12 +710,7 @@ interface MockPage {
   projectSignals: string[];
 }
 
-const mockPages: MockPage[] = [
-  { id: 1, domain: "chatgpt.com", url: "https://chatgpt.com/c/demo-1", pageTitle: "Hungarian Algorithm — assignment problem", durationSeconds: 1080, contentType: "chat", category: "study", contentSummary: "Walkthrough of the Hungarian Algorithm for the assignment problem and minimum cost matching.", detectedKeywords: ["hungarian algorithm", "assignment problem", "minimum cost", "matching"], projectName: "Exam studying", projectConfidence: 85, projectSignals: ["app/domain: chatgpt.com", "keyword: Hungarian Algorithm"] },
-  { id: 2, domain: "youtube.com", url: "https://youtube.com/watch?v=demo", pageTitle: "Short-form editing: hooks & retention", durationSeconds: 840, contentType: "video", category: "business", contentSummary: "Breakdown of short-form editing, hooks, retention and viral analysis for creators.", detectedKeywords: ["short-form editing", "hooks", "retention", "viral analysis"], projectName: "Video content business", projectConfidence: 85, projectSignals: ["app/domain: youtube.com", "keyword: hooks"] },
-  { id: 3, domain: "instagram.com", url: "https://instagram.com/reels", pageTitle: "Reels", durationSeconds: 720, contentType: "social_feed", category: "distraction", contentSummary: "Endless Reels and Explore feed of short clips.", detectedKeywords: ["reels", "explore", "feed"], projectName: "Video content business", projectConfidence: 50, projectSignals: ["app/domain: instagram.com"] },
-  { id: 4, domain: "github.com", url: "https://github.com/me/tempo", pageTitle: "tempo — src/lib.rs", durationSeconds: 540, contentType: "docs_editor", category: "productive", contentSummary: "Rust source for the Tauri productivity tracker.", detectedKeywords: ["rust", "tauri", "sqlite"], projectName: "Coding", projectConfidence: 50, projectSignals: ["app/domain: github.com"] },
-];
+const mockPages: MockPage[] = [];
 
 function mockWebsites(): WebsiteUsage[] {
   const map = new Map<string, WebsiteUsage>();
@@ -914,12 +878,7 @@ let mockLlm: LlmSettings = {
   lastError: null,
 };
 
-const mockProjects: Project[] = [
-  { id: 1, name: "Exam studying", category: "study", keywords: ["Hungarian Algorithm", "Stable Marriage", "LCS", "suffix trees", "skip lists"], apps: ["RemNote", "PDF reader", "ChatGPT"], domains: ["chatgpt.com", "remnote.com"], priority: 80 },
-  { id: 2, name: "Video content business", category: "business", keywords: ["Premiere", "CapCut", "DaVinci", "hooks", "captions", "TikTok", "Instagram upload", "YouTube Shorts"], apps: ["Premiere Pro", "CapCut", "DaVinci Resolve"], domains: ["tiktok.com", "instagram.com", "youtube.com"], priority: 70 },
-  { id: 3, name: "Coding", category: "productive", keywords: ["bug", "refactor", "compile", "function", "repository", "pull request"], apps: ["Visual Studio Code", "Terminal", "IntelliJ IDEA"], domains: ["github.com", "stackoverflow.com"], priority: 75 },
-  { id: 4, name: "Fitness", category: "recovery", keywords: ["workout", "exercise", "reps", "sets", "protein", "gym"], apps: ["Strava"], domains: ["strava.com", "myfitnesspal.com"], priority: 50 },
-];
+const mockProjects: Project[] = [];
 
 function mockRecentActivity(): ActivityLogEntry[] {
   const web: ActivityLogEntry[] = mockPages.map((p): ActivityLogEntry => ({
@@ -946,13 +905,8 @@ function mockRecentActivity(): ActivityLogEntry[] {
     confidence: p.id === 1 ? 0.6 : 0.85,
     blockKey: `web-${p.id}`,
   }));
-  const apps: ActivityLogEntry[] = [
-    { source: "app", label: "Visual Studio Code", title: "lib.rs — productivity-tracker", seconds: 3600, category: "productive", reason: "Writing Rust for the tracker app", contentType: null, lastSeen: new Date().toISOString(), detailId: null, summary: null, projectName: "Coding", projectConfidence: 50, projectSignals: ["app/domain: Visual Studio Code"], classifier: "llm", llmConfidence: 0.88, confidence: 0.6, blockKey: "app-vscode" },
-    { source: "app", label: "RemNote", title: "Suffix trees & skip lists", seconds: 1500, category: "study", reason: "project: Exam studying (85%)", contentType: null, lastSeen: new Date().toISOString(), detailId: null, summary: null, projectName: "Exam studying", projectConfidence: 85, projectSignals: ["app/domain: RemNote", "keyword: suffix trees", "keyword: skip lists"], classifier: "rule", llmConfidence: null, confidence: 0.9, blockKey: "app-remnote" },
-  ];
-  const screen: ActivityLogEntry[] = [
-    { source: "screen", label: "Visual Studio Code", title: "smart.rs — productivity-tracker", seconds: 0, category: "productive", reason: "manual correction", contentType: null, lastSeen: new Date().toISOString(), detailId: null, summary: "fn capture_and_ocr Result String capture the screen into memory run OCR locally drop pixels classify store summary keywords", projectName: "Coding", projectConfidence: 50, projectSignals: ["app/domain: Visual Studio Code", "keyword: compile"], classifier: "manual", llmConfidence: null, confidence: 0.9, blockKey: "screen-1" },
-  ];
+  const apps: ActivityLogEntry[] = [];
+  const screen: ActivityLogEntry[] = [];
   return [...screen, ...apps, ...web];
 }
 
@@ -1114,23 +1068,19 @@ const SCORE_RULES: MockRuleDef[] = [
 ];
 
 let mockCheckins = {
-  mainGoalCompleted: true,
-  videosPosted: 1,
-  gymLogged: true,
+  mainGoalCompleted: false,
+  videosPosted: 0,
+  gymLogged: false,
   wrestled: false,
   studied: false,
-  editedVideo: true,
+  editedVideo: false,
   analysedContent: false,
 };
-let mockGoalId = 4;
-let mockGoals: Goal[] = [
-  { id: 1, title: "Code for 60 min", project: "Coding", targetMinutes: 60, priority: "high", completed: true, recurring: true },
-  { id: 2, title: "Post 1 video", project: "Video content business", targetMinutes: null, priority: "high", completed: true, recurring: false },
-  { id: 3, title: "Study Hungarian Algorithm for 45 min", project: "Exam studying", targetMinutes: 45, priority: "medium", completed: false, recurring: false },
-];
+let mockGoalId = 1;
+let mockGoals: Goal[] = [];
 let mockWeights: Record<string, number> = {};
 let mockThresholds: Record<string, number> = {};
-const mockStats = { business: 95, study: 40, coding: 120, recovery: 70, instagram: 35, youtube: 20, firstProductiveMin: 570 };
+const mockStats = { business: 0, study: 0, coding: 0, recovery: 0, instagram: 0, youtube: 0, firstProductiveMin: 0 };
 
 function mockScore(): ScoreReport {
   const s = mockStats;
@@ -1154,7 +1104,7 @@ function mockScore(): ScoreReport {
       case "instagram": triggered = s.instagram > (threshold ?? 30); value = `${s.instagram}m`; break;
       case "youtube": triggered = s.youtube > (threshold ?? 45); value = `${s.youtube}m`; break;
       case "recovery": triggered = s.recovery > (threshold ?? 60); value = `${s.recovery}m`; break;
-      case "no_main_goal": triggered = !mainGoalDone; value = triggered ? "not completed" : "completed"; break;
+      case "no_main_goal": triggered = sortedGoals.length > 0 && !mainGoalDone; value = sortedGoals.length ? (triggered ? "not completed" : "completed") : "no goal"; break;
       case "late_start": {
         const cut = (threshold ?? 14) * 60;
         triggered = s.firstProductiveMin > cut;
@@ -1180,7 +1130,9 @@ function mockScore(): ScoreReport {
   ].filter((c) => c.minutes > 0).sort((a, b) => b.minutes - a.minutes);
 
   const leak = biggestLeaks[0];
-  const suggestion = !mainGoalDone
+  const suggestion = !sortedGoals.length
+    ? "Add a main goal and start tracking to build today's score."
+    : !mainGoalDone
     ? "Finish your main goal before 2pm — worth 55 points and removes the penalty."
     : leak
       ? `Cut ${leak.id === "instagram" ? "Instagram" : leak.id === "youtube" ? "YouTube" : "recovery/music time"} below ${leak.threshold}m to save ${Math.abs(leak.weight)} points.`
@@ -1198,7 +1150,7 @@ function mockScore(): ScoreReport {
     mainGoalCompleted: mainGoalDone,
     videosPosted: mockCheckins.videosPosted,
     gymLogged: gymOrWrestle,
-    mainGoalName: sortedGoals[0]?.title ?? "Video content business",
+    mainGoalName: sortedGoals[0]?.title ?? null,
   };
 }
 
@@ -1218,99 +1170,35 @@ function mockRemaining(): number {
 }
 
 function mockWeekly(): WeeklyReview {
-  const H = 3600;
-  const seed = [
-    { p: 4.5, d: 1.2, score: 78 },
-    { p: 2.1, d: 2.6, score: 52 },
-    { p: 5.8, d: 0.6, score: 91 },
-    { p: 3.2, d: 1.8, score: 64 },
-    { p: 1.0, d: 3.1, score: 33 },
-    { p: 4.0, d: 1.0, score: 80 },
-    { p: 3.6, d: 1.4, score: 70 },
-  ];
-  const days: WeeklyDay[] = seed.map((s, i) => {
+  const days: WeeklyDay[] = Array.from({ length: 7 }, (_, i) => {
     const d = new Date();
     d.setDate(d.getDate() - (6 - i));
     return {
       day: localDateIso(d),
       weekday: d.toLocaleDateString(undefined, { weekday: "short" }),
-      score: s.score,
-      productiveSeconds: Math.round(s.p * H),
-      distractionSeconds: Math.round(s.d * H),
-      trackedSeconds: Math.round((s.p + s.d + 1.5) * H),
+      score: 0,
+      productiveSeconds: 0,
+      distractionSeconds: 0,
+      trackedSeconds: 0,
     };
   });
-  const active = days.filter((x) => x.trackedSeconds > 0);
-  const best = active.reduce((a, b) => (b.score > a.score ? b : a));
-  const worst = active.reduce((a, b) => (b.score < a.score ? b : a));
   return {
     startDay: days[0].day,
     endDay: days[days.length - 1].day,
-    productiveSeconds: days.reduce((n, x) => n + x.productiveSeconds, 0),
-    distractionSeconds: days.reduce((n, x) => n + x.distractionSeconds, 0),
-    studySeconds: Math.round(6.5 * H),
-    videosPosted: 5,
-    bestDay: best,
-    worstDay: worst,
-    mostCommonLeak: "instagram.com",
-    mostCommonLeakSeconds: Math.round(3.4 * H),
+    productiveSeconds: 0,
+    distractionSeconds: 0,
+    studySeconds: 0,
+    videosPosted: 0,
+    bestDay: null,
+    worstDay: null,
+    mostCommonLeak: null,
+    mostCommonLeakSeconds: 0,
     days,
   };
 }
 
 function mockTimeline(day: string): TimelineDay {
-  const span = (h: number, m: number, durMin: number) => {
-    const start = new Date(`${day}T00:00:00`);
-    start.setHours(h, m, 0, 0);
-    const end = new Date(start.getTime() + durMin * 60000);
-    return { start: start.toISOString(), end: end.toISOString(), durationSeconds: durMin * 60 };
-  };
-  const mk = (
-    h: number,
-    m: number,
-    durMin: number,
-    source: TimelineBlock["source"],
-    label: string,
-    title: string,
-    category: string,
-    bucket: TimelineBlock["bucket"],
-    opts: Partial<TimelineBlock> = {},
-  ): TimelineBlock => ({
-    source,
-    ...span(h, m, durMin),
-    label,
-    title,
-    category,
-    bucket,
-    project: opts.project ?? null,
-    projectConfidence: opts.projectConfidence ?? 0,
-    confidence: opts.confidence ?? 0.9,
-    classifier: opts.classifier ?? "rule",
-    idle: opts.idle ?? false,
-    summary: opts.summary ?? null,
-    blockKey: `${day}|${source}|${label}|${title}`.toLowerCase(),
-    isWeb: source === "browser",
-    sampleCount: Math.max(1, Math.round(durMin * 6)),
-    longestProductive: false,
-    biggestDistraction: false,
-    firstProductive: false,
-    goalRelated: false,
-    outputLinked: false,
-  });
-
-  const blocks: TimelineBlock[] = [
-    mk(8, 12, 18, "desktop", "VS Code", "tracker.rs — Tempo", "productive", "productive", { project: "Coding", projectConfidence: 85, confidence: 0.92 }),
-    mk(8, 33, 9, "browser", "youtube.com", "Lo-fi beats to code to", "recovery", "neutral", { confidence: 0.6 }),
-    mk(8, 45, 52, "desktop", "VS Code", "commands.rs — Tempo", "productive", "productive", { project: "Coding", projectConfidence: 90, confidence: 0.93 }),
-    mk(9, 40, 14, "browser", "instagram.com", "Instagram", "distraction", "distracting", { confidence: 0.95 }),
-    mk(10, 0, 38, "browser", "chatgpt.com", "Hungarian Algorithm — ChatGPT", "study", "productive", { project: "Exam studying", projectConfidence: 80, classifier: "llm", confidence: 0.82, summary: "Working through assignment problems on the Hungarian algorithm." }),
-    mk(10, 45, 25, "screen", "Premiere Pro", "video_final.prproj", "business", "productive", { project: "Video content business", projectConfidence: 70, classifier: "manual", summary: "Editing timeline; b-roll + captions." }),
-    mk(11, 20, 16, "browser", "mail.google.com", "Inbox (3) — Gmail", "business", "productive", { confidence: 0.7 }),
-    mk(11, 45, 35, "desktop", "Away", "Locked", "neutral", "neutral", { idle: true }),
-    mk(13, 10, 41, "browser", "youtube.com", "How I edit 10x faster", "business", "productive", { project: "Video content business", projectConfidence: 65 }),
-    mk(14, 5, 28, "browser", "instagram.com", "Instagram", "distraction", "distracting", { confidence: 0.95 }),
-    mk(14, 40, 64, "desktop", "VS Code", "Timeline.tsx — Tempo", "productive", "productive", { project: "Coding", projectConfidence: 92, confidence: 0.94 }),
-  ];
+  const blocks: TimelineBlock[] = [];
 
   // Flag highlights exactly the way the backend does.
   const nonIdle = blocks.filter((b) => !b.idle);
@@ -1336,49 +1224,24 @@ function mockTimeline(day: string): TimelineDay {
     day,
     maxGapSeconds: 120,
     blocks,
-    outputs: { videosPosted: 1, gymLogged: true, wrestled: false, studied: true, editedVideo: true, analysedContent: false },
+    outputs: { videosPosted: 0, gymLogged: false, wrestled: false, studied: false, editedVideo: false, analysedContent: false },
     activeSeconds: sum((b) => !b.idle),
     idleSeconds: sum((b) => b.idle),
     productiveSeconds: sum((b) => !b.idle && b.bucket === "productive"),
     distractedSeconds: sum((b) => !b.idle && b.bucket === "distracting"),
     firstProductiveStart: prod.length ? prod[0].start : null,
-    goals: ["Code for 60 min", "Post 1 video", "Study Hungarian Algorithm for 45 min"],
+    goals: [],
   };
 }
 
-let mockFolderId = 3;
-let mockFolders: WatchedFolder[] = [
-  { id: 1, path: "C:\\Users\\you\\Videos\\Exports", label: "Video exports", project: "Video content business", outputType: "video_export", enabled: true, extensions: ["mp4", "mov"], minSizeBytes: 1_000_000, debounceSeconds: 10, createdAt: "2026-01-01T00:00:00Z" },
-  { id: 2, path: "C:\\dev\\tempo", label: "Tempo repo", project: "Coding", outputType: "code_change", enabled: true, extensions: ["rs", "ts", "tsx"], minSizeBytes: 0, debounceSeconds: 3, createdAt: "2026-01-01T00:00:00Z" },
-];
+let mockFolderId = 1;
+let mockFolders: WatchedFolder[] = [];
 
-function mockOutputEvents(day: string): OutputEvent[] {
-  const at = (h: number, m: number) => {
-    const d = new Date(`${day}T00:00:00`);
-    d.setHours(h, m, 0, 0);
-    return d.toISOString();
-  };
-  return [
-    { id: 1, timestamp: at(14, 58), day, folderPath: "C:\\Users\\you\\Videos\\Exports", filePath: "C:\\Users\\you\\Videos\\Exports\\reel_final.mp4", fileName: "reel_final.mp4", extension: "mp4", fileSize: 84_000_000, eventType: "video_export", project: "Video content business", linkedBlockKey: null, linkedLabel: "Premiere Pro", createdAt: at(14, 30), modifiedAt: at(14, 58) },
-    { id: 2, timestamp: at(15, 12), day, folderPath: "C:\\dev\\tempo", filePath: "C:\\dev\\tempo\\src\\pages\\Timeline.tsx", fileName: "Timeline.tsx", extension: "tsx", fileSize: 14_200, eventType: "code_change", project: "Coding", linkedBlockKey: null, linkedLabel: "VS Code", createdAt: null, modifiedAt: at(15, 12) },
-    { id: 3, timestamp: at(10, 5), day, folderPath: "C:\\Users\\you\\Downloads", filePath: "C:\\Users\\you\\Downloads\\hungarian_algorithm.pdf", fileName: "hungarian_algorithm.pdf", extension: "pdf", fileSize: 2_300_000, eventType: "study_material", project: "Exam studying", linkedBlockKey: null, linkedLabel: "chatgpt.com", createdAt: at(10, 5), modifiedAt: at(10, 5) },
-  ];
+function mockOutputEvents(_day: string): OutputEvent[] {
+  return [];
 }
 
-let mockStreakDefs: StreakDefinition[] = [
-  { id: "posted_video", name: "Posted a video", kind: "output", threshold: 0, enabled: true },
-  { id: "main_goal", name: "Completed main goal", kind: "goal", threshold: 0, enabled: true },
-  { id: "coding_60", name: "60+ min coding / building", kind: "category", threshold: 60, enabled: true },
-  { id: "business_90", name: "90+ min business work", kind: "category", threshold: 90, enabled: true },
-  { id: "study_60", name: "60+ min studying", kind: "category", threshold: 60, enabled: true },
-  { id: "studied", name: "Studied", kind: "checkin", threshold: 0, enabled: true },
-  { id: "edited_video", name: "Edited a video", kind: "checkin", threshold: 0, enabled: true },
-  { id: "analysed_content", name: "Analysed content", kind: "checkin", threshold: 0, enabled: true },
-  { id: "gym", name: "Gym", kind: "checkin", threshold: 0, enabled: true },
-  { id: "wrestling", name: "Wrestling", kind: "checkin", threshold: 0, enabled: true },
-  { id: "productive_block_60", name: "60+ min focus block", kind: "block", threshold: 60, enabled: true },
-  { id: "no_major_distraction", name: "No major distraction", kind: "distraction", threshold: 30, enabled: true },
-];
+let mockStreakDefs: StreakDefinition[] = [];
 
 const MOCK_CURRENT: Record<string, number> = {
   posted_video: 3, main_goal: 5, coding_60: 8, business_90: 2, study_60: 4,
@@ -1440,13 +1303,13 @@ const mockLockins: Record<string, LockinPlan> = {};
 function mockGenLockin(day: string): LockinPlan {
   const p: LockinPlan = {
     day,
-    mainMission: "Finish what you ducked: Post 1 video",
-    secondaryMissions: ["One 50-min coding block before noon", "Gym or training"],
-    firstBlock: "Open Premiere by 09:30 — phone in another room, no feeds first.",
-    distractionRule: "No instagram.com until the video is exported — it stole 42m yesterday.",
-    focusMode: "Start a 50-min Focus session on the video; block instagram.com, youtube.com.",
-    avoidTrap: "The trap is opening Instagram 'just to check'. It's never just a check.",
-    roastLine: "42 minutes on Instagram and nothing to show for it. Tomorrow you owe yourself an output.",
+    mainMission: "Add tomorrow's main mission",
+    secondaryMissions: [],
+    firstBlock: "Choose a first focused block after you add a goal.",
+    distractionRule: "No distraction rule yet.",
+    focusMode: "Start a Focus session once you have a mission.",
+    avoidTrap: "No tracked pattern yet.",
+    roastLine: "",
     source: "fallback",
     edited: false,
   };

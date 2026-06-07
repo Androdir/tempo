@@ -10,6 +10,7 @@ import {
   setCheckin,
   setGoalRecurring,
   toggleGoal,
+  updateGoal,
 } from "../api";
 import { isoOffset } from "../components/LockinPlan";
 import type { CheckinState, Goal, GoalDraft, Priority, Project } from "../types";
@@ -37,6 +38,15 @@ export default function Goals() {
   const [target, setTarget] = useState("");
   const [priority, setPriority] = useState<Priority>("medium");
   const [recurring, setRecurring] = useState(false);
+  const [editing, setEditing] = useState<{
+    id: number;
+    title: string;
+    project: string;
+    target: string;
+    priority: Priority;
+    recurring: boolean;
+    completed: boolean;
+  } | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -100,6 +110,41 @@ export default function Goals() {
     }
   }
 
+  function startEdit(g: Goal) {
+    setEditing({
+      id: g.id,
+      title: g.title,
+      project: g.project ?? "",
+      target: g.targetMinutes == null ? "" : String(g.targetMinutes),
+      priority: g.priority,
+      recurring: g.recurring,
+      completed: g.completed,
+    });
+  }
+
+  async function saveEdit(e: FormEvent) {
+    e.preventDefault();
+    if (!editing) return;
+    const t = editing.title.trim();
+    if (!t) return;
+    const minutes = editing.target ? Math.max(1, parseInt(editing.target, 10) || 0) : null;
+    try {
+      await updateGoal({
+        id: editing.id,
+        title: t,
+        project: editing.project || null,
+        targetMinutes: minutes,
+        priority: editing.priority,
+        completed: editing.completed,
+        recurring: editing.recurring,
+      });
+      setEditing(null);
+      await load();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   async function copyYesterday() {
     try {
       await copyPreviousGoals();
@@ -122,6 +167,7 @@ export default function Goals() {
   async function remove(id: number) {
     try {
       await deleteGoal(id);
+      if (editing?.id === id) setEditing(null);
       await load();
     } catch (e) {
       setError(String(e));
@@ -149,6 +195,15 @@ export default function Goals() {
   const total = goals.length;
   const done = goals.filter((g) => g.completed).length;
   const endOfDay = new Date().getHours() >= 18 && total > 0 && done < total;
+  const hasQuickCheckins = Boolean(
+    checkins &&
+      (checkins.videosPosted > 0 ||
+        checkins.gymLogged ||
+        checkins.wrestled ||
+        checkins.studied ||
+        checkins.editedVideo ||
+        checkins.analysedContent),
+  );
 
   return (
     <>
@@ -192,34 +247,95 @@ export default function Goals() {
         ) : (
           <ul className="goal-list">
             {goals.map((g) => (
-              <li key={g.id} className={`goal-row ${g.completed ? "done" : ""}`}>
-                <button
-                  className="goal-check"
-                  onClick={() => toggle(g)}
-                  aria-label={g.completed ? "Mark not done" : "Mark done"}
-                >
-                  {g.completed ? "✓" : ""}
-                </button>
-                <div className="goal-main">
-                  <div className="goal-title">{g.title}</div>
-                  <div className="goal-meta">
-                    <span className={`prio prio-${g.priority}`}>{g.priority}</span>
-                    {g.project && <span className="goal-chip">{g.project}</span>}
-                    {g.targetMinutes != null && <span className="goal-chip">{g.targetMinutes}m</span>}
-                    {g.recurring && <span className="goal-chip recurring">↻ daily</span>}
-                  </div>
-                </div>
-                <button
-                  className={`goal-recur ${g.recurring ? "on" : ""}`}
-                  onClick={() => toggleRecurring(g)}
-                  title={g.recurring ? "Stop repeating daily" : "Repeat this goal daily"}
-                  aria-label="Toggle recurring"
-                >
-                  ↻
-                </button>
-                <button className="goal-del" onClick={() => remove(g.id)} aria-label="Delete goal">
-                  ✕
-                </button>
+              <li key={g.id} className={`goal-row ${g.completed ? "done" : ""} ${editing?.id === g.id ? "editing" : ""}`}>
+                {editing?.id === g.id ? (
+                  <form className="goal-edit-form" onSubmit={saveEdit}>
+                    <input
+                      className="pf-input goal-title-input"
+                      value={editing.title}
+                      onChange={(e) => setEditing({ ...editing, title: e.target.value })}
+                      autoFocus
+                    />
+                    <select
+                      className="pf-select"
+                      value={editing.project}
+                      onChange={(e) => setEditing({ ...editing, project: e.target.value })}
+                    >
+                      <option value="">No project</option>
+                      {projects.map((p) => (
+                        <option key={p.id} value={p.name}>
+                          {p.name}
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      className="pf-input goal-target-input"
+                      type="number"
+                      min="1"
+                      placeholder="min"
+                      value={editing.target}
+                      onChange={(e) => setEditing({ ...editing, target: e.target.value })}
+                    />
+                    <select
+                      className="pf-select"
+                      value={editing.priority}
+                      onChange={(e) => setEditing({ ...editing, priority: e.target.value as Priority })}
+                    >
+                      {PRIORITIES.map((p) => (
+                        <option key={p} value={p}>
+                          {p}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      className={`recur-toggle ${editing.recurring ? "on" : ""}`}
+                      onClick={() => setEditing({ ...editing, recurring: !editing.recurring })}
+                      title="Repeat this goal every day"
+                    >
+                      ↻ daily
+                    </button>
+                    <button className="btn btn-primary" type="submit" disabled={!editing.title.trim()}>
+                      Save
+                    </button>
+                    <button className="btn" type="button" onClick={() => setEditing(null)}>
+                      Cancel
+                    </button>
+                  </form>
+                ) : (
+                  <>
+                    <button
+                      className="goal-check"
+                      onClick={() => toggle(g)}
+                      aria-label={g.completed ? "Mark not done" : "Mark done"}
+                    >
+                      {g.completed ? "✓" : ""}
+                    </button>
+                    <div className="goal-main">
+                      <div className="goal-title">{g.title}</div>
+                      <div className="goal-meta">
+                        <span className={`prio prio-${g.priority}`}>{g.priority}</span>
+                        {g.project && <span className="goal-chip">{g.project}</span>}
+                        {g.targetMinutes != null && <span className="goal-chip">{g.targetMinutes}m</span>}
+                        {g.recurring && <span className="goal-chip recurring">↻ daily</span>}
+                      </div>
+                    </div>
+                    <button className="goal-edit" onClick={() => startEdit(g)} aria-label="Edit goal">
+                      Edit
+                    </button>
+                    <button
+                      className={`goal-recur ${g.recurring ? "on" : ""}`}
+                      onClick={() => toggleRecurring(g)}
+                      title={g.recurring ? "Stop repeating daily" : "Repeat this goal daily"}
+                      aria-label="Toggle recurring"
+                    >
+                      ↻
+                    </button>
+                    <button className="goal-del" onClick={() => remove(g.id)} aria-label="Delete goal">
+                      ✕
+                    </button>
+                  </>
+                )}
               </li>
             ))}
           </ul>
@@ -273,7 +389,7 @@ export default function Goals() {
         </form>
       </div>
 
-      {checkins && (
+      {checkins && hasQuickCheckins && (
         <div className="card card-pad section-gap">
           <h2 className="card-title">Quick check-ins</h2>
           <p className="card-hint">

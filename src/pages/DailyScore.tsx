@@ -62,6 +62,27 @@ export default function DailyScore() {
 
   const r = report;
   const color = VERDICT_COLOR[r.verdict] ?? "#64748b";
+  const checkinPills = [
+    r.mainGoalName || r.mainGoalCompleted ? (
+      <span key="main" className={`ci-pill ${r.mainGoalCompleted ? "on" : "off"}`}>
+        {r.mainGoalCompleted ? "✓" : "○"} Main goal{r.mainGoalName ? `: ${r.mainGoalName}` : ""}
+      </span>
+    ) : null,
+    r.gymLogged ? (
+      <span key="gym" className="ci-pill on">✓ Gym / wrestling</span>
+    ) : null,
+    r.videosPosted > 0 ? (
+      <span key="videos" className="ci-pill on">
+        🎬 {r.videosPosted} video{r.videosPosted === 1 ? "" : "s"}
+      </span>
+    ) : null,
+  ].filter(Boolean);
+  const hasScoreInputs =
+    checkinPills.length > 0 ||
+    r.categoryMinutes.length > 0 ||
+    r.topWins.length > 0 ||
+    r.biggestLeaks.length > 0;
+  const showBreakdown = showWeights || hasScoreInputs;
 
   return (
     <>
@@ -84,43 +105,44 @@ export default function DailyScore() {
         </div>
       </div>
 
-      <div className="card card-pad section-gap">
-        <h2 className="card-title">Check-ins</h2>
-        <p className="card-hint">
-          Your goals &amp; quick check-ins live on the <b>Daily Goals</b> page — they feed this score
-          automatically.
-        </p>
-        <div className="checkin-summary">
-          <span className={`ci-pill ${r.mainGoalCompleted ? "on" : "off"}`}>
-            {r.mainGoalCompleted ? "✓" : "○"} Main goal{r.mainGoalName ? `: ${r.mainGoalName}` : ""}
-          </span>
-          <span className={`ci-pill ${r.gymLogged ? "on" : "off"}`}>
-            {r.gymLogged ? "✓" : "○"} Gym / wrestling
-          </span>
-          <span className={`ci-pill ${r.videosPosted > 0 ? "on" : "off"}`}>
-            🎬 {r.videosPosted} video{r.videosPosted === 1 ? "" : "s"}
-          </span>
+      {checkinPills.length > 0 && (
+        <div className="card card-pad section-gap">
+          <h2 className="card-title">Check-ins</h2>
+          <p className="card-hint">
+            Your goals &amp; quick check-ins live on the <b>Daily Goals</b> page — they feed this score
+            automatically.
+          </p>
+          <div className="checkin-summary">{checkinPills}</div>
         </div>
-      </div>
+      )}
 
-      <div className="two-col section-gap">
-        <div className="card card-pad">
-          <h2 className="card-title">Top wins</h2>
-          {r.topWins.length ? (
-            r.topWins.map((l) => <LineRow key={l.id} l={l} />)
-          ) : (
-            <p className="muted-num">No wins logged yet today.</p>
-          )}
+      {hasScoreInputs ? (
+        <div className="two-col section-gap">
+          <div className="card card-pad">
+            <h2 className="card-title">Top wins</h2>
+            {r.topWins.length ? (
+              r.topWins.map((l) => <LineRow key={l.id} l={l} />)
+            ) : (
+              <p className="muted-num">No wins logged yet today.</p>
+            )}
+          </div>
+          <div className="card card-pad">
+            <h2 className="card-title">Biggest time leaks</h2>
+            {r.biggestLeaks.length ? (
+              r.biggestLeaks.map((l) => <LineRow key={l.id} l={l} />)
+            ) : (
+              <p className="muted-num">No leaks — clean day.</p>
+            )}
+          </div>
         </div>
-        <div className="card card-pad">
-          <h2 className="card-title">Biggest time leaks</h2>
-          {r.biggestLeaks.length ? (
-            r.biggestLeaks.map((l) => <LineRow key={l.id} l={l} />)
-          ) : (
-            <p className="muted-num">No leaks — clean day.</p>
-          )}
+      ) : (
+        <div className="card card-pad section-gap">
+          <h2 className="card-title">No score inputs yet</h2>
+          <p className="card-hint" style={{ margin: 0 }}>
+            Add your own goals or let the tracker collect activity, then the score will populate.
+          </p>
         </div>
-      </div>
+      )}
 
       {r.categoryMinutes.length > 0 && (
         <div className="card card-pad section-gap">
@@ -135,7 +157,7 @@ export default function DailyScore() {
         </div>
       )}
 
-      <div className="card section-gap">
+      {showBreakdown && <div className="card section-gap">
         <div className="card-pad score-breakdown-head">
           <div>
             <h2 className="card-title">Full breakdown</h2>
@@ -214,7 +236,7 @@ export default function DailyScore() {
             </button>
           </div>
         )}
-      </div>
+      </div>}
     </>
   );
 }
@@ -241,4 +263,3 @@ function LineRow({ l }: { l: ScoreLine }) {
     </div>
   );
 }
-

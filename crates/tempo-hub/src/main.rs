@@ -17,7 +17,7 @@ use tiny_http::{Header, Method, Request, Response, Server};
 use tempo_core::db::{self, Db};
 use tempo_core::events::{self, EventBatch};
 use tempo_core::models::{is_valid_category, CheckinState, Goal, LockinPlan};
-use tempo_core::{aggregate, projects, scoring, settings, streaks};
+use tempo_core::{aggregate, projects, scoring, settings};
 
 struct Config {
     pairing_secret: String,
@@ -54,8 +54,6 @@ fn main() {
     {
         let conn = database.lock().expect("db lock");
         let _ = settings::ensure_defaults(&conn);
-        let _ = projects::ensure_default_projects(&conn);
-        let _ = streaks::ensure_defaults(&conn);
         apply_llm_env(&conn);
     }
 

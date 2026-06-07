@@ -449,6 +449,46 @@ pub fn prune_old_data(db: State<'_, Db>) -> Result<i64, String> {
     crate::db::prune(&conn, days).map(|n| n as i64).map_err(|e| e.to_string())
 }
 
+/// Reset all user/application data while preserving the schema.
+#[tauri::command]
+pub fn reset_database(db: State<'_, Db>) -> Result<i64, String> {
+    let mut conn = db.lock().map_err(|e| e.to_string())?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let deletes = [
+        "DELETE FROM sync_errors",
+        "DELETE FROM sync_queue",
+        "DELETE FROM devices",
+        "DELETE FROM synced_events",
+        "DELETE FROM lockin_plans",
+        "DELETE FROM streak_definitions",
+        "DELETE FROM output_events",
+        "DELETE FROM watched_folders",
+        "DELETE FROM daily_review",
+        "DELETE FROM focus_sessions",
+        "DELETE FROM goals",
+        "DELETE FROM daily_checkin",
+        "DELETE FROM manual_corrections",
+        "DELETE FROM projects",
+        "DELETE FROM smart_activity",
+        "DELETE FROM llm_errors",
+        "DELETE FROM llm_classification",
+        "DELETE FROM app_settings",
+        "DELETE FROM domain_rules",
+        "DELETE FROM browser_activity",
+        "DELETE FROM category_rules",
+        "DELETE FROM activity_log",
+    ];
+    let mut removed = 0i64;
+    for sql in deletes {
+        removed += tx.execute(sql, []).map_err(|e| e.to_string())? as i64;
+    }
+    let _ = tx.execute("DELETE FROM sqlite_sequence", []);
+    tx.commit().map_err(|e| e.to_string())?;
+
+    settings::ensure_defaults(&conn).map_err(|e| e.to_string())?;
+    Ok(removed)
+}
+
 #[tauri::command]
 pub fn purge_raw_content(db: State<'_, Db>) -> Result<i64, String> {
     let conn = db.lock().map_err(|e| e.to_string())?;

@@ -33,10 +33,14 @@ const NAV: { id: Page; label: string; icon: string }[] = [
 
 export default function Sidebar({
   page,
+  theme,
   onNavigate,
+  onToggleTheme,
 }: {
   page: Page;
+  theme: "light" | "dark";
   onNavigate: (p: Page) => void;
+  onToggleTheme: () => void;
 }) {
   return (
     <aside className="sidebar">
@@ -62,6 +66,11 @@ export default function Sidebar({
       </nav>
 
       <div className="sidebar-spacer" />
+
+      <button className="theme-toggle" onClick={onToggleTheme} type="button">
+        <span className="theme-toggle-icon">{theme === "dark" ? "☀️" : "🌙"}</span>
+        <span>{theme === "dark" ? "Light mode" : "Dark mode"}</span>
+      </button>
 
       <div className="privacy-card">
         <div className="privacy-title">🔒 Private by design</div>

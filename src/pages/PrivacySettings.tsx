@@ -6,8 +6,10 @@ import {
   getDomainRules,
   getLlmSettings,
   getPrivacySettings,
+  isTauri,
   pruneOldData,
   purgeRawContent,
+  resetDatabase,
   setAccountabilitySetting,
   setDomainRule,
   setLlmSetting,
@@ -34,6 +36,7 @@ export default function PrivacySettings() {
   const [rules, setRules] = useState<DomainRule[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  const [resetting, setResetting] = useState(false);
 
   const [maxLen, setMaxLen] = useState("8000");
   const [smartInterval, setSmartInterval] = useState("60");
@@ -242,6 +245,25 @@ export default function PrivacySettings() {
     const n = await deleteAllCapturedContent();
     await load();
     flash(`Cleared content from ${n} row(s)`);
+  }
+
+  async function onResetDatabase() {
+    if (!isTauri()) {
+      flash("Database reset is available in the desktop app");
+      return;
+    }
+    if (!confirm("Reset Tempo's local database? This deletes activity, projects, goals, rules, reviews, sync data and settings.")) return;
+    if (!confirm("This cannot be undone. Start completely fresh?")) return;
+    setResetting(true);
+    try {
+      const n = await resetDatabase();
+      await load();
+      flash(`Reset database (${n} row(s) removed)`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setResetting(false);
+    }
   }
 
   function copy(text: string, label: string) {
@@ -673,6 +695,23 @@ export default function PrivacySettings() {
         <div className="danger-actions">
           <button className="btn" onClick={onPurge}>Delete raw page text only</button>
           <button className="btn btn-danger" onClick={onDeleteAll}>Delete all captured page content</button>
+        </div>
+      </div>
+
+      <div className="card card-pad section-gap danger-zone">
+        <h2 className="card-title">Reset app data</h2>
+        <p className="card-hint">
+          Wipe the local SQLite data so you can rebuild projects, goals and rules from scratch.
+          Default privacy settings and editable streak definitions are recreated.
+        </p>
+        <div className="danger-actions">
+          <button
+            className="btn btn-danger"
+            onClick={onResetDatabase}
+            disabled={!isTauri() || resetting}
+          >
+            {resetting ? "Resetting…" : "Reset local database"}
+          </button>
         </div>
       </div>
     </>

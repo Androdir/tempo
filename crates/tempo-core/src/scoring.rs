@@ -143,6 +143,7 @@ pub fn build_report(
     let recovery = mins("recovery");
     let insta = stats.instagram_seconds / 60;
     let yt = stats.youtube_seconds / 60;
+    let has_main_goal = main_goal_name.is_some();
 
     let mut raw = 0i64;
     let mut lines: Vec<ScoreLine> = Vec::new();
@@ -152,8 +153,14 @@ pub fn build_report(
         let threshold = eff_threshold(&o, def);
         let (triggered, value): (bool, String) = match def.id {
             "main_goal" => (
-                checkins.main_goal_completed,
-                if checkins.main_goal_completed { "done".into() } else { "not done".into() },
+                has_main_goal && checkins.main_goal_completed,
+                if !has_main_goal {
+                    "no goal".into()
+                } else if checkins.main_goal_completed {
+                    "done".into()
+                } else {
+                    "not done".into()
+                },
             ),
             "posted_video" => (checkins.videos_posted >= 1, format!("{} posted", checkins.videos_posted)),
             "business_min" => (business >= threshold.unwrap_or(90), format!("{business}m")),
@@ -167,8 +174,14 @@ pub fn build_report(
             "youtube" => (yt > threshold.unwrap_or(45), format!("{yt}m")),
             "recovery" => (recovery > threshold.unwrap_or(60), format!("{recovery}m")),
             "no_main_goal" => (
-                !checkins.main_goal_completed,
-                if checkins.main_goal_completed { "completed".into() } else { "not completed".into() },
+                has_main_goal && !checkins.main_goal_completed,
+                if !has_main_goal {
+                    "no goal".into()
+                } else if checkins.main_goal_completed {
+                    "completed".into()
+                } else {
+                    "not completed".into()
+                },
             ),
             "late_start" => {
                 let cutoff = threshold.unwrap_or(14) * 60;
