@@ -11,12 +11,7 @@ use rusqlite::Connection;
 /// Everything needed to decide whether each streak was met on a given day.
 #[derive(Default, Clone)]
 pub struct DayMetrics {
-    pub videos_posted: i64,
-    pub gym_logged: bool,
-    pub wrestled: bool,
-    pub studied: bool,
-    pub edited_video: bool,
-    pub analysed_content: bool,
+    pub checkins: HashMap<String, i64>, // check-in id → value (toggles 0/1, counters 0..N)
     pub main_goal_completed: bool,
     pub video_exports: i64,
     pub editing_changes: i64,
@@ -29,6 +24,9 @@ pub struct DayMetrics {
 impl DayMetrics {
     pub fn cat_min(&self, c: &str) -> i64 {
         self.cat_minutes.get(c).copied().unwrap_or(0)
+    }
+    pub fn checkin(&self, id: &str) -> i64 {
+        self.checkins.get(id).copied().unwrap_or(0)
     }
 }
 
@@ -61,41 +59,26 @@ pub const DEFAULTS: &[(&str, &str, &str, &str, i64)] = &[
 ];
 
 /// Whether a streak's condition was met on a day with the given metrics.
+/// Everything is driven by (kind, metric, threshold); the two seeded streaks
+/// with hybrid conditions (check-in OR detected output) keep their id-based
+/// special case.
 pub fn streak_met(def: &StreakDef, m: &DayMetrics) -> bool {
     let thr = def.threshold.max(1);
     match def.id.as_str() {
-        "posted_video" => m.videos_posted > 0 || m.video_exports > 0,
-        "main_goal" => m.main_goal_completed,
-        "studied" => m.studied,
-        "edited_video" => m.edited_video || m.editing_changes > 0,
-        "analysed_content" => m.analysed_content,
-        "gym" => m.gym_logged,
-        "wrestling" => m.wrestled,
-        "coding_60" => m.cat_min("productive") >= thr,
-        "business_90" => m.cat_min("business") >= thr,
-        "study_60" => m.cat_min("study") >= thr,
-        "productive_block_60" => m.max_productive_block_min >= thr,
-        "no_major_distraction" => m.tracked_min > 0 && m.max_distraction_block_min < thr,
-        // Custom streaks fall back to their kind/metric.
+        "posted_video" => m.checkin("videos_posted") > 0 || m.video_exports > 0,
+        "edited_video" => m.checkin("edited_video") > 0 || m.editing_changes > 0,
         _ => match def.kind.as_str() {
-            "checkin" => match def.metric.as_str() {
-                "studied" => m.studied,
-                "edited_video" => m.edited_video,
-                "analysed_content" => m.analysed_content,
-                "gym_logged" => m.gym_logged,
-                "wrestled" => m.wrestled,
-                "videos_posted" => m.videos_posted > 0,
-                _ => false,
-            },
+            "checkin" => def
+                .metric
+                .split(',')
+                .any(|id| m.checkin(id.trim()) >= thr),
             "goal" => m.main_goal_completed,
             "category" => m.cat_min(&def.metric) >= thr,
-            "output" => {
-                if def.metric == "video_export" {
-                    m.video_exports > 0
-                } else {
-                    false
-                }
-            }
+            "output" => match def.metric.as_str() {
+                "video_export" => m.video_exports >= thr,
+                "editing_project_changed" => m.editing_changes >= thr,
+                _ => false,
+            },
             "block" => m.max_productive_block_min >= thr,
             "distraction" => m.tracked_min > 0 && m.max_distraction_block_min < thr,
             _ => false,
@@ -146,21 +129,103 @@ pub fn best_run(status: &[bool]) -> i64 {
     best
 }
 
+/// Seed the default streaks when none exist yet. Production starts empty (you
+/// create the streaks you actually want); this is used by tests and by the
+/// explicit "Add suggested streaks" action.
 pub fn ensure_defaults(conn: &Connection) -> rusqlite::Result<()> {
     let count: i64 =
         conn.query_row("SELECT COUNT(*) FROM streak_definitions", [], |r| r.get(0)).unwrap_or(0);
     if count > 0 {
         return Ok(());
     }
+    seed_suggested(conn)?;
+    Ok(())
+}
+
+/// Insert every suggested streak that isn't already present. Returns how many
+/// were added. Backs the "Add suggested streaks" button.
+pub fn seed_suggested(conn: &Connection) -> rusqlite::Result<i64> {
     let now = chrono::Utc::now().to_rfc3339();
+    let mut added = 0i64;
     for (i, (id, name, kind, metric, threshold)) in DEFAULTS.iter().enumerate() {
-        conn.execute(
+        added += conn.execute(
             "INSERT OR IGNORE INTO streak_definitions
                (id, name, kind, metric, threshold, enabled, sort_order, best_streak, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, 0, ?7)",
             rusqlite::params![id, name, kind, metric, threshold, i as i64, now],
-        )?;
+        )? as i64;
     }
+    Ok(added)
+}
+
+pub const STREAK_KINDS: [&str; 6] = ["checkin", "goal", "category", "output", "block", "distraction"];
+
+/// Create (or overwrite) a streak definition, validating the metric against the
+/// live check-in / category definitions.
+pub fn add_definition(
+    conn: &Connection,
+    id: &str,
+    name: &str,
+    kind: &str,
+    metric: &str,
+    threshold: i64,
+) -> Result<(), String> {
+    let id = id.trim().to_ascii_lowercase();
+    if id.is_empty()
+        || !id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+    {
+        return Err("Streak id must use lowercase letters, numbers, dashes or underscores".into());
+    }
+    if name.trim().is_empty() {
+        return Err("Streak name is required".into());
+    }
+    if !STREAK_KINDS.contains(&kind) {
+        return Err(format!("Unknown streak kind: {kind}"));
+    }
+    let metric = metric.trim().to_ascii_lowercase();
+    match kind {
+        "checkin" => {
+            if metric.is_empty() {
+                return Err("Pick which check-in this streak tracks".into());
+            }
+            for m in metric.split(',') {
+                if !crate::models::checkin_exists(conn, m.trim()) {
+                    return Err(format!("Unknown check-in: {}", m.trim()));
+                }
+            }
+        }
+        "category" => {
+            if !crate::models::category_exists(conn, &metric) {
+                return Err(format!("Unknown category: {metric}"));
+            }
+        }
+        "output" => {
+            if !["video_export", "editing_project_changed"].contains(&metric.as_str()) {
+                return Err("Output metric must be video_export or editing_project_changed".into());
+            }
+        }
+        _ => {} // goal / block / distraction need no metric
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let sort: i64 = conn
+        .query_row("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM streak_definitions", [], |r| r.get(0))
+        .unwrap_or(0);
+    conn.execute(
+        "INSERT INTO streak_definitions
+           (id, name, kind, metric, threshold, enabled, sort_order, best_streak, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, 0, ?7)
+         ON CONFLICT(id) DO UPDATE SET
+             name = excluded.name, kind = excluded.kind, metric = excluded.metric,
+             threshold = excluded.threshold, updated_at = excluded.updated_at",
+        rusqlite::params![id, name.trim(), kind, metric, threshold.clamp(0, 100_000), sort, now],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn delete_definition(conn: &Connection, id: &str) -> Result<(), String> {
+    conn.execute("DELETE FROM streak_definitions WHERE id = ?1", [id.trim()])
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -243,8 +308,24 @@ mod tests {
         m.video_exports = 1; // detected export alone satisfies it
         assert!(streak_met(&d, &m));
         let mut m2 = DayMetrics::default();
-        m2.videos_posted = 2; // or the manual check-in
+        m2.checkins.insert("videos_posted".into(), 2); // or the manual check-in
         assert!(streak_met(&d, &m2));
+    }
+
+    #[test]
+    fn custom_checkin_streak_reads_metric() {
+        let d = def("growth", "checkin", "growth_research", 0);
+        let mut m = DayMetrics::default();
+        assert!(!streak_met(&d, &m));
+        m.checkins.insert("growth_research".into(), 1);
+        assert!(streak_met(&d, &m));
+        // counter check-in with a threshold: 2+ videos
+        let d2 = def("two_videos", "checkin", "videos_posted", 2);
+        let mut m2 = DayMetrics::default();
+        m2.checkins.insert("videos_posted".into(), 1);
+        assert!(!streak_met(&d2, &m2));
+        m2.checkins.insert("videos_posted".into(), 2);
+        assert!(streak_met(&d2, &m2));
     }
 
     #[test]

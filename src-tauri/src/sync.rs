@@ -53,23 +53,42 @@ fn enqueue(conn: &Connection, e: &SyncEvent) {
     }
 }
 
-/// Parse a `"<day>|v0,v1,…"` snapshot back to ints, or all-zeros if absent or from
-/// a different day (so each new day starts from a clean baseline).
-fn parse_snap_ints(raw: &Option<String>, day: &str, n: usize) -> Vec<i64> {
+/// Parse a `"<day>|field=value,…"` snapshot back to a map, or empty if absent or
+/// from a different day (so each new day starts from a clean baseline).
+fn parse_snap_map(raw: &Option<String>, day: &str) -> std::collections::HashMap<String, i64> {
+    let mut out = std::collections::HashMap::new();
     if let Some(s) = raw {
         if let Some((d, rest)) = s.split_once('|') {
-            if d == day {
-                let vals: Vec<i64> = rest.split(',').filter_map(|x| x.parse().ok()).collect();
-                if vals.len() == n {
-                    return vals;
+            if d == day && !rest.is_empty() {
+                for pair in rest.split(',') {
+                    if let Some((k, v)) = pair.split_once('=') {
+                        if let Ok(v) = v.parse::<i64>() {
+                            out.insert(k.to_string(), v);
+                        }
+                    }
                 }
             }
         }
     }
-    vec![0; n]
+    out
 }
 
-fn checkin_event(day: &str, field: &str, value: i64, now_ms: i64) -> SyncEvent {
+/// One check-in change in transit. The definition (label/icon/kind) rides along
+/// so a check-in created on this device auto-registers on the hub.
+fn checkin_event(
+    day: &str,
+    field: &str,
+    value: i64,
+    def: Option<&tempo_core::models::CheckinDefinition>,
+    now_ms: i64,
+) -> SyncEvent {
+    let metadata = match def {
+        Some(d) => serde_json::json!({
+            "field": field, "value": value,
+            "label": d.label, "icon": d.icon, "kind": d.kind,
+        }),
+        None => serde_json::json!({ "field": field, "value": value }),
+    };
     SyncEvent {
         event_id: format!("checkin:{day}:{field}:{now_ms}"),
         event_type: "checkin".into(),
@@ -82,7 +101,7 @@ fn checkin_event(day: &str, field: &str, value: i64, now_ms: i64) -> SyncEvent {
         duration_seconds: None,
         category: None,
         project: None,
-        metadata: Some(serde_json::json!({ "field": field, "value": value })),
+        metadata: Some(metadata),
     }
 }
 
@@ -311,36 +330,35 @@ pub fn scan_and_enqueue(conn: &Connection) -> i64 {
         let day = chrono::Local::now().format("%Y-%m-%d").to_string();
         let now_ms = chrono::Utc::now().timestamp_millis();
 
-        // --- check-ins (7 fields, column order must match CFIELDS) ---
-        const CFIELDS: [&str; 7] = [
-            "main_goal_completed", "videos_posted", "gym_logged", "wrestled",
-            "studied", "edited_video", "analysed_content",
-        ];
-        let cur = conn
+        // --- check-ins (main_goal_completed + every defined check-in, dynamic) ---
+        let mg: i64 = conn
             .query_row(
-                "SELECT main_goal_completed, videos_posted, gym_logged, wrestled, studied, edited_video, analysed_content
-                 FROM daily_checkin WHERE day = ?1",
+                "SELECT main_goal_completed FROM daily_checkin WHERE day = ?1",
                 [&day],
-                |r| {
-                    Ok([
-                        r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?,
-                        r.get::<_, i64>(4)?, r.get::<_, i64>(5)?, r.get::<_, i64>(6)?,
-                    ])
-                },
+                |r| r.get(0),
             )
-            .unwrap_or([0i64; 7]);
-        let old = parse_snap_ints(&settings::get_setting(conn, "sync_snap_checkin"), &day, 7);
+            .unwrap_or(0);
+        let defs = tempo_core::models::list_checkin_definitions(conn).unwrap_or_default();
+        let values = tempo_core::models::checkin_map_for_day(conn, &day);
+        let mut cur: Vec<(String, i64, Option<&tempo_core::models::CheckinDefinition>)> =
+            vec![("main_goal_completed".to_string(), mg, None)];
+        for d in &defs {
+            cur.push((d.id.clone(), values.get(&d.id).copied().unwrap_or(0), Some(d)));
+        }
+        let old = parse_snap_map(&settings::get_setting(conn, "sync_snap_checkin"), &day);
         let mut changed = false;
-        for (i, field) in CFIELDS.iter().enumerate() {
-            if cur[i] != old.get(i).copied().unwrap_or(0) {
-                enqueue(conn, &checkin_event(&day, field, cur[i], now_ms));
+        for (field, value, def) in &cur {
+            if old.get(field).copied().unwrap_or(0) != *value {
+                enqueue(conn, &checkin_event(&day, field, *value, *def, now_ms));
                 n += 1;
                 changed = true;
             }
         }
         if changed {
-            let snap =
-                format!("{day}|{}", cur.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","));
+            let snap = format!(
+                "{day}|{}",
+                cur.iter().map(|(f, v, _)| format!("{f}={v}")).collect::<Vec<_>>().join(",")
+            );
             let _ = settings::set_setting(conn, "sync_snap_checkin", &snap);
         }
 
@@ -714,8 +732,10 @@ mod tests {
         assert_eq!(scan_and_enqueue(&conn), 0);
 
         // Log a check-in (+ note) and a goal on the desktop.
+        tempo_core::models::ensure_checkin_defaults(&conn).unwrap();
+        tempo_core::models::set_checkin_value(&conn, &day, "gym_logged", 1).unwrap();
         conn.execute(
-            "INSERT INTO daily_checkin (day, gym_logged, notes) VALUES (?1, 1, 'leg day')",
+            "INSERT INTO daily_checkin (day, notes) VALUES (?1, 'leg day')",
             params![day],
         )
         .unwrap();

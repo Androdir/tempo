@@ -1,6 +1,21 @@
-import { useCallback, useEffect, useState } from "react";
-import { getStreakDefinitions, getStreaks, updateStreakDefinition } from "../api";
-import type { Streak, StreakDay, StreakDefinition } from "../types";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  addStreakDefinition,
+  deleteStreakDefinition,
+  getCategoryDefinitions,
+  getCheckinDefinitions,
+  getStreakDefinitions,
+  getStreaks,
+  seedDefaultStreaks,
+  updateStreakDefinition,
+} from "../api";
+import type {
+  CategoryDefinition,
+  CheckinDefinition,
+  Streak,
+  StreakDay,
+  StreakDefinition,
+} from "../types";
 
 export const STREAK_ICON: Record<string, string> = {
   posted_video: "🎬",
@@ -17,11 +32,28 @@ export const STREAK_ICON: Record<string, string> = {
   no_major_distraction: "🛡️",
 };
 
-export function streakIcon(id: string): string {
-  return STREAK_ICON[id] ?? "✅";
+const KIND_ICON: Record<string, string> = {
+  checkin: "✅",
+  goal: "🎯",
+  category: "⏱️",
+  output: "📤",
+  block: "🧠",
+  distraction: "🛡️",
+};
+
+export function streakIcon(id: string, kind?: string): string {
+  return STREAK_ICON[id] ?? KIND_ICON[kind ?? ""] ?? "✅";
 }
 
 const THRESHOLD_KINDS = new Set(["category", "block", "distraction"]);
+
+const KIND_OPTIONS: { value: string; label: string; hint: string }[] = [
+  { value: "checkin", label: "Check-in logged", hint: "met when you tap the check-in that day" },
+  { value: "category", label: "Minutes in a category", hint: "met after N tracked minutes" },
+  { value: "goal", label: "Main goal completed", hint: "met when the top goal is ticked" },
+  { value: "block", label: "Unbroken focus block", hint: "met after one N-minute productive block" },
+  { value: "distraction", label: "No major distraction", hint: "met when no distraction block exceeds N minutes" },
+];
 
 function fmtDay(iso: string): string {
   const d = new Date(`${iso}T00:00:00`);
@@ -46,14 +78,28 @@ export function StreakHeatmap({ calendar }: { calendar: StreakDay[] }) {
 export default function Streaks() {
   const [streaks, setStreaks] = useState<Streak[] | null>(null);
   const [defs, setDefs] = useState<StreakDefinition[]>([]);
+  const [checkinDefs, setCheckinDefs] = useState<CheckinDefinition[]>([]);
+  const [categories, setCategories] = useState<CategoryDefinition[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [manage, setManage] = useState(false);
 
+  const [newName, setNewName] = useState("");
+  const [newKind, setNewKind] = useState("checkin");
+  const [newMetric, setNewMetric] = useState("");
+  const [newThreshold, setNewThreshold] = useState("60");
+
   const load = useCallback(async () => {
     try {
-      const [s, d] = await Promise.all([getStreaks(), getStreakDefinitions()]);
+      const [s, d, c, cats] = await Promise.all([
+        getStreaks(),
+        getStreakDefinitions(),
+        getCheckinDefinitions(),
+        getCategoryDefinitions(),
+      ]);
       setStreaks(s);
       setDefs(d);
+      setCheckinDefs(c);
+      setCategories(cats);
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -64,23 +110,58 @@ export default function Streaks() {
     load();
   }, [load]);
 
-  async function toggle(id: string, enabled: boolean) {
+  const checkinIcon = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const c of checkinDefs) map[c.id] = c.icon;
+    return map;
+  }, [checkinDefs]);
+
+  function iconFor(id: string, kind?: string, metric?: string): string {
+    if (kind === "checkin" && metric) {
+      const first = metric.split(",")[0].trim();
+      if (checkinIcon[first]) return checkinIcon[first];
+    }
+    return streakIcon(id, kind);
+  }
+
+  async function run(fn: () => Promise<unknown>) {
     try {
-      await updateStreakDefinition(id, { enabled });
+      await fn();
       await load();
     } catch (e) {
       setError(String(e));
     }
   }
 
-  async function setThreshold(id: string, threshold: number) {
-    try {
-      await updateStreakDefinition(id, { threshold });
-      await load();
-    } catch (e) {
-      setError(String(e));
+  async function addStreak() {
+    const name = newName.trim();
+    if (!name) {
+      setError("Streak name is required");
+      return;
     }
+    const id = name.toLowerCase().replace(/\s+/g, "_").replace(/[^a-z0-9_-]/g, "");
+    const needsMetric = newKind === "checkin" || newKind === "category";
+    const metric = needsMetric ? newMetric : newKind === "distraction" ? "max_block" : newKind;
+    if (needsMetric && !metric) {
+      setError(newKind === "checkin" ? "Pick a check-in to track" : "Pick a category to track");
+      return;
+    }
+    const threshold = THRESHOLD_KINDS.has(newKind) ? Math.max(1, parseInt(newThreshold, 10) || 0) : 0;
+    await run(() => addStreakDefinition({ id, name, kind: newKind, metric, threshold }));
+    setNewName("");
   }
+
+  async function removeStreak(d: StreakDefinition) {
+    if (!confirm(`Delete streak "${d.name}"? Its history view disappears (check-in data is kept).`)) return;
+    await run(() => deleteStreakDefinition(d.id));
+  }
+
+  const metricOptions =
+    newKind === "checkin"
+      ? checkinDefs.map((c) => ({ value: c.id, label: `${c.icon} ${c.label}` }))
+      : newKind === "category"
+        ? categories.map((c) => ({ value: c.id, label: c.label }))
+        : [];
 
   return (
     <>
@@ -101,16 +182,69 @@ export default function Streaks() {
       {manage && (
         <div className="card card-pad">
           <h2 className="card-title">Manage streaks</h2>
-          <p className="card-hint">Turn streaks on/off and tune the thresholds that count as a “win”.</p>
+          <p className="card-hint">
+            Create streaks for the habits you're building, tune thresholds, or delete the ones that no longer
+            matter.
+          </p>
+
+          <div className="streak-add-row">
+            <input
+              className="search"
+              placeholder="Streak name, e.g. Posted affiliate video"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+            />
+            <select
+              className="select"
+              value={newKind}
+              onChange={(e) => {
+                setNewKind(e.target.value);
+                setNewMetric("");
+              }}
+            >
+              {KIND_OPTIONS.map((k) => (
+                <option key={k.value} value={k.value}>{k.label}</option>
+              ))}
+            </select>
+            {metricOptions.length > 0 && (
+              <select className="select" value={newMetric} onChange={(e) => setNewMetric(e.target.value)}>
+                <option value="">{newKind === "checkin" ? "Pick check-in…" : "Pick category…"}</option>
+                {metricOptions.map((m) => (
+                  <option key={m.value} value={m.value}>{m.label}</option>
+                ))}
+              </select>
+            )}
+            {THRESHOLD_KINDS.has(newKind) && (
+              <label className="folder-num">
+                <input
+                  className="pf-input"
+                  type="number"
+                  min={1}
+                  value={newThreshold}
+                  onChange={(e) => setNewThreshold(e.target.value)}
+                />
+                min
+              </label>
+            )}
+            <button className="btn btn-primary" onClick={addStreak}>
+              Add streak
+            </button>
+          </div>
+          <p className="card-hint">{KIND_OPTIONS.find((k) => k.value === newKind)?.hint}</p>
+
           {defs.length === 0 ? (
             <p className="muted-num" style={{ marginBottom: 0 }}>
-              No streaks created yet.
+              No streaks yet — add one above, or{" "}
+              <button className="link-inline" onClick={() => run(seedDefaultStreaks)}>
+                start from the suggested set
+              </button>
+              .
             </p>
           ) : (
             <ul className="streak-manage-list">
               {defs.map((d) => (
                 <li key={d.id} className="streak-manage-row">
-                  <span className="folder-icon">{streakIcon(d.id)}</span>
+                  <span className="folder-icon">{iconFor(d.id, d.kind, d.metric)}</span>
                   <span className="streak-manage-name">{d.name}</span>
                   {THRESHOLD_KINDS.has(d.kind) && (
                     <label className="folder-num">
@@ -121,7 +255,7 @@ export default function Streaks() {
                         defaultValue={d.threshold}
                         onBlur={(e) => {
                           const v = parseInt(e.target.value, 10);
-                          if (v > 0 && v !== d.threshold) setThreshold(d.id, v);
+                          if (v > 0 && v !== d.threshold) run(() => updateStreakDefinition(d.id, { threshold: v }));
                         }}
                         onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
                       />
@@ -130,9 +264,17 @@ export default function Streaks() {
                   )}
                   <button
                     className={`pill-toggle ${d.enabled ? "on" : ""}`}
-                    onClick={() => toggle(d.id, !d.enabled)}
+                    onClick={() => run(() => updateStreakDefinition(d.id, { enabled: !d.enabled }))}
                   >
                     {d.enabled ? "On" : "Off"}
+                  </button>
+                  <button
+                    className="icon-btn"
+                    title="Delete streak"
+                    aria-label={`Delete ${d.name}`}
+                    onClick={() => removeStreak(d)}
+                  >
+                    ×
                   </button>
                 </li>
               ))}
@@ -148,7 +290,15 @@ export default function Streaks() {
           <div className="empty">
             <div className="empty-glyph">🗓️</div>
             <h3>No streaks yet</h3>
-            <p>Create streaks when you know what habits you want to track.</p>
+            <p>Create streaks for the habits you want to keep, or start from a suggested set.</p>
+            <div className="empty-actions">
+              <button className="btn btn-primary" onClick={() => setManage(true)}>
+                Create a streak
+              </button>
+              <button className="btn" onClick={() => run(seedDefaultStreaks)}>
+                Add suggested streaks
+              </button>
+            </div>
           </div>
         </div>
       ) : (
@@ -156,7 +306,7 @@ export default function Streaks() {
           {streaks.map((s) => (
             <div key={s.id} className={`card card-pad streak-card ${s.current > 0 ? "active" : ""}`}>
               <div className="streak-head">
-                <span className="streak-icon">{streakIcon(s.id)}</span>
+                <span className="streak-icon">{iconFor(s.id, s.kind, s.metric)}</span>
                 <span className="streak-name">{s.name}</span>
               </div>
               <div className="streak-figures">

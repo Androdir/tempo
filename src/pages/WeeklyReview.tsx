@@ -43,8 +43,20 @@ export default function WeeklyReview() {
         <StatCard chip="#16a34a" label="Productive time" value={formatDuration(data.productiveSeconds)} foot="this week" />
         <StatCard chip="#dc2626" label="Distraction time" value={formatDuration(data.distractionSeconds)} foot="this week" />
         <StatCard label="Study time" value={formatDuration(data.studySeconds)} foot="this week" />
-        <StatCard label="Videos posted" value={String(data.videosPosted)} foot="this week" />
       </div>
+
+      {data.checkinTotals.length > 0 && (
+        <div className="card card-pad section-gap">
+          <h2 className="card-title">Check-ins this week</h2>
+          <div className="checkin-summary">
+            {data.checkinTotals.map((c) => (
+              <span key={c.id} className="ci-pill on">
+                {c.icon} {c.label}: {c.kind === "counter" ? `×${c.total}` : `${c.total} day${c.total === 1 ? "" : "s"}`}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="card card-pad section-gap">
         <h2 className="card-title">Daily breakdown</h2>
@@ -122,7 +134,7 @@ function WeeklyStreaks() {
       <div className="weekly-streaks">
         {top.map((s) => (
           <div key={s.id} className="weekly-streak-row">
-            <span className="folder-icon">{streakIcon(s.id)}</span>
+            <span className="folder-icon">{streakIcon(s.id, s.kind)}</span>
             <span className="weekly-streak-name">{s.name}</span>
             <span className="weekly-streak-num">🔥 {s.current}</span>
             <span className="muted-num">best {s.best}</span>

@@ -1,12 +1,23 @@
 import { useCallback, useEffect, useState } from "react";
 import {
+  deleteScoreRule,
+  getCategoryDefinitions,
+  getCheckinDefinitions,
   getDailyScore,
   resetScoringWeights,
   setScoringThreshold,
   setScoringWeight,
+  upsertScoreRule,
 } from "../api";
 import { formatDuration, formatLongDate } from "../format";
-import type { ScoreLine, ScoreReport } from "../types";
+import type {
+  CategoryDefinition,
+  CheckinDefinition,
+  ScoreLine,
+  ScoreReport,
+  ScoreRule,
+  ScoreRuleKind,
+} from "../types";
 
 const VERDICT_COLOR: Record<string, string> = {
   excellent: "#16a34a",
@@ -16,14 +27,38 @@ const VERDICT_COLOR: Record<string, string> = {
   cooked: "#dc2626",
 };
 
+const RULE_KIND_OPTIONS: { value: ScoreRuleKind; label: string; needsMetric: "checkin" | "category" | "text" | "none"; hasThreshold: boolean }[] = [
+  { value: "checkin", label: "Check-in logged", needsMetric: "checkin", hasThreshold: true },
+  { value: "category", label: "Minutes in a category", needsMetric: "category", hasThreshold: true },
+  { value: "target", label: "Minutes on an app/site", needsMetric: "text", hasThreshold: true },
+  { value: "goal", label: "Main goal completed", needsMetric: "none", hasThreshold: false },
+  { value: "no_goal", label: "Main goal NOT completed", needsMetric: "none", hasThreshold: false },
+  { value: "late_start", label: "First productive block after N o'clock", needsMetric: "none", hasThreshold: true },
+];
+
 export default function DailyScore() {
   const [report, setReport] = useState<ScoreReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showWeights, setShowWeights] = useState(false);
+  const [checkinDefs, setCheckinDefs] = useState<CheckinDefinition[]>([]);
+  const [categories, setCategories] = useState<CategoryDefinition[]>([]);
+
+  const [newLabel, setNewLabel] = useState("");
+  const [newKind, setNewKind] = useState<ScoreRuleKind>("checkin");
+  const [newMetric, setNewMetric] = useState("");
+  const [newWeight, setNewWeight] = useState("10");
+  const [newThreshold, setNewThreshold] = useState("1");
 
   const load = useCallback(async () => {
     try {
-      setReport(await getDailyScore());
+      const [r, c, cats] = await Promise.all([
+        getDailyScore(),
+        getCheckinDefinitions(),
+        getCategoryDefinitions(),
+      ]);
+      setReport(r);
+      setCheckinDefs(c);
+      setCategories(cats);
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -41,6 +76,43 @@ export default function DailyScore() {
     } catch (e) {
       setError(String(e));
     }
+  }
+
+  async function addRule() {
+    const label = newLabel.trim();
+    if (!label) {
+      setError("Rule label is required");
+      return;
+    }
+    const kindMeta = RULE_KIND_OPTIONS.find((k) => k.value === newKind);
+    const metric = kindMeta?.needsMetric === "none" ? "" : newMetric.trim().toLowerCase();
+    if (kindMeta?.needsMetric !== "none" && !metric) {
+      setError(
+        kindMeta?.needsMetric === "checkin"
+          ? "Pick which check-in this rule reads"
+          : kindMeta?.needsMetric === "category"
+            ? "Pick a category"
+            : "Enter the app/site name to watch",
+      );
+      return;
+    }
+    const id = label.toLowerCase().replace(/\s+/g, "_").replace(/[^a-z0-9_-]/g, "");
+    const rule: ScoreRule = {
+      id,
+      label,
+      kind: newKind,
+      metric,
+      weight: Math.max(-100, Math.min(100, parseInt(newWeight, 10) || 0)),
+      threshold: kindMeta?.hasThreshold ? Math.max(0, parseInt(newThreshold, 10) || 0) : null,
+      builtIn: false,
+    };
+    await run(() => upsertScoreRule(rule));
+    setNewLabel("");
+  }
+
+  async function removeRule(l: ScoreLine) {
+    if (!confirm(`Delete the rule "${l.label}"?`)) return;
+    await run(() => deleteScoreRule(l.id));
   }
 
   if (error && !report) {
@@ -68,14 +140,12 @@ export default function DailyScore() {
         {r.mainGoalCompleted ? "✓" : "○"} Main goal{r.mainGoalName ? `: ${r.mainGoalName}` : ""}
       </span>
     ) : null,
-    r.gymLogged ? (
-      <span key="gym" className="ci-pill on">✓ Gym / wrestling</span>
-    ) : null,
-    r.videosPosted > 0 ? (
-      <span key="videos" className="ci-pill on">
-        🎬 {r.videosPosted} video{r.videosPosted === 1 ? "" : "s"}
+    ...r.checkins.map((c) => (
+      <span key={c.id} className="ci-pill on">
+        {c.icon} {c.label}
+        {c.kind === "counter" && c.value > 1 ? ` ×${c.value}` : ""}
       </span>
-    ) : null,
+    )),
   ].filter(Boolean);
   const hasScoreInputs =
     checkinPills.length > 0 ||
@@ -164,7 +234,7 @@ export default function DailyScore() {
             <p className="card-hint" style={{ margin: 0 }}>Every rule and its contribution today.</p>
           </div>
           <button className="btn" onClick={() => setShowWeights((v) => !v)}>
-            {showWeights ? "Hide weights" : "Edit weights"}
+            {showWeights ? "Done editing" : "Edit rules"}
           </button>
         </div>
         <table className="app-table">
@@ -174,6 +244,7 @@ export default function DailyScore() {
               <th style={{ width: 90 }}>Today</th>
               {showWeights && <th style={{ width: 170 }}>Weight / threshold</th>}
               <th className="right" style={{ width: 80 }}>Points</th>
+              {showWeights && <th style={{ width: 36 }} />}
             </tr>
           </thead>
           <tbody>
@@ -225,14 +296,100 @@ export default function DailyScore() {
                 >
                   {l.triggered ? (l.weight >= 0 ? `+${l.weight}` : `${l.weight}`) : "—"}
                 </td>
+                {showWeights && (
+                  <td>
+                    <button
+                      className="icon-btn"
+                      title="Delete rule"
+                      aria-label={`Delete ${l.label}`}
+                      onClick={() => removeRule(l)}
+                    >
+                      ×
+                    </button>
+                  </td>
+                )}
               </tr>
             ))}
           </tbody>
         </table>
         {showWeights && (
-          <div className="card-pad" style={{ borderTop: "1px solid var(--border)" }}>
+          <div className="card-pad rule-editor" style={{ borderTop: "1px solid var(--border)" }}>
+            <h3 className="mini-card-title">Add a rule</h3>
+            <p className="card-hint">
+              Positive weights reward hitting the threshold; negative weights penalize going over it.
+            </p>
+            <div className="rule-add-row">
+              <input
+                className="search"
+                placeholder="Label, e.g. Posted 2+ affiliate videos"
+                value={newLabel}
+                onChange={(e) => setNewLabel(e.target.value)}
+              />
+              <select
+                className="select"
+                value={newKind}
+                onChange={(e) => {
+                  setNewKind(e.target.value as ScoreRuleKind);
+                  setNewMetric("");
+                }}
+              >
+                {RULE_KIND_OPTIONS.map((k) => (
+                  <option key={k.value} value={k.value}>{k.label}</option>
+                ))}
+              </select>
+              {RULE_KIND_OPTIONS.find((k) => k.value === newKind)?.needsMetric === "checkin" && (
+                <select className="select" value={newMetric} onChange={(e) => setNewMetric(e.target.value)}>
+                  <option value="">Pick check-in…</option>
+                  {checkinDefs.map((c) => (
+                    <option key={c.id} value={c.id}>{c.icon} {c.label}</option>
+                  ))}
+                </select>
+              )}
+              {RULE_KIND_OPTIONS.find((k) => k.value === newKind)?.needsMetric === "category" && (
+                <select className="select" value={newMetric} onChange={(e) => setNewMetric(e.target.value)}>
+                  <option value="">Pick category…</option>
+                  {categories.map((c) => (
+                    <option key={c.id} value={c.id}>{c.label}</option>
+                  ))}
+                </select>
+              )}
+              {RULE_KIND_OPTIONS.find((k) => k.value === newKind)?.needsMetric === "text" && (
+                <input
+                  className="search"
+                  placeholder="app/site, e.g. tiktok"
+                  value={newMetric}
+                  onChange={(e) => setNewMetric(e.target.value)}
+                />
+              )}
+              <label className="folder-num">
+                <input
+                  className="pf-input"
+                  type="number"
+                  title="weight (points)"
+                  value={newWeight}
+                  onChange={(e) => setNewWeight(e.target.value)}
+                />
+                pts
+              </label>
+              {RULE_KIND_OPTIONS.find((k) => k.value === newKind)?.hasThreshold && (
+                <label className="folder-num">
+                  <input
+                    className="pf-input"
+                    type="number"
+                    min={0}
+                    title="threshold (minutes / count / hour)"
+                    value={newThreshold}
+                    onChange={(e) => setNewThreshold(e.target.value)}
+                  />
+                  thr
+                </label>
+              )}
+              <button className="btn btn-primary" onClick={addRule}>
+                Add rule
+              </button>
+            </div>
             <button className="btn btn-danger" onClick={() => run(resetScoringWeights)}>
-              Reset weights to defaults
+              Reset rules to defaults
             </button>
           </div>
         )}

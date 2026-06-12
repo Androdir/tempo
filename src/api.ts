@@ -9,7 +9,8 @@ import type {
   CategoryDefinition,
   AccountabilitySettings,
   CategoryRule,
-  CheckinState,
+  CheckinDefinition,
+  CheckinValue,
   DailyAiReview,
   DeviceUsage,
   DistractionWarning,
@@ -29,6 +30,7 @@ import type {
   WatchedFolder,
   ScoreLine,
   ScoreReport,
+  ScoreRule,
   Streak,
   SyncStatus,
   StreakDefinition,
@@ -281,23 +283,74 @@ function mockDeviceBreakdown(): DeviceUsage[] {
 }
 
 export async function getStreakDefinitions(): Promise<StreakDefinition[]> {
-  if (isTauri()) return invoke<StreakDefinition[]>("get_streak_definitions");
+  if (isTauri() || isRemote()) return callBackend<StreakDefinition[]>("get_streak_definitions");
   return mockStreakDefs.map((d) => ({ ...d }));
 }
 
 export async function updateStreakDefinition(
   id: string,
-  patch: { enabled?: boolean; threshold?: number },
+  patch: { enabled?: boolean; threshold?: number; name?: string },
 ): Promise<void> {
-  if (isTauri()) {
-    await invoke("update_streak_definition", { id, enabled: patch.enabled, threshold: patch.threshold });
+  if (isTauri() || isRemote()) {
+    await callBackend("update_streak_definition", {
+      id,
+      enabled: patch.enabled,
+      threshold: patch.threshold,
+      name: patch.name,
+    });
     return;
   }
   const d = mockStreakDefs.find((x) => x.id === id);
   if (d) {
     if (patch.enabled !== undefined) d.enabled = patch.enabled;
     if (patch.threshold !== undefined) d.threshold = patch.threshold;
+    if (patch.name !== undefined) d.name = patch.name;
   }
+}
+
+export async function addStreakDefinition(def: {
+  id: string;
+  name: string;
+  kind: string;
+  metric: string;
+  threshold: number;
+}): Promise<void> {
+  if (isTauri() || isRemote()) {
+    await callBackend("add_streak_definition", { ...def });
+    return;
+  }
+  const existing = mockStreakDefs.find((d) => d.id === def.id);
+  if (existing) Object.assign(existing, def, { enabled: true });
+  else mockStreakDefs.push({ ...def, enabled: true });
+}
+
+export async function deleteStreakDefinition(id: string): Promise<void> {
+  if (isTauri() || isRemote()) {
+    await callBackend("delete_streak_definition", { id });
+    return;
+  }
+  mockStreakDefs = mockStreakDefs.filter((d) => d.id !== id);
+}
+
+/** Insert the suggested starter streaks; returns how many were added. */
+export async function seedDefaultStreaks(): Promise<number> {
+  if (isTauri() || isRemote()) return callBackend<number>("seed_default_streaks");
+  const suggested: StreakDefinition[] = [
+    { id: "posted_video", name: "Posted a video", kind: "output", metric: "video_export", threshold: 0, enabled: true },
+    { id: "main_goal", name: "Completed main goal", kind: "goal", metric: "main_goal", threshold: 0, enabled: true },
+    { id: "gym", name: "Gym", kind: "checkin", metric: "gym_logged", threshold: 0, enabled: true },
+    { id: "studied", name: "Studied", kind: "checkin", metric: "studied", threshold: 0, enabled: true },
+    { id: "productive_block_60", name: "60+ min focus block", kind: "block", metric: "productive", threshold: 60, enabled: true },
+    { id: "no_major_distraction", name: "No major distraction", kind: "distraction", metric: "max_block", threshold: 30, enabled: true },
+  ];
+  let added = 0;
+  for (const s of suggested) {
+    if (!mockStreakDefs.some((d) => d.id === s.id)) {
+      mockStreakDefs.push({ ...s });
+      added++;
+    }
+  }
+  return added;
 }
 
 // ---- daily lock-in plan ----
@@ -959,25 +1012,43 @@ export async function setCheckin(field: string, value: number): Promise<void> {
     await callBackend("set_checkin", { field, value });
     return;
   }
-  if (field === "main_goal_completed") mockCheckins.mainGoalCompleted = value !== 0;
-  else if (field === "videos_posted") mockCheckins.videosPosted = Math.max(0, value);
-  else if (field === "gym_logged") mockCheckins.gymLogged = value !== 0;
-  else if (field === "wrestled") mockCheckins.wrestled = value !== 0;
-  else if (field === "studied") mockCheckins.studied = value !== 0;
-  else if (field === "edited_video") mockCheckins.editedVideo = value !== 0;
-  else if (field === "analysed_content") mockCheckins.analysedContent = value !== 0;
+  if (field === "main_goal_completed") {
+    mockMainGoalCompleted = value !== 0;
+    return;
+  }
+  const def = mockCheckinDefs.find((d) => d.id === field);
+  if (def) mockCheckinValues.set(field, def.kind === "counter" ? Math.max(0, value) : value ? 1 : 0);
 }
 
-export async function getCheckins(): Promise<CheckinState> {
-  if (isTauri() || isRemote()) return callBackend<CheckinState>("get_checkins");
-  return {
-    videosPosted: mockCheckins.videosPosted,
-    gymLogged: mockCheckins.gymLogged,
-    wrestled: mockCheckins.wrestled,
-    studied: mockCheckins.studied,
-    editedVideo: mockCheckins.editedVideo,
-    analysedContent: mockCheckins.analysedContent,
-  };
+export async function getCheckins(): Promise<CheckinValue[]> {
+  if (isTauri() || isRemote()) return callBackend<CheckinValue[]>("get_checkins");
+  return mockCheckinDefs.map((d) => ({ ...d, value: mockCheckinValues.get(d.id) ?? 0 }));
+}
+
+export async function getCheckinDefinitions(): Promise<CheckinDefinition[]> {
+  if (isTauri() || isRemote()) return callBackend<CheckinDefinition[]>("get_checkin_definitions");
+  return mockCheckinDefs.map((d) => ({ ...d }));
+}
+
+export async function upsertCheckinDefinition(checkin: CheckinDefinition): Promise<void> {
+  if (isTauri() || isRemote()) {
+    await callBackend("upsert_checkin_definition", { checkin });
+    return;
+  }
+  const i = mockCheckinDefs.findIndex((d) => d.id === checkin.id);
+  if (i >= 0) mockCheckinDefs[i] = { ...checkin, builtIn: mockCheckinDefs[i].builtIn };
+  else mockCheckinDefs.push({ ...checkin, builtIn: false });
+}
+
+export async function deleteCheckinDefinition(id: string): Promise<void> {
+  if (isTauri() || isRemote()) {
+    await callBackend("delete_checkin_definition", { id });
+    return;
+  }
+  mockCheckinDefs = mockCheckinDefs.filter((d) => d.id !== id);
+  mockCheckinValues.delete(id);
+  mockStreakDefs = mockStreakDefs.filter((d) => !(d.kind === "checkin" && d.metric === id));
+  mockScoreRules = mockScoreRules.filter((r) => !(r.kind === "checkin" && r.metric.split(",").includes(id)));
 }
 
 // --------------------------------------------------------------- daily goals
@@ -1060,7 +1131,8 @@ export async function setScoringWeight(id: string, weight: number): Promise<void
     await callBackend("set_scoring_weight", { id, weight });
     return;
   }
-  mockWeights[id] = weight;
+  const r = mockScoreRules.find((x) => x.id === id);
+  if (r) r.weight = weight;
 }
 
 export async function setScoringThreshold(id: string, threshold: number): Promise<void> {
@@ -1068,7 +1140,8 @@ export async function setScoringThreshold(id: string, threshold: number): Promis
     await callBackend("set_scoring_threshold", { id, threshold });
     return;
   }
-  mockThresholds[id] = threshold;
+  const r = mockScoreRules.find((x) => x.id === id);
+  if (r && r.threshold != null) r.threshold = threshold;
 }
 
 export async function resetScoringWeights(): Promise<void> {
@@ -1076,101 +1149,130 @@ export async function resetScoringWeights(): Promise<void> {
     await callBackend("reset_scoring_weights");
     return;
   }
-  mockWeights = {};
-  mockThresholds = {};
+  mockScoreRules = DEFAULT_SCORE_RULES.map((r) => ({ ...r }));
 }
 
-interface MockRuleDef {
-  id: string;
-  label: string;
-  weight: number;
-  threshold: number | null;
-  positive: boolean;
+export async function getScoreRules(): Promise<ScoreRule[]> {
+  if (isTauri() || isRemote()) return callBackend<ScoreRule[]>("get_score_rules");
+  return mockScoreRules.map((r) => ({ ...r }));
 }
 
-const SCORE_RULES: MockRuleDef[] = [
-  { id: "main_goal", label: "Completed main daily goal", weight: 30, threshold: null, positive: true },
-  { id: "posted_video", label: "Posted 1+ videos", weight: 25, threshold: null, positive: true },
-  { id: "business_min", label: "90+ min editing / business work", weight: 20, threshold: 90, positive: true },
-  { id: "study_min", label: "60+ min studying", weight: 15, threshold: 60, positive: true },
-  { id: "coding_min", label: "60+ min coding / building", weight: 15, threshold: 60, positive: true },
-  { id: "gym", label: "Gym / wrestling logged", weight: 10, threshold: null, positive: true },
-  { id: "instagram", label: "Instagram distraction over 30 min", weight: -15, threshold: 30, positive: false },
-  { id: "youtube", label: "YouTube distraction over 45 min", weight: -10, threshold: 45, positive: false },
-  { id: "recovery", label: "Music / pacing / recovery over 60 min", weight: -15, threshold: 60, positive: false },
-  { id: "no_main_goal", label: "No main goal completed", weight: -25, threshold: null, positive: false },
-  { id: "late_start", label: "First productive block after 14:00", weight: -10, threshold: 14, positive: false },
+export async function upsertScoreRule(rule: ScoreRule): Promise<void> {
+  if (isTauri() || isRemote()) {
+    await callBackend("upsert_score_rule", { rule });
+    return;
+  }
+  const i = mockScoreRules.findIndex((r) => r.id === rule.id);
+  if (i >= 0) mockScoreRules[i] = { ...rule, builtIn: mockScoreRules[i].builtIn };
+  else mockScoreRules.push({ ...rule, builtIn: false });
+}
+
+export async function deleteScoreRule(id: string): Promise<void> {
+  if (isTauri() || isRemote()) {
+    await callBackend("delete_score_rule", { id });
+    return;
+  }
+  mockScoreRules = mockScoreRules.filter((r) => r.id !== id);
+}
+
+const DEFAULT_SCORE_RULES: ScoreRule[] = [
+  { id: "main_goal", label: "Completed main daily goal", kind: "goal", metric: "", weight: 30, threshold: null, builtIn: true },
+  { id: "posted_video", label: "Posted 1+ videos", kind: "checkin", metric: "videos_posted", weight: 25, threshold: 1, builtIn: true },
+  { id: "business_min", label: "90+ min editing / business work", kind: "category", metric: "business", weight: 20, threshold: 90, builtIn: true },
+  { id: "study_min", label: "60+ min studying", kind: "category", metric: "study", weight: 15, threshold: 60, builtIn: true },
+  { id: "coding_min", label: "60+ min coding / building", kind: "category", metric: "productive", weight: 15, threshold: 60, builtIn: true },
+  { id: "gym", label: "Gym / wrestling logged", kind: "checkin", metric: "gym_logged,wrestled", weight: 10, threshold: 1, builtIn: true },
+  { id: "instagram", label: "Instagram distraction over 30 min", kind: "target", metric: "instagram", weight: -15, threshold: 30, builtIn: true },
+  { id: "youtube", label: "YouTube distraction over 45 min", kind: "target", metric: "youtube", weight: -10, threshold: 45, builtIn: true },
+  { id: "recovery", label: "Music / pacing / recovery over 60 min", kind: "category", metric: "recovery", weight: -15, threshold: 60, builtIn: true },
+  { id: "no_main_goal", label: "No main goal completed", kind: "no_goal", metric: "", weight: -25, threshold: null, builtIn: true },
+  { id: "late_start", label: "First productive block after 14:00", kind: "late_start", metric: "", weight: -10, threshold: 14, builtIn: true },
 ];
 
-let mockCheckins = {
-  mainGoalCompleted: false,
-  videosPosted: 0,
-  gymLogged: false,
-  wrestled: false,
-  studied: false,
-  editedVideo: false,
-  analysedContent: false,
-};
+const DEFAULT_CHECKIN_DEFS: CheckinDefinition[] = [
+  { id: "videos_posted", label: "Posted video", icon: "🎬", kind: "counter", builtIn: true },
+  { id: "gym_logged", label: "Went gym", icon: "🏋️", kind: "toggle", builtIn: true },
+  { id: "wrestled", label: "Wrestled", icon: "🤼", kind: "toggle", builtIn: true },
+  { id: "studied", label: "Studied", icon: "📚", kind: "toggle", builtIn: true },
+  { id: "edited_video", label: "Edited video", icon: "✂️", kind: "toggle", builtIn: true },
+  { id: "analysed_content", label: "Analysed content", icon: "🔍", kind: "toggle", builtIn: true },
+];
+
+let mockMainGoalCompleted = false;
+let mockCheckinDefs: CheckinDefinition[] = DEFAULT_CHECKIN_DEFS.map((d) => ({ ...d }));
+const mockCheckinValues = new Map<string, number>();
+let mockScoreRules: ScoreRule[] = DEFAULT_SCORE_RULES.map((r) => ({ ...r }));
 let mockGoalId = 1;
 let mockGoals: Goal[] = [];
-let mockWeights: Record<string, number> = {};
-let mockThresholds: Record<string, number> = {};
-const mockStats = { business: 0, study: 0, coding: 0, recovery: 0, instagram: 0, youtube: 0, firstProductiveMin: 0 };
+
+function mockLoggedCheckins(): CheckinValue[] {
+  return mockCheckinDefs
+    .map((d) => ({ ...d, value: mockCheckinValues.get(d.id) ?? 0 }))
+    .filter((c) => c.value > 0);
+}
 
 function mockScore(): ScoreReport {
-  const s = mockStats;
   const sortedGoals = sortMockGoals();
   // Main goal is derived from the top-priority goal when any goals exist.
-  const mainGoalDone = sortedGoals.length ? sortedGoals[0].completed : mockCheckins.mainGoalCompleted;
-  const gymOrWrestle = mockCheckins.gymLogged || mockCheckins.wrestled;
+  const mainGoalDone = sortedGoals.length ? sortedGoals[0].completed : mockMainGoalCompleted;
+  const checkinVal = (metric: string) =>
+    Math.max(...metric.split(",").map((m) => mockCheckinValues.get(m.trim()) ?? 0), 0);
+
   let raw = 0;
-  const lines: ScoreLine[] = SCORE_RULES.map((r) => {
-    const weight = mockWeights[r.id] ?? r.weight;
-    const threshold = r.threshold == null ? null : mockThresholds[r.id] ?? r.threshold;
+  const lines: ScoreLine[] = mockScoreRules.map((r) => {
+    const positive = r.weight >= 0;
     let triggered = false;
     let value = "";
-    switch (r.id) {
-      case "main_goal": triggered = mainGoalDone; value = triggered ? "done" : "not done"; break;
-      case "posted_video": triggered = mockCheckins.videosPosted >= 1; value = `${mockCheckins.videosPosted} posted`; break;
-      case "business_min": triggered = s.business >= (threshold ?? 90); value = `${s.business}m`; break;
-      case "study_min": triggered = s.study >= (threshold ?? 60); value = `${s.study}m`; break;
-      case "coding_min": triggered = s.coding >= (threshold ?? 60); value = `${s.coding}m`; break;
-      case "gym": triggered = gymOrWrestle; value = triggered ? "logged" : "not logged"; break;
-      case "instagram": triggered = s.instagram > (threshold ?? 30); value = `${s.instagram}m`; break;
-      case "youtube": triggered = s.youtube > (threshold ?? 45); value = `${s.youtube}m`; break;
-      case "recovery": triggered = s.recovery > (threshold ?? 60); value = `${s.recovery}m`; break;
-      case "no_main_goal": triggered = sortedGoals.length > 0 && !mainGoalDone; value = sortedGoals.length ? (triggered ? "not completed" : "completed") : "no goal"; break;
-      case "late_start": {
-        const cut = (threshold ?? 14) * 60;
-        triggered = s.firstProductiveMin > cut;
-        value = `first at ${String(Math.floor(s.firstProductiveMin / 60)).padStart(2, "0")}:${String(s.firstProductiveMin % 60).padStart(2, "0")}`;
+    switch (r.kind) {
+      case "goal":
+        triggered = sortedGoals.length > 0 && mainGoalDone;
+        value = sortedGoals.length ? (mainGoalDone ? "done" : "not done") : "no goal";
+        break;
+      case "no_goal":
+        triggered = sortedGoals.length > 0 && !mainGoalDone;
+        value = sortedGoals.length ? (mainGoalDone ? "completed" : "not completed") : "no goal";
+        break;
+      case "checkin": {
+        const v = checkinVal(r.metric);
+        const thr = Math.max(1, r.threshold ?? 1);
+        triggered = v >= thr;
+        value = thr <= 1 && v <= 1 ? (v > 0 ? "logged" : "not logged") : `${v}×`;
         break;
       }
+      // Preview has no tracked time, so time-based rules stay untriggered.
+      case "category":
+      case "target":
+        value = "0m";
+        break;
+      case "late_start":
+        value = "no productive block";
+        break;
+      case "output":
+        value = "0 detected";
+        break;
     }
-    if (triggered) raw += weight;
-    return { id: r.id, label: r.label, weight, threshold, hasThreshold: r.threshold != null, positive: r.positive, triggered, value };
+    if (triggered) raw += r.weight;
+    return {
+      id: r.id,
+      label: r.label,
+      weight: r.weight,
+      threshold: r.threshold,
+      hasThreshold: r.threshold != null,
+      positive,
+      triggered,
+      value,
+    };
   });
 
   const score = Math.max(0, Math.min(100, raw));
   const verdict = score >= 85 ? "excellent" : score >= 70 ? "good" : score >= 50 ? "mid" : score >= 30 ? "bad" : "cooked";
   const topWins = lines.filter((l) => l.positive && l.triggered).sort((a, b) => b.weight - a.weight).slice(0, 3);
   const biggestLeaks = lines.filter((l) => !l.positive && l.triggered).sort((a, b) => a.weight - b.weight).slice(0, 3);
-  const categoryMinutes = [
-    { category: "productive", minutes: s.coding },
-    { category: "business", minutes: s.business },
-    { category: "study", minutes: s.study },
-    { category: "recovery", minutes: s.recovery },
-    { category: "distraction", minutes: s.instagram },
-    { category: "neutral", minutes: s.youtube },
-  ].filter((c) => c.minutes > 0).sort((a, b) => b.minutes - a.minutes);
 
-  const leak = biggestLeaks[0];
   const suggestion = !sortedGoals.length
     ? "Add a main goal and start tracking to build today's score."
     : !mainGoalDone
-    ? "Finish your main goal before 2pm — worth 55 points and removes the penalty."
-    : leak
-      ? `Cut ${leak.id === "instagram" ? "Instagram" : leak.id === "youtube" ? "YouTube" : "recovery/music time"} below ${leak.threshold}m to save ${Math.abs(leak.weight)} points.`
+      ? "Finish your main goal before 2pm — it's worth the most points."
       : "Strong, balanced day — keep the momentum tomorrow.";
 
   return {
@@ -1181,10 +1283,9 @@ function mockScore(): ScoreReport {
     biggestLeaks,
     suggestion,
     lines,
-    categoryMinutes,
+    categoryMinutes: [],
     mainGoalCompleted: mainGoalDone,
-    videosPosted: mockCheckins.videosPosted,
-    gymLogged: gymOrWrestle,
+    checkins: mockLoggedCheckins(),
     mainGoalName: sortedGoals[0]?.title ?? null,
   };
 }
@@ -1223,7 +1324,7 @@ function mockWeekly(): WeeklyReview {
     productiveSeconds: 0,
     distractionSeconds: 0,
     studySeconds: 0,
-    videosPosted: 0,
+    checkinTotals: [],
     bestDay: null,
     worstDay: null,
     mostCommonLeak: null,
@@ -1259,7 +1360,7 @@ function mockTimeline(day: string): TimelineDay {
     day,
     maxGapSeconds: 120,
     blocks,
-    outputs: { videosPosted: 0, gymLogged: false, wrestled: false, studied: false, editedVideo: false, analysedContent: false },
+    outputs: mockLoggedCheckins(),
     activeSeconds: sum((b) => !b.idle),
     idleSeconds: sum((b) => b.idle),
     productiveSeconds: sum((b) => !b.idle && b.bucket === "productive"),

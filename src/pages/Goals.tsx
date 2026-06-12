@@ -3,6 +3,7 @@ import {
   addGoal,
   copyLockinPlanToGoals,
   copyPreviousGoals,
+  deleteCheckinDefinition,
   deleteGoal,
   getCheckins,
   getGoals,
@@ -11,27 +12,23 @@ import {
   setGoalRecurring,
   toggleGoal,
   updateGoal,
+  upsertCheckinDefinition,
 } from "../api";
 import { isoOffset } from "../components/LockinPlan";
-import type { CheckinState, Goal, GoalDraft, Priority, Project } from "../types";
+import type { CheckinDefinition, CheckinValue, Goal, GoalDraft, Priority, Project } from "../types";
 
 const PRIORITIES: Priority[] = ["high", "medium", "low"];
 
-// Quick check-in toggles (videos posted is a separate counter, below).
-const TOGGLES: { field: string; key: keyof CheckinState; label: string; icon: string }[] = [
-  { field: "gym_logged", key: "gymLogged", label: "Went gym", icon: "🏋️" },
-  { field: "wrestled", key: "wrestled", label: "Wrestled", icon: "🤼" },
-  { field: "studied", key: "studied", label: "Studied", icon: "📚" },
-  { field: "edited_video", key: "editedVideo", label: "Edited video", icon: "✂️" },
-  { field: "analysed_content", key: "analysedContent", label: "Analysed content", icon: "🔍" },
-];
+const EMPTY_CHECKIN: CheckinDefinition = { id: "", label: "", icon: "✅", kind: "toggle", builtIn: false };
 
 export default function Goals() {
   const [goals, setGoals] = useState<Goal[]>([]);
-  const [checkins, setCheckins] = useState<CheckinState | null>(null);
+  const [checkins, setCheckins] = useState<CheckinValue[] | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [manageCheckins, setManageCheckins] = useState(false);
+  const [checkinDraft, setCheckinDraft] = useState<CheckinDefinition>({ ...EMPTY_CHECKIN });
 
   const [title, setTitle] = useState("");
   const [project, setProject] = useState("");
@@ -174,18 +171,41 @@ export default function Goals() {
     }
   }
 
-  async function flip(field: string, current: boolean) {
+  async function setValue(id: string, value: number) {
     try {
-      await setCheckin(field, current ? 0 : 1);
+      await setCheckin(id, value);
       await load();
     } catch (e) {
       setError(String(e));
     }
   }
 
-  async function setVideos(n: number) {
+  async function saveCheckinDef() {
+    const id =
+      (checkinDraft.id || checkinDraft.label).trim().toLowerCase().replace(/\s+/g, "_").replace(/[^a-z0-9_-]/g, "");
+    if (!id || !checkinDraft.label.trim()) {
+      setError("Check-in label is required");
+      return;
+    }
     try {
-      await setCheckin("videos_posted", Math.max(0, n));
+      await upsertCheckinDefinition({ ...checkinDraft, id, label: checkinDraft.label.trim() });
+      setCheckinDraft({ ...EMPTY_CHECKIN });
+      await load();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function removeCheckinDef(c: CheckinValue) {
+    if (
+      !confirm(
+        `Delete check-in "${c.label}"? Its history, and any streaks or score rules built on it, will be removed.`,
+      )
+    )
+      return;
+    try {
+      await deleteCheckinDefinition(c.id);
+      if (checkinDraft.id === c.id) setCheckinDraft({ ...EMPTY_CHECKIN });
       await load();
     } catch (e) {
       setError(String(e));
@@ -195,15 +215,6 @@ export default function Goals() {
   const total = goals.length;
   const done = goals.filter((g) => g.completed).length;
   const endOfDay = new Date().getHours() >= 18 && total > 0 && done < total;
-  const hasQuickCheckins = Boolean(
-    checkins &&
-      (checkins.videosPosted > 0 ||
-        checkins.gymLogged ||
-        checkins.wrestled ||
-        checkins.studied ||
-        checkins.editedVideo ||
-        checkins.analysedContent),
-  );
 
   return (
     <>
@@ -389,44 +400,115 @@ export default function Goals() {
         </form>
       </div>
 
-      {checkins && hasQuickCheckins && (
+      {checkins && (
         <div className="card card-pad section-gap">
-          <h2 className="card-title">Quick check-ins</h2>
-          <p className="card-hint">
-            One tap for things the tracker can’t see. These feed your daily score and AI review.
-          </p>
-          <div className="checkin-grid">
-            <div className={`checkin-chip ${checkins.videosPosted > 0 ? "on" : ""}`}>
-              <span className="ci-icon">🎬</span>
-              <span className="ci-label">Posted video</span>
-              <span className="ci-stepper">
-                <button type="button" onClick={() => setVideos(checkins.videosPosted - 1)}>
-                  −
-                </button>
-                <b>{checkins.videosPosted}</b>
-                <button type="button" onClick={() => setVideos(checkins.videosPosted + 1)}>
-                  +
-                </button>
-              </span>
-            </div>
-            {TOGGLES.map((t) => {
-              const on = Boolean(checkins[t.key]);
-              return (
-                <button
-                  key={t.field}
-                  type="button"
-                  className={`checkin-chip ${on ? "on" : ""}`}
-                  onClick={() => flip(t.field, on)}
-                >
-                  <span className="ci-icon">{t.icon}</span>
-                  <span className="ci-label">{t.label}</span>
-                  <span className="ci-state">{on ? "✓" : "+"}</span>
-                </button>
-              );
-            })}
+          <div className="missions-head">
+            <h2 className="card-title">Quick check-ins</h2>
+            <button className="link-btn" onClick={() => setManageCheckins((v) => !v)}>
+              {manageCheckins ? "Done" : "Edit check-ins"}
+            </button>
           </div>
+          <p className="card-hint">
+            One tap for things the tracker can’t see. These feed your daily score, streaks and AI review.
+          </p>
+          {checkins.length === 0 ? (
+            <p className="empty-hint">No check-ins defined — add the habits you want to log below.</p>
+          ) : (
+            <div className="checkin-grid">
+              {checkins.map((c) =>
+                c.kind === "counter" ? (
+                  <div key={c.id} className={`checkin-chip ${c.value > 0 ? "on" : ""}`}>
+                    <span className="ci-icon">{c.icon}</span>
+                    <span className="ci-label">{c.label}</span>
+                    <span className="ci-stepper">
+                      <button type="button" onClick={() => setValue(c.id, c.value - 1)}>
+                        −
+                      </button>
+                      <b>{c.value}</b>
+                      <button type="button" onClick={() => setValue(c.id, c.value + 1)}>
+                        +
+                      </button>
+                    </span>
+                    {manageCheckins && (
+                      <CheckinManageButtons
+                        onEdit={() => setCheckinDraft({ id: c.id, label: c.label, icon: c.icon, kind: c.kind, builtIn: false })}
+                        onDelete={() => removeCheckinDef(c)}
+                      />
+                    )}
+                  </div>
+                ) : (
+                  <div key={c.id} className={`checkin-chip ${c.value > 0 ? "on" : ""}`}>
+                    <button
+                      type="button"
+                      className="checkin-flip"
+                      onClick={() => setValue(c.id, c.value > 0 ? 0 : 1)}
+                    >
+                      <span className="ci-icon">{c.icon}</span>
+                      <span className="ci-label">{c.label}</span>
+                      <span className="ci-state">{c.value > 0 ? "✓" : "+"}</span>
+                    </button>
+                    {manageCheckins && (
+                      <CheckinManageButtons
+                        onEdit={() => setCheckinDraft({ id: c.id, label: c.label, icon: c.icon, kind: c.kind, builtIn: false })}
+                        onDelete={() => removeCheckinDef(c)}
+                      />
+                    )}
+                  </div>
+                ),
+              )}
+            </div>
+          )}
+          {manageCheckins && (
+            <div className="checkin-editor">
+              <input
+                className="search"
+                placeholder="Label, e.g. Posted affiliate video"
+                value={checkinDraft.label}
+                onChange={(e) => setCheckinDraft({ ...checkinDraft, label: e.target.value })}
+              />
+              <input
+                className="search ci-icon-input"
+                placeholder="✅"
+                value={checkinDraft.icon}
+                maxLength={4}
+                onChange={(e) => setCheckinDraft({ ...checkinDraft, icon: e.target.value })}
+                aria-label="Check-in icon (emoji)"
+              />
+              <select
+                className="select"
+                value={checkinDraft.kind}
+                onChange={(e) =>
+                  setCheckinDraft({ ...checkinDraft, kind: e.target.value as CheckinDefinition["kind"] })
+                }
+              >
+                <option value="toggle">Done / not done</option>
+                <option value="counter">Counter (×N)</option>
+              </select>
+              <button className="btn btn-primary" onClick={saveCheckinDef}>
+                {checkinDraft.id ? "Save" : "Add"}
+              </button>
+              {checkinDraft.id && (
+                <button className="btn" onClick={() => setCheckinDraft({ ...EMPTY_CHECKIN })}>
+                  Cancel
+                </button>
+              )}
+            </div>
+          )}
         </div>
       )}
     </>
+  );
+}
+
+function CheckinManageButtons({ onEdit, onDelete }: { onEdit: () => void; onDelete: () => void }) {
+  return (
+    <span className="ci-manage">
+      <button type="button" className="icon-btn" title="Edit check-in" onClick={onEdit}>
+        ✎
+      </button>
+      <button type="button" className="icon-btn" title="Delete check-in" onClick={onDelete}>
+        ×
+      </button>
+    </span>
   );
 }

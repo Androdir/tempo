@@ -511,6 +511,9 @@ pub fn reset_database(db: State<'_, Db>) -> Result<i64, String> {
         "DELETE FROM focus_sessions",
         "DELETE FROM goals",
         "DELETE FROM daily_checkin",
+        "DELETE FROM checkin_values",
+        "DELETE FROM checkin_definitions",
+        "DELETE FROM score_rules",
         "DELETE FROM manual_corrections",
         "DELETE FROM projects",
         "DELETE FROM smart_activity",
@@ -532,6 +535,8 @@ pub fn reset_database(db: State<'_, Db>) -> Result<i64, String> {
 
     settings::ensure_defaults(&conn).map_err(|e| e.to_string())?;
     crate::models::ensure_category_defaults(&conn).map_err(|e| e.to_string())?;
+    crate::models::ensure_checkin_defaults(&conn).map_err(|e| e.to_string())?;
+    scoring::ensure_rule_defaults(&conn).map_err(|e| e.to_string())?;
     Ok(removed)
 }
 
@@ -957,6 +962,7 @@ pub fn get_streak_definitions(db: State<'_, Db>) -> Result<Vec<StreakDefinition>
             id: d.id,
             name: d.name,
             kind: d.kind,
+            metric: d.metric,
             threshold: d.threshold,
             enabled: d.enabled,
         })
@@ -969,6 +975,7 @@ pub fn update_streak_definition(
     id: String,
     enabled: Option<bool>,
     threshold: Option<i64>,
+    name: Option<String>,
 ) -> Result<(), String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
     let now = Utc::now().to_rfc3339();
@@ -986,7 +993,40 @@ pub fn update_streak_definition(
         )
         .map_err(|e| e.to_string())?;
     }
+    if let Some(n) = name.filter(|n| !n.trim().is_empty()) {
+        conn.execute(
+            "UPDATE streak_definitions SET name = ?1, updated_at = ?2 WHERE id = ?3",
+            params![n.trim(), now, id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
     Ok(())
+}
+
+#[tauri::command]
+pub fn add_streak_definition(
+    db: State<'_, Db>,
+    id: String,
+    name: String,
+    kind: String,
+    metric: String,
+    threshold: i64,
+) -> Result<(), String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    crate::streaks::add_definition(&conn, &id, &name, &kind, &metric, threshold)
+}
+
+#[tauri::command]
+pub fn delete_streak_definition(db: State<'_, Db>, id: String) -> Result<(), String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    crate::streaks::delete_definition(&conn, &id)
+}
+
+/// Insert the suggested starter streaks (skipping any already present).
+#[tauri::command]
+pub fn seed_default_streaks(db: State<'_, Db>) -> Result<i64, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    crate::streaks::seed_suggested(&conn).map_err(|e| e.to_string())
 }
 
 // ----------------------------------------------------------- daily lock-in plan
@@ -1047,33 +1087,43 @@ pub fn get_daily_score(db: State<'_, Db>) -> Result<ScoreReport, String> {
 
 #[tauri::command]
 pub fn set_checkin(db: State<'_, Db>, field: String, value: i64) -> Result<(), String> {
-    const FIELDS: [&str; 7] = [
-        "main_goal_completed",
-        "videos_posted",
-        "gym_logged",
-        "wrestled",
-        "studied",
-        "edited_video",
-        "analysed_content",
-    ];
-    if !FIELDS.contains(&field.as_str()) {
-        return Err(format!("unknown check-in: {field}"));
-    }
-    let v = if field == "videos_posted" { value.clamp(0, 99) } else { (value != 0) as i64 };
     let conn = db.lock().map_err(|e| e.to_string())?;
     let day = today();
-    conn.execute("INSERT OR IGNORE INTO daily_checkin (day) VALUES (?1)", params![day])
+    if field == "main_goal_completed" {
+        conn.execute("INSERT OR IGNORE INTO daily_checkin (day) VALUES (?1)", params![day])
+            .map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE daily_checkin SET main_goal_completed = ?1 WHERE day = ?2",
+            params![(value != 0) as i64, day],
+        )
         .map_err(|e| e.to_string())?;
-    // `field` is whitelisted above, so this interpolation is safe.
-    let sql = format!("UPDATE daily_checkin SET {field} = ?1 WHERE day = ?2");
-    conn.execute(&sql, params![v, day]).map_err(|e| e.to_string())?;
-    Ok(())
+        return Ok(());
+    }
+    crate::models::set_checkin_value(&conn, &day, &field, value)
 }
 
 #[tauri::command]
-pub fn get_checkins(db: State<'_, Db>) -> Result<CheckinState, String> {
+pub fn get_checkins(db: State<'_, Db>) -> Result<Vec<CheckinValue>, String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
-    Ok(read_checkin_state(&conn, &today()))
+    Ok(crate::models::checkin_values_for_day(&conn, &today()))
+}
+
+#[tauri::command]
+pub fn get_checkin_definitions(db: State<'_, Db>) -> Result<Vec<CheckinDefinition>, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    crate::models::list_checkin_definitions(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn upsert_checkin_definition(db: State<'_, Db>, checkin: CheckinDefinition) -> Result<(), String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    crate::models::upsert_checkin_definition(&conn, &checkin)
+}
+
+#[tauri::command]
+pub fn delete_checkin_definition(db: State<'_, Db>, id: String) -> Result<(), String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    crate::models::delete_checkin_definition(&conn, &id)
 }
 
 // --------------------------------------------------------------- daily goals
@@ -1302,6 +1352,24 @@ pub fn set_scoring_threshold(db: State<'_, Db>, id: String, threshold: i64) -> R
 pub fn reset_scoring_weights(db: State<'_, Db>) -> Result<(), String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
     scoring::reset(&conn)
+}
+
+#[tauri::command]
+pub fn get_score_rules(db: State<'_, Db>) -> Result<Vec<scoring::ScoreRule>, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    Ok(scoring::list_rules(&conn))
+}
+
+#[tauri::command]
+pub fn upsert_score_rule(db: State<'_, Db>, rule: scoring::ScoreRule) -> Result<(), String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    scoring::upsert_rule(&conn, &rule)
+}
+
+#[tauri::command]
+pub fn delete_score_rule(db: State<'_, Db>, id: String) -> Result<(), String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    scoring::delete_rule(&conn, &id)
 }
 
 // ----------------------------------------------------------- review + demo
@@ -1579,23 +1647,75 @@ mod tests {
         ins_web(&conn, "2026-01-01", "instagram.com", "Feed", 300);
         ins_web(&conn, "2026-01-01", "youtube.com", "Vid", 120);
         let stats = compute_stats_for_day(&conn, "2026-01-01").unwrap();
-        assert_eq!(stats.instagram_seconds, 300);
-        assert_eq!(stats.youtube_seconds, 120);
+        assert_eq!(stats.target_seconds.get("instagram").copied().unwrap_or(0), 300);
+        assert_eq!(stats.target_seconds.get("youtube").copied().unwrap_or(0), 120);
         assert_eq!(stats.cat_seconds.get("productive").copied().unwrap_or(0), 600);
         assert_eq!(stats.cat_seconds.get("distraction").copied().unwrap_or(0), 300);
     }
 
     #[test]
-    fn effective_checkins_uses_top_goal_and_wrestling() {
+    fn effective_checkins_uses_top_goal_and_values() {
         let conn = db::test_conn();
         let day = "2026-02-02";
         conn.execute("INSERT INTO goals (day,title,priority,completed,sort_order,recurring,created_at) VALUES (?1,'A','high',1,0,0,'t')", params![day]).unwrap();
         conn.execute("INSERT INTO goals (day,title,priority,completed,sort_order,recurring,created_at) VALUES (?1,'B','low',0,1,0,'t')", params![day]).unwrap();
-        conn.execute("INSERT INTO daily_checkin (day, wrestled, videos_posted) VALUES (?1, 1, 2)", params![day]).unwrap();
+        crate::models::ensure_checkin_defaults(&conn).unwrap();
+        crate::models::set_checkin_value(&conn, day, "wrestled", 1).unwrap();
+        crate::models::set_checkin_value(&conn, day, "videos_posted", 2).unwrap();
         let c = effective_checkins(&conn, day);
         assert!(c.main_goal_completed); // top-priority goal is completed
-        assert!(c.gym_logged); // wrestled counts as gym
-        assert_eq!(c.videos_posted, 2);
+        assert_eq!(c.values.get("wrestled").copied().unwrap_or(0), 1);
+        assert_eq!(c.values.get("videos_posted").copied().unwrap_or(0), 2);
+
+        // The seeded gym rule reads gym_logged OR wrestled, so wrestling triggers it.
+        let report = score_report_for_day(&conn, day).unwrap();
+        let gym = report.lines.iter().find(|l| l.id == "gym").unwrap();
+        assert!(gym.triggered);
+    }
+
+    #[test]
+    fn custom_checkin_flows_to_score_and_timeline() {
+        let conn = db::test_conn();
+        let day = "2026-02-03";
+        crate::models::upsert_checkin_definition(
+            &conn,
+            &crate::models::CheckinDefinition {
+                id: "growth_research".into(),
+                label: "Growth research".into(),
+                icon: "📈".into(),
+                kind: "toggle".into(),
+                built_in: false,
+            },
+        )
+        .unwrap();
+        crate::scoring::upsert_rule(
+            &conn,
+            &crate::scoring::ScoreRule {
+                id: "growth".into(),
+                label: "Did growth research".into(),
+                kind: "checkin".into(),
+                metric: "growth_research".into(),
+                weight: 10,
+                threshold: Some(1),
+                built_in: false,
+            },
+        )
+        .unwrap();
+        crate::models::set_checkin_value(&conn, day, "growth_research", 1).unwrap();
+
+        let report = score_report_for_day(&conn, day).unwrap();
+        let line = report.lines.iter().find(|l| l.id == "growth").unwrap();
+        assert!(line.triggered);
+        assert!(report.checkins.iter().any(|c| c.id == "growth_research" && c.value == 1));
+
+        let tl = timeline_for_day(&conn, day, 120).unwrap();
+        assert!(tl.outputs.iter().any(|c| c.id == "growth_research"));
+
+        // Deleting the definition removes the value and the dependent rule.
+        crate::models::delete_checkin_definition(&conn, "growth_research").unwrap();
+        let report = score_report_for_day(&conn, day).unwrap();
+        assert!(report.lines.iter().all(|l| l.id != "growth"));
+        assert!(report.checkins.iter().all(|c| c.id != "growth_research"));
     }
 
     #[test]
@@ -1764,12 +1884,9 @@ mod tests {
     fn streaks_compute_consecutive_checkins() {
         let conn = db::test_conn();
         crate::streaks::ensure_defaults(&conn).unwrap();
+        crate::models::ensure_checkin_defaults(&conn).unwrap();
         for off in [0i64, 1, 2] {
-            conn.execute(
-                "INSERT INTO daily_checkin (day, studied) VALUES (?1, 1)",
-                params![local_day(off)],
-            )
-            .unwrap();
+            crate::models::set_checkin_value(&conn, &local_day(off), "studied", 1).unwrap();
         }
         let streaks = compute_streaks(&conn).unwrap();
         let studied = streaks.iter().find(|s| s.id == "studied").unwrap();
@@ -1782,13 +1899,10 @@ mod tests {
     fn streaks_missed_day_breaks_run() {
         let conn = db::test_conn();
         crate::streaks::ensure_defaults(&conn).unwrap();
+        crate::models::ensure_checkin_defaults(&conn).unwrap();
         // studied today and 2 days ago, but NOT yesterday → current run is just today.
         for off in [0i64, 2] {
-            conn.execute(
-                "INSERT INTO daily_checkin (day, studied) VALUES (?1, 1)",
-                params![local_day(off)],
-            )
-            .unwrap();
+            crate::models::set_checkin_value(&conn, &local_day(off), "studied", 1).unwrap();
         }
         let streaks = compute_streaks(&conn).unwrap();
         let studied = streaks.iter().find(|s| s.id == "studied").unwrap();

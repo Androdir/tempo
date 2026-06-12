@@ -166,9 +166,28 @@ export interface ScoreReport {
   lines: ScoreLine[];
   categoryMinutes: CategoryMinutes[];
   mainGoalCompleted: boolean;
-  videosPosted: number;
-  gymLogged: boolean;
+  checkins: CheckinValue[]; // today's logged check-ins (value > 0)
   mainGoalName: string | null;
+}
+
+/** One user-editable daily-score rule. */
+export type ScoreRuleKind =
+  | "checkin"
+  | "category"
+  | "target"
+  | "goal"
+  | "no_goal"
+  | "late_start"
+  | "output";
+
+export interface ScoreRule {
+  id: string;
+  label: string;
+  kind: ScoreRuleKind;
+  metric: string;
+  weight: number;
+  threshold: number | null;
+  builtIn: boolean;
 }
 
 export interface Project {
@@ -203,14 +222,22 @@ export interface GoalDraft {
   recurring: boolean;
 }
 
-/** Current on/off state of the quick daily check-in buttons. */
-export interface CheckinState {
-  videosPosted: number;
-  gymLogged: boolean;
-  wrestled: boolean;
-  studied: boolean;
-  editedVideo: boolean;
-  analysedContent: boolean;
+/** A user-editable check-in definition ("things the tracker can't see"). */
+export interface CheckinDefinition {
+  id: string;
+  label: string;
+  icon: string;
+  kind: "toggle" | "counter";
+  builtIn: boolean;
+}
+
+/** A check-in definition with its value for a day (toggles 0/1, counters 0..N). */
+export interface CheckinValue {
+  id: string;
+  label: string;
+  icon: string;
+  kind: "toggle" | "counter";
+  value: number;
 }
 
 // ----------------------------------------------------------- accountability
@@ -256,13 +283,22 @@ export interface WeeklyDay {
   trackedSeconds: number;
 }
 
+/** Week-long roll-up of one check-in: counters sum values, toggles count days. */
+export interface CheckinTotal {
+  id: string;
+  label: string;
+  icon: string;
+  kind: "toggle" | "counter";
+  total: number;
+}
+
 export interface WeeklyReview {
   startDay: string;
   endDay: string;
   productiveSeconds: number;
   distractionSeconds: number;
   studySeconds: number;
-  videosPosted: number;
+  checkinTotals: CheckinTotal[];
   bestDay: WeeklyDay | null;
   worstDay: WeeklyDay | null;
   mostCommonLeak: string | null;
@@ -320,6 +356,7 @@ export interface StreakDefinition {
   id: string;
   name: string;
   kind: string;
+  metric: string;
   threshold: number;
   enabled: boolean;
 }
@@ -396,20 +433,12 @@ export interface TimelineBlock {
   outputLinked: boolean;
 }
 
-export interface TimelineOutputs {
-  videosPosted: number;
-  gymLogged: boolean;
-  wrestled: boolean;
-  studied: boolean;
-  editedVideo: boolean;
-  analysedContent: boolean;
-}
-
 export interface TimelineDay {
   day: string;
   maxGapSeconds: number;
   blocks: TimelineBlock[];
-  outputs: TimelineOutputs;
+  /** Self-reported check-ins logged for the day (value > 0). */
+  outputs: CheckinValue[];
   activeSeconds: number;
   idleSeconds: number;
   productiveSeconds: number;

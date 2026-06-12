@@ -1664,6 +1664,73 @@ tr.row-dim .tick.off {
   font-variant-numeric: tabular-nums;
 }
 
+/* Inner click target for toggle chips (so manage buttons aren't nested in it). */
+.checkin-flip {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex: 1;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+}
+
+.ci-manage {
+  display: flex;
+  gap: 4px;
+  margin-left: 4px;
+}
+
+/* Add/edit a check-in definition (Goals page). */
+.checkin-editor {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.4fr) 64px minmax(140px, 0.8fr) auto auto;
+  gap: 8px;
+  align-items: center;
+  margin-top: 12px;
+}
+.checkin-editor .search {
+  width: 100%;
+}
+.ci-icon-input {
+  text-align: center;
+}
+
+/* Add a streak (Streaks page) / add a score rule (Daily Score page). */
+.streak-add-row,
+.rule-add-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.streak-add-row .search,
+.rule-add-row .search {
+  flex: 1;
+  min-width: 180px;
+}
+.rule-editor .btn-danger {
+  margin-top: 10px;
+}
+
+.empty-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  margin-top: 12px;
+}
+
+@media (max-width: 760px) {
+  .checkin-editor {
+    grid-template-columns: 1fr 64px;
+  }
+}
+
 /* dashboard "main missions" mini card */
 .missions-head {
   display: flex;

@@ -63,15 +63,6 @@ function Badges({ b }: { b: TimelineBlock }) {
   );
 }
 
-const OUTPUT_CHIPS: { key: keyof TimelineDay["outputs"]; label: string; icon: string }[] = [
-  { key: "videosPosted", label: "Videos posted", icon: "🎬" },
-  { key: "editedVideo", label: "Edited video", icon: "✂️" },
-  { key: "analysedContent", label: "Analysed content", icon: "🔍" },
-  { key: "studied", label: "Studied", icon: "📚" },
-  { key: "gymLogged", label: "Gym", icon: "🏋️" },
-  { key: "wrestled", label: "Wrestled", icon: "🤼" },
-];
-
 export default function Timeline() {
   const [day, setDay] = useState<string>(todayIso());
   const [gap, setGap] = useState<number>(120);
@@ -131,9 +122,7 @@ export default function Timeline() {
       }),
     [blocks, sourceF, projectF, labelF, catF],
   );
-  const hasOutputs =
-    data?.goals.length ||
-    Object.values(data?.outputs ?? {}).some((v) => (typeof v === "number" ? v > 0 : Boolean(v)));
+  const hasOutputs = Boolean(data?.goals.length || (data?.outputs.length ?? 0) > 0);
 
   const maxDur = useMemo(
     () => Math.max(60, ...visible.map((b) => b.durationSeconds)),
@@ -336,17 +325,11 @@ export default function Timeline() {
           {hasOutputs ? (
             <div className="card card-pad tl-outputs">
               <span className="tl-outputs-title">📤 Outputs today</span>
-              {OUTPUT_CHIPS.map((o) => {
-                const raw = data.outputs[o.key];
-                const on = typeof raw === "number" ? raw > 0 : raw;
-                if (!on) return null;
-                const text = typeof raw === "number" && raw > 0 ? `${o.label} ×${raw}` : o.label;
-                return (
-                  <span key={o.key} className="tl-out-chip on">
-                    {o.icon} {text}
-                  </span>
-                );
-              })}
+              {data.outputs.map((c) => (
+                <span key={c.id} className="tl-out-chip on">
+                  {c.icon} {c.kind === "counter" && c.value > 1 ? `${c.label} ×${c.value}` : c.label}
+                </span>
+              ))}
               {data.goals.length > 0 && (
                 <span className="tl-goals" title="Today's goals">🎯 {data.goals.join(" · ")}</span>
               )}

@@ -16,7 +16,7 @@ use tiny_http::{Header, Method, Request, Response, Server};
 
 use tempo_core::db::{self, Db};
 use tempo_core::events::{self, EventBatch};
-use tempo_core::models::{self, CheckinState, Goal, LockinPlan};
+use tempo_core::models::{self, Goal, LockinPlan};
 use tempo_core::{aggregate, projects, scoring, settings};
 
 struct Config {
@@ -55,6 +55,8 @@ fn main() {
         let conn = database.lock().expect("db lock");
         let _ = settings::ensure_defaults(&conn);
         let _ = models::ensure_category_defaults(&conn);
+        let _ = models::ensure_checkin_defaults(&conn);
+        let _ = scoring::ensure_rule_defaults(&conn);
         apply_llm_env(&conn);
     }
 
@@ -548,22 +550,36 @@ fn dispatch(conn: &Connection, cmd: &str, args: &Value) -> Result<Value, String>
             update_goal_row(conn, goal)?;
             Ok(Value::Null)
         }
-        "get_checkins" => Ok(serde_json::to_value(checkin_state(conn, &day)).unwrap()),
+        "get_checkins" => Ok(serde_json::to_value(models::checkin_values_for_day(conn, &day)).unwrap()),
         "set_checkin" => {
-            const FIELDS: [&str; 7] = [
-                "main_goal_completed", "videos_posted", "gym_logged", "wrestled", "studied",
-                "edited_video", "analysed_content",
-            ];
             let field = args.get("field").and_then(|v| v.as_str()).ok_or("missing field")?;
-            if !FIELDS.contains(&field) {
-                return Err(format!("unknown check-in: {field}"));
-            }
             let raw = args.get("value").and_then(|v| v.as_i64()).unwrap_or(0);
-            let value = if field == "videos_posted" { raw.clamp(0, 99) } else { (raw != 0) as i64 };
-            conn.execute("INSERT OR IGNORE INTO daily_checkin (day) VALUES (?1)", params![day])
+            if field == "main_goal_completed" {
+                conn.execute("INSERT OR IGNORE INTO daily_checkin (day) VALUES (?1)", params![day])
+                    .map_err(|e| e.to_string())?;
+                conn.execute(
+                    "UPDATE daily_checkin SET main_goal_completed = ?1 WHERE day = ?2",
+                    params![(raw != 0) as i64, day],
+                )
                 .map_err(|e| e.to_string())?;
-            conn.execute(&format!("UPDATE daily_checkin SET {field} = ?1 WHERE day = ?2"), params![value, day])
-                .map_err(|e| e.to_string())?;
+            } else {
+                models::set_checkin_value(conn, &day, field, raw)?;
+            }
+            Ok(Value::Null)
+        }
+        "get_checkin_definitions" => {
+            Ok(serde_json::to_value(models::list_checkin_definitions(conn).map_err(|e| e.to_string())?).unwrap())
+        }
+        "upsert_checkin_definition" => {
+            let checkin: models::CheckinDefinition =
+                serde_json::from_value(args.get("checkin").cloned().ok_or("missing checkin")?)
+                    .map_err(|e| e.to_string())?;
+            models::upsert_checkin_definition(conn, &checkin)?;
+            Ok(Value::Null)
+        }
+        "delete_checkin_definition" => {
+            let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing id")?;
+            models::delete_checkin_definition(conn, id)?;
             Ok(Value::Null)
         }
         "toggle_goal" => {
@@ -603,6 +619,77 @@ fn dispatch(conn: &Connection, cmd: &str, args: &Value) -> Result<Value, String>
         "reset_scoring_weights" => {
             scoring::reset(conn)?;
             Ok(Value::Null)
+        }
+        "get_score_rules" => Ok(serde_json::to_value(scoring::list_rules(conn)).unwrap()),
+        "upsert_score_rule" => {
+            let rule: scoring::ScoreRule =
+                serde_json::from_value(args.get("rule").cloned().ok_or("missing rule")?)
+                    .map_err(|e| e.to_string())?;
+            scoring::upsert_rule(conn, &rule)?;
+            Ok(Value::Null)
+        }
+        "delete_score_rule" => {
+            let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing id")?;
+            scoring::delete_rule(conn, id)?;
+            Ok(Value::Null)
+        }
+        "get_streak_definitions" => {
+            let defs: Vec<models::StreakDefinition> = tempo_core::streaks::load_defs(conn)
+                .into_iter()
+                .map(|d| models::StreakDefinition {
+                    id: d.id,
+                    name: d.name,
+                    kind: d.kind,
+                    metric: d.metric,
+                    threshold: d.threshold,
+                    enabled: d.enabled,
+                })
+                .collect();
+            Ok(serde_json::to_value(defs).unwrap())
+        }
+        "update_streak_definition" => {
+            let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing id")?;
+            let now = chrono::Utc::now().to_rfc3339();
+            if let Some(en) = args.get("enabled").and_then(|v| v.as_bool()) {
+                conn.execute(
+                    "UPDATE streak_definitions SET enabled = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![en as i64, now, id],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            if let Some(th) = args.get("threshold").and_then(|v| v.as_i64()) {
+                conn.execute(
+                    "UPDATE streak_definitions SET threshold = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![th.clamp(0, 100_000), now, id],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            if let Some(name) = args.get("name").and_then(|v| v.as_str()).filter(|n| !n.trim().is_empty()) {
+                conn.execute(
+                    "UPDATE streak_definitions SET name = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![name.trim(), now, id],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            Ok(Value::Null)
+        }
+        "add_streak_definition" => {
+            let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let kind = args.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+            let metric = args.get("metric").and_then(|v| v.as_str()).unwrap_or("");
+            let threshold = args.get("threshold").and_then(|v| v.as_i64()).unwrap_or(0);
+            tempo_core::streaks::add_definition(conn, id, name, kind, metric, threshold)?;
+            Ok(Value::Null)
+        }
+        "delete_streak_definition" => {
+            let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing id")?;
+            tempo_core::streaks::delete_definition(conn, id)?;
+            Ok(Value::Null)
+        }
+        "seed_default_streaks" => {
+            Ok(serde_json::to_value(tempo_core::streaks::seed_suggested(conn).map_err(|e| e.to_string())?)
+                .unwrap())
         }
         "set_daily_note" => {
             let notes = args.get("notes").and_then(|v| v.as_str()).unwrap_or("");
@@ -720,32 +807,6 @@ fn device_breakdown(conn: &Connection, day: &str) -> Result<Value, String> {
         b["activeSeconds"].as_i64().unwrap_or(0).cmp(&a["activeSeconds"].as_i64().unwrap_or(0))
     });
     Ok(Value::Array(list))
-}
-
-fn checkin_state(conn: &Connection, day: &str) -> CheckinState {
-    conn.query_row(
-        "SELECT videos_posted, gym_logged, wrestled, studied, edited_video, analysed_content
-         FROM daily_checkin WHERE day = ?1",
-        [day],
-        |r| {
-            Ok(CheckinState {
-                videos_posted: r.get(0)?,
-                gym_logged: r.get::<_, i64>(1)? != 0,
-                wrestled: r.get::<_, i64>(2)? != 0,
-                studied: r.get::<_, i64>(3)? != 0,
-                edited_video: r.get::<_, i64>(4)? != 0,
-                analysed_content: r.get::<_, i64>(5)? != 0,
-            })
-        },
-    )
-    .unwrap_or(CheckinState {
-        videos_posted: 0,
-        gym_logged: false,
-        wrestled: false,
-        studied: false,
-        edited_video: false,
-        analysed_content: false,
-    })
 }
 
 fn list_devices(conn: &Connection) -> String {
@@ -942,7 +1003,45 @@ mod tests {
 
         dispatch(&conn, "set_checkin", &json!({"field": "videos_posted", "value": 3})).unwrap();
         let c = dispatch(&conn, "get_checkins", &json!({})).unwrap();
-        assert_eq!(c["videosPosted"], 3);
+        let videos = c
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "videos_posted")
+            .expect("videos_posted check-in exists");
+        assert_eq!(videos["value"], 3);
+    }
+
+    #[test]
+    fn dispatch_manages_checkin_definitions() {
+        let conn = db::test_conn();
+        dispatch(&conn, "upsert_checkin_definition", &json!({"checkin": {
+            "id": "growth_research", "label": "Growth research", "icon": "📈",
+            "kind": "toggle", "builtIn": false
+        }})).unwrap();
+        dispatch(&conn, "set_checkin", &json!({"field": "growth_research", "value": 1})).unwrap();
+        let c = dispatch(&conn, "get_checkins", &json!({})).unwrap();
+        assert!(c.as_array().unwrap().iter().any(|x| x["id"] == "growth_research" && x["value"] == 1));
+        dispatch(&conn, "delete_checkin_definition", &json!({"id": "growth_research"})).unwrap();
+        let c = dispatch(&conn, "get_checkins", &json!({})).unwrap();
+        assert!(c.as_array().unwrap().iter().all(|x| x["id"] != "growth_research"));
+    }
+
+    #[test]
+    fn checkin_event_auto_registers_definition() {
+        let conn = db::test_conn();
+        let mut e = app_event("checkin:2026-01-01:drilling:1", "x", 0);
+        e.event_type = "checkin".into();
+        e.app_name = None;
+        e.duration_seconds = None;
+        e.metadata = Some(serde_json::json!({
+            "field": "drilling", "value": 1, "label": "Drilling session", "icon": "🤼", "kind": "toggle"
+        }));
+        assert!(events::ingest_event(&conn, "desktop", &e).unwrap());
+        let c = dispatch(&conn, "get_checkins", &json!({"day": "2026-01-01"})).unwrap();
+        let drill = c.as_array().unwrap().iter().find(|x| x["id"] == "drilling").expect("registered");
+        assert_eq!(drill["value"], 1);
+        assert_eq!(drill["label"], "Drilling session");
     }
 
     #[test]
@@ -983,12 +1082,36 @@ mod tests {
 
         dispatch(&conn, "set_scoring_weight", &json!({"id": "main_goal", "weight": 42})).unwrap();
         dispatch(&conn, "set_scoring_threshold", &json!({"id": "business_min", "threshold": 120})).unwrap();
-        let cfg: String = conn
-            .query_row("SELECT value FROM app_settings WHERE key = 'scoring_config'", [], |r| r.get(0))
-            .unwrap();
-        assert!(cfg.contains("\"main_goal\":42"));
-        assert!(cfg.contains("\"business_min\":120"));
+        let rules = dispatch(&conn, "get_score_rules", &json!({})).unwrap();
+        let rules = rules.as_array().unwrap();
+        assert!(rules.iter().any(|r| r["id"] == "main_goal" && r["weight"] == 42));
+        assert!(rules.iter().any(|r| r["id"] == "business_min" && r["threshold"] == 120));
+
+        // Custom rule lifecycle: add against a custom check-in, then delete.
+        dispatch(&conn, "upsert_checkin_definition", &json!({"checkin": {
+            "id": "drilling", "label": "Drilling", "icon": "🤼", "kind": "toggle", "builtIn": false
+        }})).unwrap();
+        dispatch(&conn, "upsert_score_rule", &json!({"rule": {
+            "id": "drilling_rule", "label": "Drilled today", "kind": "checkin",
+            "metric": "drilling", "weight": 10, "threshold": 1, "builtIn": false
+        }})).unwrap();
+        let rules = dispatch(&conn, "get_score_rules", &json!({})).unwrap();
+        assert!(rules.as_array().unwrap().iter().any(|r| r["id"] == "drilling_rule"));
+        dispatch(&conn, "delete_score_rule", &json!({"id": "drilling_rule"})).unwrap();
         dispatch(&conn, "reset_scoring_weights", &json!({})).unwrap();
+        let rules = dispatch(&conn, "get_score_rules", &json!({})).unwrap();
+        assert!(rules.as_array().unwrap().iter().any(|r| r["id"] == "main_goal" && r["weight"] == 30));
+
+        // Streak definition lifecycle over the hub transport.
+        dispatch(&conn, "add_streak_definition", &json!({
+            "id": "drilling_streak", "name": "Drilling", "kind": "checkin",
+            "metric": "drilling", "threshold": 0
+        })).unwrap();
+        let defs = dispatch(&conn, "get_streak_definitions", &json!({})).unwrap();
+        assert!(defs.as_array().unwrap().iter().any(|d| d["id"] == "drilling_streak"));
+        dispatch(&conn, "delete_streak_definition", &json!({"id": "drilling_streak"})).unwrap();
+        let defs = dispatch(&conn, "get_streak_definitions", &json!({})).unwrap();
+        assert!(defs.as_array().unwrap().iter().all(|d| d["id"] != "drilling_streak"));
 
         dispatch(&conn, "delete_project", &json!({"id": pid})).unwrap();
         let projects = dispatch(&conn, "get_projects", &json!({})).unwrap();

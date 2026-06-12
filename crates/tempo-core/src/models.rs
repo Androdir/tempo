@@ -287,16 +287,199 @@ fn default_priority() -> String {
     "medium".to_string()
 }
 
-/// Current state of the quick daily check-in buttons.
-#[derive(Serialize, Clone)]
+/// A user-editable check-in definition ("things the tracker can't see").
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CheckinState {
-    pub videos_posted: i64,
-    pub gym_logged: bool,
-    pub wrestled: bool,
-    pub studied: bool,
-    pub edited_video: bool,
-    pub analysed_content: bool,
+pub struct CheckinDefinition {
+    pub id: String,
+    pub label: String,
+    pub icon: String,
+    pub kind: String, // toggle | counter
+    pub built_in: bool,
+}
+
+/// A check-in definition together with its value for a specific day.
+/// Toggles use 0/1; counters use 0..N.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckinValue {
+    pub id: String,
+    pub label: String,
+    pub icon: String,
+    pub kind: String,
+    pub value: i64,
+}
+
+const CHECKIN_DEFAULTS_SEEDED: &str = "checkin_defaults_seeded";
+
+const DEFAULT_CHECKIN_DEFS: &[(&str, &str, &str, &str)] = &[
+    ("videos_posted", "Posted video", "🎬", "counter"),
+    ("gym_logged", "Went gym", "🏋️", "toggle"),
+    ("wrestled", "Wrestled", "🤼", "toggle"),
+    ("studied", "Studied", "📚", "toggle"),
+    ("edited_video", "Edited video", "✂️", "toggle"),
+    ("analysed_content", "Analysed content", "🔍", "toggle"),
+];
+
+pub fn ensure_checkin_defaults(conn: &Connection) -> rusqlite::Result<()> {
+    let already = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            [CHECKIN_DEFAULTS_SEEDED],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+        .is_some_and(|v| v == "1");
+    if already {
+        return Ok(());
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    for (i, (id, label, icon, kind)) in DEFAULT_CHECKIN_DEFS.iter().enumerate() {
+        conn.execute(
+            "INSERT OR IGNORE INTO checkin_definitions
+               (id, label, icon, kind, built_in, sort_order, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6)",
+            params![id, label, icon, kind, i as i64, now],
+        )?;
+    }
+    conn.execute(
+        "INSERT INTO app_settings (key, value) VALUES (?1, '1')
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [CHECKIN_DEFAULTS_SEEDED],
+    )?;
+    Ok(())
+}
+
+pub fn list_checkin_definitions(conn: &Connection) -> rusqlite::Result<Vec<CheckinDefinition>> {
+    ensure_checkin_defaults(conn)?;
+    let mut stmt = conn.prepare(
+        "SELECT id, label, icon, kind, built_in
+         FROM checkin_definitions ORDER BY sort_order, label",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(CheckinDefinition {
+            id: r.get(0)?,
+            label: r.get(1)?,
+            icon: r.get(2)?,
+            kind: r.get(3)?,
+            built_in: r.get::<_, i64>(4)? != 0,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn checkin_exists(conn: &Connection, id: &str) -> bool {
+    let id = id.trim();
+    if id.is_empty() {
+        return false;
+    }
+    let _ = ensure_checkin_defaults(conn);
+    conn.query_row("SELECT 1 FROM checkin_definitions WHERE id = ?1", [id], |_| Ok(()))
+        .is_ok()
+}
+
+pub fn upsert_checkin_definition(conn: &Connection, c: &CheckinDefinition) -> Result<(), String> {
+    let id = c.id.trim().to_ascii_lowercase();
+    if id.is_empty()
+        || !id.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-')
+    {
+        return Err("Check-in id must use lowercase letters, numbers, dashes or underscores".into());
+    }
+    if c.label.trim().is_empty() {
+        return Err("Check-in label is required".into());
+    }
+    if !["toggle", "counter"].contains(&c.kind.as_str()) {
+        return Err("Check-in kind must be toggle or counter".into());
+    }
+    let _ = ensure_checkin_defaults(conn);
+    let now = chrono::Utc::now().to_rfc3339();
+    let icon = if c.icon.trim().is_empty() { "✅" } else { c.icon.trim() };
+    let sort: i64 = conn
+        .query_row("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM checkin_definitions", [], |r| r.get(0))
+        .unwrap_or(0);
+    conn.execute(
+        "INSERT INTO checkin_definitions (id, label, icon, kind, built_in, sort_order, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(id) DO UPDATE SET
+             label = excluded.label,
+             icon = excluded.icon,
+             kind = excluded.kind,
+             updated_at = excluded.updated_at",
+        params![id, c.label.trim(), icon, c.kind, c.built_in as i64, sort, now],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn delete_checkin_definition(conn: &Connection, id: &str) -> Result<(), String> {
+    let id = id.trim().to_ascii_lowercase();
+    if id.is_empty() {
+        return Err("Check-in id is required".into());
+    }
+    conn.execute("DELETE FROM checkin_definitions WHERE id = ?1", [&id]).map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM checkin_values WHERE checkin_id = ?1", [&id]).map_err(|e| e.to_string())?;
+    // Streaks and score rules that referenced this check-in simply stop matching;
+    // remove them so they don't linger as dead rows.
+    conn.execute(
+        "DELETE FROM streak_definitions WHERE kind = 'checkin' AND metric = ?1",
+        [&id],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM score_rules WHERE kind = 'checkin' AND (metric = ?1 OR metric LIKE ?1 || ',%' OR metric LIKE '%,' || ?1)",
+        [&id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// All check-in definitions with their value for `day` (0 when not logged).
+pub fn checkin_values_for_day(conn: &Connection, day: &str) -> Vec<CheckinValue> {
+    let _ = ensure_checkin_defaults(conn);
+    let mut stmt = match conn.prepare(
+        "SELECT d.id, d.label, d.icon, d.kind, COALESCE(v.value, 0)
+         FROM checkin_definitions d
+         LEFT JOIN checkin_values v ON v.checkin_id = d.id AND v.day = ?1
+         ORDER BY d.sort_order, d.label",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let rows = stmt.query_map([day], |r| {
+        Ok(CheckinValue {
+            id: r.get(0)?,
+            label: r.get(1)?,
+            icon: r.get(2)?,
+            kind: r.get(3)?,
+            value: r.get(4)?,
+        })
+    });
+    match rows {
+        Ok(rs) => rs.filter_map(Result::ok).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Check-in values for `day` as an id → value map (only definitions that exist).
+pub fn checkin_map_for_day(conn: &Connection, day: &str) -> std::collections::HashMap<String, i64> {
+    checkin_values_for_day(conn, day).into_iter().map(|c| (c.id, c.value)).collect()
+}
+
+/// Set one check-in's value for a day. Toggles clamp to 0/1, counters to 0..999.
+pub fn set_checkin_value(conn: &Connection, day: &str, id: &str, value: i64) -> Result<(), String> {
+    let _ = ensure_checkin_defaults(conn);
+    let id = id.trim().to_ascii_lowercase();
+    let kind: String = conn
+        .query_row("SELECT kind FROM checkin_definitions WHERE id = ?1", [&id], |r| r.get(0))
+        .map_err(|_| format!("unknown check-in: {id}"))?;
+    let v = if kind == "counter" { value.clamp(0, 999) } else { (value != 0) as i64 };
+    conn.execute(
+        "INSERT INTO checkin_values (day, checkin_id, value, updated_at) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(day, checkin_id) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        params![day, id, v, chrono::Utc::now().to_rfc3339()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 // ------------------------------------------------------------ accountability
@@ -361,6 +544,17 @@ pub struct WeeklyDay {
     pub tracked_seconds: i64,
 }
 
+/// Week-long roll-up of one check-in: counters sum values, toggles count days.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckinTotal {
+    pub id: String,
+    pub label: String,
+    pub icon: String,
+    pub kind: String,
+    pub total: i64,
+}
+
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct WeeklyReview {
@@ -369,7 +563,7 @@ pub struct WeeklyReview {
     pub productive_seconds: i64,
     pub distraction_seconds: i64,
     pub study_seconds: i64,
-    pub videos_posted: i64,
+    pub checkin_totals: Vec<CheckinTotal>,
     pub best_day: Option<WeeklyDay>,
     pub worst_day: Option<WeeklyDay>,
     pub most_common_leak: Option<String>,
@@ -535,8 +729,7 @@ pub struct ScoreReport {
     pub lines: Vec<ScoreLine>,
     pub category_minutes: Vec<CategoryMinutes>,
     pub main_goal_completed: bool,
-    pub videos_posted: i64,
-    pub gym_logged: bool,
+    pub checkins: Vec<CheckinValue>, // today's logged check-ins (value > 0)
     pub main_goal_name: Option<String>,
 }
 
@@ -699,6 +892,7 @@ pub struct StreakDefinition {
     pub id: String,
     pub name: String,
     pub kind: String,
+    pub metric: String,
     pub threshold: i64,
     pub enabled: bool,
 }
@@ -734,25 +928,14 @@ pub struct TimelineBlock {
     pub output_linked: bool,
 }
 
-/// Self-reported outputs for the day (shown as a strip; no per-event times).
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct TimelineOutputs {
-    pub videos_posted: i64,
-    pub gym_logged: bool,
-    pub wrestled: bool,
-    pub studied: bool,
-    pub edited_video: bool,
-    pub analysed_content: bool,
-}
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimelineDay {
     pub day: String,
     pub max_gap_seconds: i64,
     pub blocks: Vec<TimelineBlock>,
-    pub outputs: TimelineOutputs,
+    /// Self-reported check-ins for the day (shown as a strip; no per-event times).
+    pub outputs: Vec<CheckinValue>,
     pub active_seconds: i64,
     pub idle_seconds: i64,
     pub productive_seconds: i64,

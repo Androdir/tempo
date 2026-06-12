@@ -505,16 +505,25 @@ pub fn compute_stats(conn: &Connection) -> Result<scoring::Stats, String> {
     compute_stats_for_day(conn, &today())
 }
 
+/// The labels `target` score rules watch (lowercased), e.g. "instagram".
+fn target_metrics(conn: &Connection) -> Vec<String> {
+    scoring::list_rules(conn)
+        .into_iter()
+        .filter(|r| r.kind == "target" && !r.metric.is_empty())
+        .map(|r| r.metric)
+        .collect()
+}
+
 pub fn compute_stats_for_day(conn: &Connection, day: &str) -> Result<scoring::Stats, String> {
     let day = day.to_string();
     let llm_cache = llm::load_cache_for_day(conn, &day);
     let manual = load_manual_corrections(conn, &day)?;
     let blocks = collect_blocks_for_day(conn, &day)?;
     let bucket_map = category_buckets(conn);
+    let targets = target_metrics(conn);
 
     let mut cat_seconds: HashMap<String, i64> = HashMap::new();
-    let mut instagram_seconds = 0i64;
-    let mut youtube_seconds = 0i64;
+    let mut target_seconds: HashMap<String, i64> = HashMap::new();
     let mut first_productive: Option<i64> = None;
 
     for b in &blocks {
@@ -525,11 +534,12 @@ pub fn compute_stats_for_day(conn: &Connection, day: &str) -> Result<scoring::St
         let bucket = bucket_for_category(&bucket_map, &cat);
         *cat_seconds.entry(cat).or_insert(0) += b.seconds;
         if bucket != "productive" {
-            if let Some(d) = &b.domain {
-                if d == "instagram.com" {
-                    instagram_seconds += b.seconds;
-                } else if d == "youtube.com" {
-                    youtube_seconds += b.seconds;
+            // Time on a watched app/site only counts while it isn't productive work
+            // (a corrected "research on YouTube" block doesn't ding the score).
+            let label = b.domain.clone().unwrap_or_else(|| b.label.clone()).to_ascii_lowercase();
+            for t in &targets {
+                if label.contains(t.as_str()) {
+                    *target_seconds.entry(t.clone()).or_insert(0) += b.seconds;
                 }
             }
         }
@@ -540,33 +550,7 @@ pub fn compute_stats_for_day(conn: &Connection, day: &str) -> Result<scoring::St
         }
     }
 
-    Ok(scoring::Stats { cat_seconds, instagram_seconds, youtube_seconds, first_productive_min: first_productive })
-}
-
-pub fn read_checkin_state(conn: &Connection, day: &str) -> CheckinState {
-    conn.query_row(
-        "SELECT videos_posted, gym_logged, wrestled, studied, edited_video, analysed_content
-         FROM daily_checkin WHERE day = ?1",
-        [day],
-        |r| {
-            Ok(CheckinState {
-                videos_posted: r.get::<_, i64>(0)?,
-                gym_logged: r.get::<_, i64>(1)? != 0,
-                wrestled: r.get::<_, i64>(2)? != 0,
-                studied: r.get::<_, i64>(3)? != 0,
-                edited_video: r.get::<_, i64>(4)? != 0,
-                analysed_content: r.get::<_, i64>(5)? != 0,
-            })
-        },
-    )
-    .unwrap_or(CheckinState {
-        videos_posted: 0,
-        gym_logged: false,
-        wrestled: false,
-        studied: false,
-        edited_video: false,
-        analysed_content: false,
-    })
+    Ok(scoring::Stats { cat_seconds, target_seconds, first_productive_min: first_productive })
 }
 
 pub fn top_goal_completed(conn: &Connection, day: &str) -> Option<bool> {
@@ -582,7 +566,6 @@ pub fn top_goal_completed(conn: &Connection, day: &str) -> Option<bool> {
 }
 
 pub fn effective_checkins(conn: &Connection, day: &str) -> scoring::Checkins {
-    let state = read_checkin_state(conn, day);
     let main_goal_completed = top_goal_completed(conn, day).unwrap_or_else(|| {
         conn.query_row("SELECT main_goal_completed FROM daily_checkin WHERE day = ?1", [day], |r| {
             r.get::<_, i64>(0)
@@ -590,11 +573,7 @@ pub fn effective_checkins(conn: &Connection, day: &str) -> scoring::Checkins {
         .map(|v| v != 0)
         .unwrap_or(false)
     });
-    scoring::Checkins {
-        main_goal_completed,
-        videos_posted: state.videos_posted,
-        gym_logged: state.gym_logged || state.wrestled,
-    }
+    scoring::Checkins { main_goal_completed, values: checkin_map_for_day(conn, day) }
 }
 
 pub fn top_project_name(conn: &Connection) -> Option<String> {
@@ -695,7 +674,6 @@ pub fn link_outputs_for_day(conn: &Connection, day: &str) -> Result<i64, String>
 pub const STREAK_WINDOW_DAYS: i64 = 28;
 
 pub fn day_metrics(conn: &Connection, day: &str) -> crate::streaks::DayMetrics {
-    let cs = read_checkin_state(conn, day);
     let main_goal = top_goal_completed(conn, day).unwrap_or_else(|| {
         conn.query_row("SELECT main_goal_completed FROM daily_checkin WHERE day = ?1", [day], |r| {
             r.get::<_, i64>(0)
@@ -713,12 +691,7 @@ pub fn day_metrics(conn: &Connection, day: &str) -> crate::streaks::DayMetrics {
     };
 
     let mut m = crate::streaks::DayMetrics {
-        videos_posted: cs.videos_posted,
-        gym_logged: cs.gym_logged,
-        wrestled: cs.wrestled,
-        studied: cs.studied,
-        edited_video: cs.edited_video,
-        analysed_content: cs.analysed_content,
+        checkins: checkin_map_for_day(conn, day),
         main_goal_completed: main_goal,
         video_exports: count("video_export"),
         editing_changes: count("editing_project_changed"),
@@ -1146,15 +1119,8 @@ pub fn timeline_for_day(conn: &Connection, day: &str, max_gap: i64) -> Result<Ti
         }
     }
 
-    let cs = read_checkin_state(conn, day);
-    let outputs = TimelineOutputs {
-        videos_posted: cs.videos_posted,
-        gym_logged: cs.gym_logged,
-        wrestled: cs.wrestled,
-        studied: cs.studied,
-        edited_video: cs.edited_video,
-        analysed_content: cs.analysed_content,
-    };
+    let outputs: Vec<CheckinValue> =
+        checkin_values_for_day(conn, day).into_iter().filter(|c| c.value > 0).collect();
 
     Ok(TimelineDay {
         day: day.to_string(),
@@ -1179,7 +1145,7 @@ pub fn weekly_review(conn: &Connection) -> Result<WeeklyReview, String> {
     let mut productive = 0i64;
     let mut distraction = 0i64;
     let mut study = 0i64;
-    let mut videos = 0i64;
+    let mut checkin_totals: HashMap<String, i64> = HashMap::new();
     let mut leak_by: HashMap<String, i64> = HashMap::new();
 
     for i in (0..7).rev() {
@@ -1217,11 +1183,11 @@ pub fn weekly_review(conn: &Connection) -> Result<WeeklyReview, String> {
         }
         productive += p;
         distraction += d;
-        videos += conn
-            .query_row("SELECT videos_posted FROM daily_checkin WHERE day = ?1", [&day], |r| {
-                r.get::<_, i64>(0)
-            })
-            .unwrap_or(0);
+        // Counters sum their values across the week; toggles count met days.
+        for c in checkin_values_for_day(conn, &day) {
+            let inc = if c.kind == "counter" { c.value } else { (c.value > 0) as i64 };
+            *checkin_totals.entry(c.id).or_insert(0) += inc;
+        }
 
         let stats = compute_stats_for_day(conn, &day)?;
         let checkins = effective_checkins(conn, &day);
@@ -1249,13 +1215,29 @@ pub fn weekly_review(conn: &Connection) -> Result<WeeklyReview, String> {
         .map(|(k, v)| (Some(k), v))
         .unwrap_or((None, 0));
 
+    // Present totals in definition order, skipping check-ins never logged this week.
+    let totals: Vec<CheckinTotal> = list_checkin_definitions(conn)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|d| {
+            let total = checkin_totals.get(&d.id).copied().unwrap_or(0);
+            (total > 0).then(|| CheckinTotal {
+                id: d.id,
+                label: d.label,
+                icon: d.icon,
+                kind: d.kind,
+                total,
+            })
+        })
+        .collect();
+
     Ok(WeeklyReview {
         start_day: days_vec.first().map(|d| d.day.clone()).unwrap_or_default(),
         end_day: days_vec.last().map(|d| d.day.clone()).unwrap_or_default(),
         productive_seconds: productive,
         distraction_seconds: distraction,
         study_seconds: study,
-        videos_posted: videos,
+        checkin_totals: totals,
         best_day,
         worst_day,
         most_common_leak,
@@ -1320,12 +1302,7 @@ pub fn top_distraction_for_day(conn: &Connection, day: &str) -> Option<(String, 
 
 /// Assemble the inputs the lock-in engine needs to draft tomorrow's plan.
 pub fn gather_plan_inputs(conn: &Connection, day: &str) -> lockin::PlanInputs {
-    let stats = compute_stats_for_day(conn, day).unwrap_or_else(|_| scoring::Stats {
-        cat_seconds: std::collections::HashMap::new(),
-        instagram_seconds: 0,
-        youtube_seconds: 0,
-        first_productive_min: None,
-    });
+    let stats = compute_stats_for_day(conn, day).unwrap_or_default();
     let checkins = effective_checkins(conn, day);
     let outputs = output_signals_for_day(conn, day);
     let report =
@@ -1555,27 +1532,18 @@ fn goal_lines(conn: &Connection, day: &str) -> (Vec<String>, Vec<String>) {
 }
 
 /// Human-readable list of the quick check-ins the user logged today.
-fn logged_checkins(state: &CheckinState) -> Vec<String> {
-    let mut out = Vec::new();
-    if state.videos_posted > 0 {
-        out.push(format!("posted {} video(s)", state.videos_posted));
-    }
-    if state.gym_logged {
-        out.push("went gym".into());
-    }
-    if state.wrestled {
-        out.push("wrestled".into());
-    }
-    if state.studied {
-        out.push("studied".into());
-    }
-    if state.edited_video {
-        out.push("edited video".into());
-    }
-    if state.analysed_content {
-        out.push("analysed content".into());
-    }
-    out
+fn logged_checkins(values: &[CheckinValue]) -> Vec<String> {
+    values
+        .iter()
+        .filter(|c| c.value > 0)
+        .map(|c| {
+            if c.kind == "counter" && c.value > 1 {
+                format!("{} ×{}", c.label.to_lowercase(), c.value)
+            } else {
+                c.label.to_lowercase()
+            }
+        })
+        .collect()
 }
 
 fn get_daily_note(conn: &Connection, day: &str) -> String {
@@ -1604,9 +1572,10 @@ fn build_review_input(conn: &Connection) -> Result<(ScoreReport, ReviewInput), S
     let manual = load_manual_corrections(conn, &day)?;
     let blocks = collect_blocks(conn)?;
 
+    let bucket_map = category_buckets(conn);
+    let targets = target_metrics(conn);
     let mut cat_seconds: HashMap<String, i64> = HashMap::new();
-    let mut instagram = 0i64;
-    let mut youtube = 0i64;
+    let mut target_seconds: HashMap<String, i64> = HashMap::new();
     let mut first_prod: Option<i64> = None;
     let mut prod_by_label: HashMap<String, i64> = HashMap::new();
     let mut dist_by_label: HashMap<String, i64> = HashMap::new();
@@ -1618,14 +1587,13 @@ fn build_review_input(conn: &Connection) -> Result<(ScoreReport, ReviewInput), S
             continue;
         }
         let cat = category_or_fallback(conn, &final_category(b, &manual, &llm_cache));
-        let bucket = bucket_for(&cat);
+        let bucket = bucket_for_category(&bucket_map, &cat);
         *cat_seconds.entry(cat).or_insert(0) += b.seconds;
         if bucket != "productive" {
-            if let Some(d) = &b.domain {
-                if d == "instagram.com" {
-                    instagram += b.seconds;
-                } else if d == "youtube.com" {
-                    youtube += b.seconds;
+            let label = b.domain.clone().unwrap_or_else(|| b.label.clone()).to_ascii_lowercase();
+            for t in &targets {
+                if label.contains(t.as_str()) {
+                    *target_seconds.entry(t.clone()).or_insert(0) += b.seconds;
                 }
             }
         }
@@ -1647,8 +1615,7 @@ fn build_review_input(conn: &Connection) -> Result<(ScoreReport, ReviewInput), S
 
     let stats = scoring::Stats {
         cat_seconds: cat_seconds.clone(),
-        instagram_seconds: instagram,
-        youtube_seconds: youtube,
+        target_seconds,
         first_productive_min: first_prod,
     };
     let checkins = effective_checkins(conn, &day);
@@ -1660,7 +1627,7 @@ fn build_review_input(conn: &Connection) -> Result<(ScoreReport, ReviewInput), S
     let missed = report.lines.iter().filter(|l| l.positive && !l.triggered).map(|l| l.label.clone()).collect();
     let mins = |c: &str| cat_seconds.get(c).copied().unwrap_or(0) / 60;
     let (goals_done, goals_todo) = goal_lines(conn, &day);
-    let logged = logged_checkins(&read_checkin_state(conn, &day));
+    let logged = logged_checkins(&checkin_values_for_day(conn, &day));
 
     let input = ReviewInput {
         date: report.date.clone(),

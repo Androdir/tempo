@@ -35,6 +35,10 @@ pub fn run() {
                     .map_err(|e| format!("failed to seed settings: {e}"))?;
                 models::ensure_category_defaults(&conn)
                     .map_err(|e| format!("failed to seed categories: {e}"))?;
+                models::ensure_checkin_defaults(&conn)
+                    .map_err(|e| format!("failed to seed check-ins: {e}"))?;
+                scoring::ensure_rule_defaults(&conn)
+                    .map_err(|e| format!("failed to seed score rules: {e}"))?;
                 // Enforce data retention once at startup.
                 let retention =
                     settings::get_int(&conn, settings::RETENTION_DAYS, settings::DEFAULT_RETENTION_DAYS);
@@ -98,6 +102,9 @@ pub fn run() {
             commands::get_streaks,
             commands::get_streak_definitions,
             commands::update_streak_definition,
+            commands::add_streak_definition,
+            commands::delete_streak_definition,
+            commands::seed_default_streaks,
             commands::generate_lockin_plan,
             commands::get_lockin_plan,
             commands::save_lockin_plan,
@@ -115,6 +122,9 @@ pub fn run() {
             commands::get_daily_score,
             commands::set_checkin,
             commands::get_checkins,
+            commands::get_checkin_definitions,
+            commands::upsert_checkin_definition,
+            commands::delete_checkin_definition,
             commands::get_goals,
             commands::add_goal,
             commands::update_goal,
@@ -125,6 +135,9 @@ pub fn run() {
             commands::set_scoring_weight,
             commands::set_scoring_threshold,
             commands::reset_scoring_weights,
+            commands::get_score_rules,
+            commands::upsert_score_rule,
+            commands::delete_score_rule,
             commands::generate_daily_review,
             commands::set_daily_note,
             commands::start_focus_session,

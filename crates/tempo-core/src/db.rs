@@ -146,6 +146,9 @@ CREATE INDEX IF NOT EXISTS idx_manual_day ON manual_corrections(day);
 
 -- Daily self-reported check-ins for the productivity score (events that can't be
 -- inferred from activity: main goal done, videos posted, gym logged).
+-- The individual check-in fields are legacy columns; new values live in
+-- checkin_values keyed by user-editable checkin_definitions. main_goal_completed
+-- and notes still live here.
 CREATE TABLE IF NOT EXISTS daily_checkin (
     day                 TEXT PRIMARY KEY,
     main_goal_completed INTEGER NOT NULL DEFAULT 0,
@@ -156,6 +159,44 @@ CREATE TABLE IF NOT EXISTS daily_checkin (
     studied             INTEGER NOT NULL DEFAULT 0,
     edited_video        INTEGER NOT NULL DEFAULT 0,
     analysed_content    INTEGER NOT NULL DEFAULT 0
+);
+
+-- Editable check-in definitions ("things the tracker can't see"). The built-ins
+-- are seeded as editable rows; users can add/rename/delete their own.
+-- kind: 'toggle' (done / not done) or 'counter' (0..N per day).
+CREATE TABLE IF NOT EXISTS checkin_definitions (
+    id         TEXT PRIMARY KEY,
+    label      TEXT NOT NULL,
+    icon       TEXT NOT NULL DEFAULT '✅',
+    kind       TEXT NOT NULL DEFAULT 'toggle',
+    built_in   INTEGER NOT NULL DEFAULT 0,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+
+-- One row per (day, check-in) actually logged.
+CREATE TABLE IF NOT EXISTS checkin_values (
+    day        TEXT NOT NULL,
+    checkin_id TEXT NOT NULL,
+    value      INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (day, checkin_id)
+);
+CREATE INDEX IF NOT EXISTS idx_checkin_values_day ON checkin_values(day);
+
+-- Editable daily-score rules. The built-in rule set is seeded as editable rows;
+-- users can re-weight, re-threshold, delete, or add their own.
+-- kind: checkin | category | target | goal | no_goal | late_start | output.
+CREATE TABLE IF NOT EXISTS score_rules (
+    id         TEXT PRIMARY KEY,
+    label      TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    metric     TEXT NOT NULL DEFAULT '',
+    weight     INTEGER NOT NULL DEFAULT 0,
+    threshold  INTEGER,
+    built_in   INTEGER NOT NULL DEFAULT 0,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
 );
 
 -- User-defined daily goals ("main missions today").
@@ -359,6 +400,74 @@ fn migrate(conn: &Connection) {
         [],
     );
     let _ = conn.execute("ALTER TABLE goals ADD COLUMN recurring INTEGER NOT NULL DEFAULT 0", []);
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS checkin_definitions (
+            id         TEXT PRIMARY KEY,
+            label      TEXT NOT NULL,
+            icon       TEXT NOT NULL DEFAULT '✅',
+            kind       TEXT NOT NULL DEFAULT 'toggle',
+            built_in   INTEGER NOT NULL DEFAULT 0,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS checkin_values (
+            day        TEXT NOT NULL,
+            checkin_id TEXT NOT NULL,
+            value      INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (day, checkin_id)
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS score_rules (
+            id         TEXT PRIMARY KEY,
+            label      TEXT NOT NULL,
+            kind       TEXT NOT NULL,
+            metric     TEXT NOT NULL DEFAULT '',
+            weight     INTEGER NOT NULL DEFAULT 0,
+            threshold  INTEGER,
+            built_in   INTEGER NOT NULL DEFAULT 0,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        )",
+        [],
+    );
+    migrate_legacy_checkins(conn);
+}
+
+/// One-time copy of the legacy fixed daily_checkin columns into the flexible
+/// checkin_values table, so history (streak runs, weekly totals) survives the
+/// upgrade. Guarded by a settings flag; INSERT OR IGNORE keeps it idempotent.
+fn migrate_legacy_checkins(conn: &Connection) {
+    const FLAG: &str = "checkin_values_migrated";
+    let done = conn
+        .query_row("SELECT value FROM app_settings WHERE key = ?1", [FLAG], |r| {
+            r.get::<_, String>(0)
+        })
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    if done {
+        return;
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    for col in ["videos_posted", "gym_logged", "wrestled", "studied", "edited_video", "analysed_content"] {
+        let _ = conn.execute(
+            &format!(
+                "INSERT OR IGNORE INTO checkin_values (day, checkin_id, value, updated_at)
+                 SELECT day, '{col}', {col}, ?1 FROM daily_checkin WHERE {col} != 0"
+            ),
+            [&now],
+        );
+    }
+    let _ = conn.execute(
+        "INSERT INTO app_settings (key, value) VALUES (?1, '1')
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [FLAG],
+    );
 }
 
 /// Delete raw activity older than `days` local days (0 = keep forever). Returns

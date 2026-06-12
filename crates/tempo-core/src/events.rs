@@ -90,15 +90,33 @@ pub fn ingest_event(conn: &Connection, device_id: &str, e: &SyncEvent) -> rusqli
     Ok(true)
 }
 
-const CHECKIN_FIELDS: [&str; 7] = [
-    "main_goal_completed",
-    "videos_posted",
-    "gym_logged",
-    "wrestled",
-    "studied",
-    "edited_video",
-    "analysed_content",
-];
+/// Best-effort registration of a check-in definition carried in a synced event's
+/// metadata, so check-ins created on one device exist on the hub before their
+/// values land. Existing definitions are left untouched (the hub's edit wins).
+fn register_checkin_from_event(conn: &Connection, e: &SyncEvent, id: &str) {
+    if crate::models::checkin_exists(conn, id) {
+        return;
+    }
+    let label = e
+        .m_str("label")
+        .filter(|l| !l.trim().is_empty())
+        .unwrap_or_else(|| id.replace(['_', '-'], " "));
+    let icon = e.m_str("icon").filter(|i| !i.trim().is_empty()).unwrap_or_else(|| "✅".into());
+    let kind = match e.m_str("kind").as_deref() {
+        Some("counter") => "counter",
+        _ => "toggle",
+    };
+    let _ = crate::models::upsert_checkin_definition(
+        conn,
+        &crate::models::CheckinDefinition {
+            id: id.to_string(),
+            label,
+            icon,
+            kind: kind.to_string(),
+            built_in: false,
+        },
+    );
+}
 
 /// Project a freshly-stored event into the same domain tables the desktop writes
 /// to, so all existing aggregation (dashboard/timeline/score/streaks) works on
@@ -163,14 +181,16 @@ fn apply_to_domain(conn: &Connection, e: &SyncEvent) -> rusqlite::Result<()> {
         }
         "checkin" => {
             if let Some(field) = e.m_str("field") {
-                if CHECKIN_FIELDS.contains(&field.as_str()) {
-                    let value = e.m_i64("value").unwrap_or(0);
+                let value = e.m_i64("value").unwrap_or(0);
+                if field == "main_goal_completed" {
                     conn.execute("INSERT OR IGNORE INTO daily_checkin (day) VALUES (?1)", params![e.day])?;
-                    // `field` is whitelisted, so this interpolation is safe.
                     conn.execute(
-                        &format!("UPDATE daily_checkin SET {field} = ?1 WHERE day = ?2"),
-                        params![value, e.day],
+                        "UPDATE daily_checkin SET main_goal_completed = ?1 WHERE day = ?2",
+                        params![(value != 0) as i64, e.day],
                     )?;
+                } else {
+                    register_checkin_from_event(conn, e, &field);
+                    let _ = crate::models::set_checkin_value(conn, &e.day, &field, value);
                 }
             }
         }
