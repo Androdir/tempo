@@ -105,6 +105,98 @@ fn checkin_event(
     }
 }
 
+/// A manual override was removed on the desktop → the hub deletes its row too,
+/// falling back to auto detection there.
+fn checkin_cleared_event(day: &str, field: &str, now_ms: i64) -> SyncEvent {
+    SyncEvent {
+        event_id: format!("checkin:{day}:{field}:clear:{now_ms}"),
+        event_type: "checkin".into(),
+        source: Some("desktop".into()),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        day: day.to_string(),
+        app_name: None,
+        domain: None,
+        title: None,
+        duration_seconds: None,
+        category: None,
+        project: None,
+        metadata: Some(serde_json::json!({ "field": field, "cleared": true })),
+    }
+}
+
+/// Diff the full check-in definition set against the last-synced snapshot and
+/// enqueue one `checkin_def` event per created/edited definition (full payload)
+/// or per deletion (`deleted: true`). Returns how many events were enqueued.
+fn sync_checkin_definitions(
+    conn: &Connection,
+    defs: &[tempo_core::models::CheckinDefinition],
+    day: &str,
+    now_ms: i64,
+) -> i64 {
+    use std::hash::{Hash, Hasher};
+    let fingerprint = |d: &tempo_core::models::CheckinDefinition| -> i64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (&d.label, &d.icon, &d.kind, &d.auto_kind, &d.auto_metric, d.auto_threshold).hash(&mut h);
+        h.finish() as i64
+    };
+    const SNAP_KEY: &str = "sync_snap_checkin_defs";
+    // The snapshot isn't day-scoped — reuse the parser with a fixed prefix.
+    let raw = settings::get_setting(conn, SNAP_KEY);
+    let old = parse_snap_map(&raw, "defs");
+    let mut n = 0i64;
+    let mut cur: Vec<(String, i64)> = Vec::new();
+    for d in defs {
+        let fp = fingerprint(d);
+        cur.push((d.id.clone(), fp));
+        if old.get(&d.id).copied() != Some(fp) {
+            enqueue(conn, &SyncEvent {
+                event_id: format!("checkin_def:{}:{now_ms}", d.id),
+                event_type: "checkin_def".into(),
+                source: Some("desktop".into()),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                day: day.to_string(),
+                app_name: None,
+                domain: None,
+                title: None,
+                duration_seconds: None,
+                category: None,
+                project: None,
+                metadata: Some(serde_json::json!({
+                    "id": d.id, "label": d.label, "icon": d.icon, "kind": d.kind,
+                    "autoKind": d.auto_kind, "autoMetric": d.auto_metric,
+                    "autoThreshold": d.auto_threshold,
+                })),
+            });
+            n += 1;
+        }
+    }
+    for id in old.keys() {
+        if !defs.iter().any(|d| &d.id == id) {
+            enqueue(conn, &SyncEvent {
+                event_id: format!("checkin_def:{id}:del:{now_ms}"),
+                event_type: "checkin_def".into(),
+                source: Some("desktop".into()),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                day: day.to_string(),
+                app_name: None,
+                domain: None,
+                title: None,
+                duration_seconds: None,
+                category: None,
+                project: None,
+                metadata: Some(serde_json::json!({ "id": id, "deleted": true })),
+            });
+            n += 1;
+        }
+    }
+    if n > 0 {
+        let snap =
+            format!("defs|{}", cur.iter().map(|(f, v)| format!("{f}={v}")).collect::<Vec<_>>().join(","));
+        let _ = settings::set_setting(conn, SNAP_KEY, &snap);
+    }
+    n
+}
+
 fn watermark(conn: &Connection, table: &str) -> i64 {
     settings::get_setting(conn, &wm_key(table)).and_then(|s| s.parse().ok()).unwrap_or(0)
 }
@@ -330,7 +422,16 @@ pub fn scan_and_enqueue(conn: &Connection) -> i64 {
         let day = chrono::Local::now().format("%Y-%m-%d").to_string();
         let now_ms = chrono::Utc::now().timestamp_millis();
 
-        // --- check-ins (main_goal_completed + every defined check-in, dynamic) ---
+        // --- check-in definitions (label/kind/auto config), synced on change ---
+        // The hub needs the definition itself — auto check-ins may never produce a
+        // value event here, and the hub recomputes auto detection over *all*
+        // devices' activity from the definition.
+        let defs = tempo_core::models::list_checkin_definitions(conn).unwrap_or_default();
+        n += sync_checkin_definitions(conn, &defs, &day, now_ms);
+
+        // --- check-in values (main_goal_completed + manually-logged rows only) ---
+        // Auto-detected values are intentionally NOT synced: the hub derives them
+        // itself, so only manual logs/overrides travel.
         let mg: i64 = conn
             .query_row(
                 "SELECT main_goal_completed FROM daily_checkin WHERE day = ?1",
@@ -338,18 +439,32 @@ pub fn scan_and_enqueue(conn: &Connection) -> i64 {
                 |r| r.get(0),
             )
             .unwrap_or(0);
-        let defs = tempo_core::models::list_checkin_definitions(conn).unwrap_or_default();
-        let values = tempo_core::models::checkin_map_for_day(conn, &day);
-        let mut cur: Vec<(String, i64, Option<&tempo_core::models::CheckinDefinition>)> =
-            vec![("main_goal_completed".to_string(), mg, None)];
-        for d in &defs {
-            cur.push((d.id.clone(), values.get(&d.id).copied().unwrap_or(0), Some(d)));
+        let mut manual: Vec<(String, i64)> = vec![("main_goal_completed".to_string(), mg)];
+        if let Ok(mut stmt) =
+            conn.prepare("SELECT checkin_id, value FROM checkin_values WHERE day = ?1 ORDER BY checkin_id")
+        {
+            if let Ok(rows) = stmt.query_map([&day], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))) {
+                manual.extend(rows.flatten());
+            }
         }
         let old = parse_snap_map(&settings::get_setting(conn, "sync_snap_checkin"), &day);
         let mut changed = false;
-        for (field, value, def) in &cur {
-            if old.get(field).copied().unwrap_or(0) != *value {
-                enqueue(conn, &checkin_event(&day, field, *value, *def, now_ms));
+        for (field, value) in &manual {
+            // An absent snapshot entry means "never sent today": 0 is the implied
+            // baseline for main_goal, while a fresh manual row syncs even at 0
+            // (it may be an override forcing an auto check-in off).
+            let baseline = if field == "main_goal_completed" { 0 } else { i64::MIN };
+            if old.get(field).copied().unwrap_or(baseline) != *value {
+                let def = defs.iter().find(|d| &d.id == field);
+                enqueue(conn, &checkin_event(&day, field, *value, def, now_ms));
+                n += 1;
+                changed = true;
+            }
+        }
+        // A manual row that disappeared = override cleared → tell the hub to clear too.
+        for field in old.keys() {
+            if field != "main_goal_completed" && !manual.iter().any(|(f, _)| f == field) {
+                enqueue(conn, &checkin_cleared_event(&day, field, now_ms));
                 n += 1;
                 changed = true;
             }
@@ -357,7 +472,7 @@ pub fn scan_and_enqueue(conn: &Connection) -> i64 {
         if changed {
             let snap = format!(
                 "{day}|{}",
-                cur.iter().map(|(f, v, _)| format!("{f}={v}")).collect::<Vec<_>>().join(",")
+                manual.iter().map(|(f, v)| format!("{f}={v}")).collect::<Vec<_>>().join(",")
             );
             let _ = settings::set_setting(conn, "sync_snap_checkin", &snap);
         }
@@ -615,8 +730,9 @@ pub fn import_history_to_hub(db: State<'_, Db>) -> Result<(), String> {
     for table in ["activity_log", "browser_activity", "output_events", "focus_sessions"] {
         set_watermark(&conn, table, 0);
     }
-    // Force today's mutable state (check-ins / note / goals) to re-send as well.
-    for key in ["sync_snap_checkin", "sync_snap_note", "sync_snap_goals"] {
+    // Force today's mutable state (check-ins / definitions / note / goals) to
+    // re-send as well.
+    for key in ["sync_snap_checkin", "sync_snap_checkin_defs", "sync_snap_note", "sync_snap_goals"] {
         let _ = settings::set_setting(&conn, key, "");
     }
     Ok(())
@@ -662,12 +778,26 @@ mod tests {
         assert!(sync_target(&conn).is_some());
     }
 
+    /// First-ever scan registers the seeded check-in definitions as events;
+    /// later scans are quiet until something changes.
+    fn prime(conn: &Connection) {
+        assert!(scan_and_enqueue(conn) > 0); // the seeded check-in definitions
+        assert_eq!(scan_and_enqueue(conn), 0);
+    }
+
     #[test]
     fn scan_enqueues_then_advances_watermark() {
         let conn = db::test_conn();
+        prime(&conn);
         seed_activity(&conn, 3);
         assert_eq!(scan_and_enqueue(&conn), 3);
-        let q: i64 = conn.query_row("SELECT COUNT(*) FROM sync_queue WHERE status='pending'", [], |r| r.get(0)).unwrap();
+        let q: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_queue WHERE status='pending' AND event_id LIKE 'activity_log:%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(q, 3);
         // second scan: watermark advanced → nothing new
         assert_eq!(scan_and_enqueue(&conn), 0);
@@ -676,6 +806,8 @@ mod tests {
     #[test]
     fn offline_keeps_queue_then_success_drains() {
         let conn = db::test_conn();
+        prime(&conn);
+        conn.execute("DELETE FROM sync_queue", []).unwrap(); // drop the def events
         seed_activity(&conn, 2);
         scan_and_enqueue(&conn);
         let ids: Vec<String> =
@@ -699,6 +831,7 @@ mod tests {
     #[test]
     fn focus_scan_skips_active_then_uploads_terminal_once() {
         let conn = db::test_conn();
+        prime(&conn);
         // An active session must NOT be uploaded (it would freeze on the hub as active).
         conn.execute(
             "INSERT INTO focus_sessions (id, goal, started_at, duration_minutes, ends_at, allowed, blocked, status)
@@ -728,11 +861,10 @@ mod tests {
         let conn = db::test_conn();
         let day = chrono::Local::now().format("%Y-%m-%d").to_string();
 
-        // Nothing logged yet → no mutable events.
-        assert_eq!(scan_and_enqueue(&conn), 0);
+        // First scan registers the seeded definitions, then everything is quiet.
+        prime(&conn);
 
         // Log a check-in (+ note) and a goal on the desktop.
-        tempo_core::models::ensure_checkin_defaults(&conn).unwrap();
         tempo_core::models::set_checkin_value(&conn, &day, "gym_logged", 1).unwrap();
         conn.execute(
             "INSERT INTO daily_checkin (day, notes) VALUES (?1, 'leg day')",
@@ -766,5 +898,64 @@ mod tests {
         conn.execute("UPDATE goals SET completed = 1 WHERE day = ?1 AND title = 'Ship v2'", params![day])
             .unwrap();
         assert!(scan_and_enqueue(&conn) >= 1);
+    }
+
+    #[test]
+    fn checkin_definitions_and_cleared_overrides_sync() {
+        let conn = db::test_conn();
+        let day = chrono::Local::now().format("%Y-%m-%d").to_string();
+        prime(&conn);
+
+        // Creating an auto check-in syncs its full definition (no value event needed).
+        tempo_core::models::upsert_checkin_definition(
+            &conn,
+            &tempo_core::models::CheckinDefinition {
+                id: "read_bible".into(),
+                label: "Read Bible".into(),
+                icon: "📖".into(),
+                kind: "toggle".into(),
+                built_in: false,
+                auto_kind: "target".into(),
+                auto_metric: "bible".into(),
+                auto_threshold: 30,
+            },
+        )
+        .unwrap();
+        assert_eq!(scan_and_enqueue(&conn), 1);
+        let payload: String = conn
+            .query_row(
+                "SELECT payload_json FROM sync_queue WHERE event_id LIKE 'checkin_def:read_bible:%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(payload.contains("\"autoKind\":\"target\""));
+        assert!(payload.contains("\"autoThreshold\":30"));
+
+        // Manually overriding it syncs a value event; clearing the override syncs a clear.
+        tempo_core::models::set_checkin_value(&conn, &day, "read_bible", 0).unwrap();
+        assert_eq!(scan_and_enqueue(&conn), 1);
+        tempo_core::models::clear_checkin_value(&conn, &day, "read_bible").unwrap();
+        assert_eq!(scan_and_enqueue(&conn), 1);
+        let cleared: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_queue WHERE event_id LIKE 'checkin:%:read_bible:clear:%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cleared, 1);
+
+        // Deleting the definition syncs a deletion marker.
+        tempo_core::models::delete_checkin_definition(&conn, "read_bible").unwrap();
+        assert_eq!(scan_and_enqueue(&conn), 1);
+        let del: String = conn
+            .query_row(
+                "SELECT payload_json FROM sync_queue WHERE event_id LIKE 'checkin_def:read_bible:del:%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(del.contains("\"deleted\":true"));
     }
 }

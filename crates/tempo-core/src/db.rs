@@ -164,14 +164,21 @@ CREATE TABLE IF NOT EXISTS daily_checkin (
 -- Editable check-in definitions ("things the tracker can't see"). The built-ins
 -- are seeded as editable rows; users can add/rename/delete their own.
 -- kind: 'toggle' (done / not done) or 'counter' (0..N per day).
+-- auto_kind: '' = manual only, 'target' = met after auto_threshold active minutes
+-- on an app/site matching auto_metric, 'output' = met after auto_threshold
+-- detected output files (auto_metric = output type or watched-folder label,
+-- blank = any). A manual checkin_values row always overrides auto detection.
 CREATE TABLE IF NOT EXISTS checkin_definitions (
-    id         TEXT PRIMARY KEY,
-    label      TEXT NOT NULL,
-    icon       TEXT NOT NULL DEFAULT '✅',
-    kind       TEXT NOT NULL DEFAULT 'toggle',
-    built_in   INTEGER NOT NULL DEFAULT 0,
-    sort_order INTEGER NOT NULL DEFAULT 0,
-    updated_at TEXT NOT NULL
+    id             TEXT PRIMARY KEY,
+    label          TEXT NOT NULL,
+    icon           TEXT NOT NULL DEFAULT '✅',
+    kind           TEXT NOT NULL DEFAULT 'toggle',
+    built_in       INTEGER NOT NULL DEFAULT 0,
+    sort_order     INTEGER NOT NULL DEFAULT 0,
+    auto_kind      TEXT NOT NULL DEFAULT '',
+    auto_metric    TEXT NOT NULL DEFAULT '',
+    auto_threshold INTEGER NOT NULL DEFAULT 0,
+    updated_at     TEXT NOT NULL
 );
 
 -- One row per (day, check-in) actually logged.
@@ -277,6 +284,8 @@ CREATE TABLE IF NOT EXISTS output_events (
 CREATE INDEX IF NOT EXISTS idx_output_day ON output_events(day);
 
 -- Consistency streaks for meaningful behaviours.
+-- days_per_week: 0 = every day (runs counted in days); 1..7 = "met on N+ days
+-- per ISO week" (runs counted in weeks; an in-progress week never breaks a run).
 CREATE TABLE IF NOT EXISTS streak_definitions (
     id                 TEXT PRIMARY KEY,          -- stable slug
     name               TEXT    NOT NULL,
@@ -287,6 +296,7 @@ CREATE TABLE IF NOT EXISTS streak_definitions (
     sort_order         INTEGER NOT NULL DEFAULT 0,
     best_streak        INTEGER NOT NULL DEFAULT 0,
     last_completed_day TEXT,
+    days_per_week      INTEGER NOT NULL DEFAULT 0,
     updated_at         TEXT    NOT NULL
 );
 
@@ -434,6 +444,19 @@ fn migrate(conn: &Connection) {
             sort_order INTEGER NOT NULL DEFAULT 0,
             updated_at TEXT NOT NULL
         )",
+        [],
+    );
+    // Auto-detection source on check-ins; weekly cadence on streaks.
+    let _ = conn
+        .execute("ALTER TABLE checkin_definitions ADD COLUMN auto_kind TEXT NOT NULL DEFAULT ''", []);
+    let _ = conn
+        .execute("ALTER TABLE checkin_definitions ADD COLUMN auto_metric TEXT NOT NULL DEFAULT ''", []);
+    let _ = conn.execute(
+        "ALTER TABLE checkin_definitions ADD COLUMN auto_threshold INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE streak_definitions ADD COLUMN days_per_week INTEGER NOT NULL DEFAULT 0",
         [],
     );
     migrate_legacy_checkins(conn);

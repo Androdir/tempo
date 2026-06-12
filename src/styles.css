@@ -1700,6 +1700,45 @@ tr.row-dim .tick.off {
   text-align: center;
 }
 
+/* Second editor row: optional auto-detection source for a check-in. */
+.checkin-editor-auto {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+.checkin-editor-auto .search {
+  flex: 1;
+  min-width: 200px;
+}
+
+/* "⚡ 22m" auto-detection badge on a check-in chip. */
+.ci-auto {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-radius: 999px;
+  padding: 1px 7px;
+  white-space: nowrap;
+}
+
+/* Weekly-cadence chip on streak cards and manage rows. */
+.streak-cadence {
+  font-size: 11px;
+  color: var(--muted-chip-text);
+  background: var(--muted-chip);
+  border-radius: 999px;
+  padding: 1px 7px;
+  white-space: nowrap;
+  margin-left: 6px;
+}
+.streak-weekly {
+  margin: 2px 0 6px;
+  font-size: 12px;
+}
+
 /* Add a streak (Streaks page) / add a score rule (Daily Score page). */
 .streak-add-row,
 .rule-add-row {

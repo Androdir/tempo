@@ -567,6 +567,11 @@ fn dispatch(conn: &Connection, cmd: &str, args: &Value) -> Result<Value, String>
             }
             Ok(Value::Null)
         }
+        "clear_checkin" => {
+            let field = args.get("field").and_then(|v| v.as_str()).ok_or("missing field")?;
+            models::clear_checkin_value(conn, &day, field)?;
+            Ok(Value::Null)
+        }
         "get_checkin_definitions" => {
             Ok(serde_json::to_value(models::list_checkin_definitions(conn).map_err(|e| e.to_string())?).unwrap())
         }
@@ -643,6 +648,7 @@ fn dispatch(conn: &Connection, cmd: &str, args: &Value) -> Result<Value, String>
                     metric: d.metric,
                     threshold: d.threshold,
                     enabled: d.enabled,
+                    days_per_week: d.days_per_week,
                 })
                 .collect();
             Ok(serde_json::to_value(defs).unwrap())
@@ -679,7 +685,8 @@ fn dispatch(conn: &Connection, cmd: &str, args: &Value) -> Result<Value, String>
             let kind = args.get("kind").and_then(|v| v.as_str()).unwrap_or("");
             let metric = args.get("metric").and_then(|v| v.as_str()).unwrap_or("");
             let threshold = args.get("threshold").and_then(|v| v.as_i64()).unwrap_or(0);
-            tempo_core::streaks::add_definition(conn, id, name, kind, metric, threshold)?;
+            let days_per_week = args.get("daysPerWeek").and_then(|v| v.as_i64()).unwrap_or(0);
+            tempo_core::streaks::add_definition(conn, id, name, kind, metric, threshold, days_per_week)?;
             Ok(Value::Null)
         }
         "delete_streak_definition" => {
@@ -1025,6 +1032,62 @@ mod tests {
         dispatch(&conn, "delete_checkin_definition", &json!({"id": "growth_research"})).unwrap();
         let c = dispatch(&conn, "get_checkins", &json!({})).unwrap();
         assert!(c.as_array().unwrap().iter().all(|x| x["id"] != "growth_research"));
+    }
+
+    #[test]
+    fn checkin_def_event_syncs_full_definition_and_deletion() {
+        let conn = db::test_conn();
+        // A definition event carries the auto-detection config end-to-end.
+        let mut e = app_event("checkin_def:read_bible:1", "x", 0);
+        e.event_type = "checkin_def".into();
+        e.app_name = None;
+        e.duration_seconds = None;
+        e.metadata = Some(serde_json::json!({
+            "id": "read_bible", "label": "Read Bible", "icon": "📖", "kind": "toggle",
+            "autoKind": "target", "autoMetric": "bible", "autoThreshold": 30
+        }));
+        assert!(events::ingest_event(&conn, "desktop", &e).unwrap());
+        let defs = dispatch(&conn, "get_checkin_definitions", &json!({})).unwrap();
+        let d = defs.as_array().unwrap().iter().find(|d| d["id"] == "read_bible").expect("synced");
+        assert_eq!(d["autoKind"], "target");
+        assert_eq!(d["autoThreshold"], 30);
+
+        // The hub now auto-detects from its own (multi-device) activity.
+        conn.execute(
+            "INSERT INTO activity_log (timestamp, day, app_name, window_title, duration_seconds, is_idle)
+             VALUES ('2026-01-01T10:00:00+00:00', '2026-01-01', 'Bible App', 'x', 2400, 0)",
+            [],
+        )
+        .unwrap();
+        let c = dispatch(&conn, "get_checkins", &json!({"day": "2026-01-01"})).unwrap();
+        let bible = c.as_array().unwrap().iter().find(|x| x["id"] == "read_bible").unwrap();
+        assert_eq!(bible["value"], 1); // 40 min ≥ 30 min threshold
+        assert_eq!(bible["detected"], 40);
+
+        // A cleared-override event deletes any manual row.
+        dispatch(&conn, "set_checkin", &json!({"day": "2026-01-01", "field": "read_bible", "value": 0}))
+            .unwrap();
+        let mut clear = app_event("checkin:2026-01-01:read_bible:clear:2", "x", 0);
+        clear.event_type = "checkin".into();
+        clear.app_name = None;
+        clear.duration_seconds = None;
+        clear.day = "2026-01-01".into();
+        clear.metadata = Some(serde_json::json!({ "field": "read_bible", "cleared": true }));
+        assert!(events::ingest_event(&conn, "desktop", &clear).unwrap());
+        let c = dispatch(&conn, "get_checkins", &json!({"day": "2026-01-01"})).unwrap();
+        let bible = c.as_array().unwrap().iter().find(|x| x["id"] == "read_bible").unwrap();
+        assert_eq!(bible["value"], 1); // back to auto
+        assert_eq!(bible["overridden"], false);
+
+        // A deletion event removes the definition.
+        let mut del = app_event("checkin_def:read_bible:del:3", "x", 0);
+        del.event_type = "checkin_def".into();
+        del.app_name = None;
+        del.duration_seconds = None;
+        del.metadata = Some(serde_json::json!({ "id": "read_bible", "deleted": true }));
+        assert!(events::ingest_event(&conn, "desktop", &del).unwrap());
+        let defs = dispatch(&conn, "get_checkin_definitions", &json!({})).unwrap();
+        assert!(defs.as_array().unwrap().iter().all(|d| d["id"] != "read_bible"));
     }
 
     #[test]

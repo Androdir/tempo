@@ -287,7 +287,14 @@ fn default_priority() -> String {
     "medium".to_string()
 }
 
-/// A user-editable check-in definition ("things the tracker can't see").
+/// A user-editable check-in definition ("things the tracker can't see" — unless
+/// an auto source is set, in which case the tracker *can* see it and ticks the
+/// check-in itself).
+///
+/// `auto_kind`: `""` = manual only · `"target"` = met after `auto_threshold`
+/// active (non-idle) minutes on an app/site matching `auto_metric` ·
+/// `"output"` = met after `auto_threshold` detected output files
+/// (`auto_metric` = output type or watched-folder label, blank = any output).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckinDefinition {
@@ -296,10 +303,17 @@ pub struct CheckinDefinition {
     pub icon: String,
     pub kind: String, // toggle | counter
     pub built_in: bool,
+    #[serde(default)]
+    pub auto_kind: String, // "" | target | output
+    #[serde(default)]
+    pub auto_metric: String,
+    #[serde(default)]
+    pub auto_threshold: i64,
 }
 
-/// A check-in definition together with its value for a specific day.
-/// Toggles use 0/1; counters use 0..N.
+/// A check-in definition together with its effective value for a specific day.
+/// Toggles use 0/1; counters use 0..N. For auto check-ins the value comes from
+/// detection unless a manual row exists (the manual override always wins).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckinValue {
@@ -308,6 +322,12 @@ pub struct CheckinValue {
     pub icon: String,
     pub kind: String,
     pub value: i64,
+    /// This check-in has an auto-detection source configured.
+    pub auto: bool,
+    /// Raw detected amount today: active minutes (target) or file count (output).
+    pub detected: i64,
+    /// An auto check-in whose value was manually overridden for this day.
+    pub overridden: bool,
 }
 
 const CHECKIN_DEFAULTS_SEEDED: &str = "checkin_defaults_seeded";
@@ -353,7 +373,7 @@ pub fn ensure_checkin_defaults(conn: &Connection) -> rusqlite::Result<()> {
 pub fn list_checkin_definitions(conn: &Connection) -> rusqlite::Result<Vec<CheckinDefinition>> {
     ensure_checkin_defaults(conn)?;
     let mut stmt = conn.prepare(
-        "SELECT id, label, icon, kind, built_in
+        "SELECT id, label, icon, kind, built_in, auto_kind, auto_metric, auto_threshold
          FROM checkin_definitions ORDER BY sort_order, label",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -363,6 +383,9 @@ pub fn list_checkin_definitions(conn: &Connection) -> rusqlite::Result<Vec<Check
             icon: r.get(2)?,
             kind: r.get(3)?,
             built_in: r.get::<_, i64>(4)? != 0,
+            auto_kind: r.get(5)?,
+            auto_metric: r.get(6)?,
+            auto_threshold: r.get(7)?,
         })
     })?;
     rows.collect()
@@ -391,6 +414,20 @@ pub fn upsert_checkin_definition(conn: &Connection, c: &CheckinDefinition) -> Re
     if !["toggle", "counter"].contains(&c.kind.as_str()) {
         return Err("Check-in kind must be toggle or counter".into());
     }
+    if !["", "target", "output"].contains(&c.auto_kind.as_str()) {
+        return Err("Auto-detect must be blank, target or output".into());
+    }
+    let auto_metric = c.auto_metric.trim().to_ascii_lowercase();
+    if c.auto_kind == "target" && auto_metric.is_empty() {
+        return Err("Enter the app/site name this check-in watches".into());
+    }
+    // Sensible thresholds when unset: 30 active minutes for app/site time,
+    // 1 detected file for outputs.
+    let auto_threshold = match c.auto_kind.as_str() {
+        "target" => if c.auto_threshold > 0 { c.auto_threshold.clamp(1, 1440) } else { 30 },
+        "output" => if c.auto_threshold > 0 { c.auto_threshold.clamp(1, 999) } else { 1 },
+        _ => 0,
+    };
     let _ = ensure_checkin_defaults(conn);
     let now = chrono::Utc::now().to_rfc3339();
     let icon = if c.icon.trim().is_empty() { "✅" } else { c.icon.trim() };
@@ -398,14 +435,18 @@ pub fn upsert_checkin_definition(conn: &Connection, c: &CheckinDefinition) -> Re
         .query_row("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM checkin_definitions", [], |r| r.get(0))
         .unwrap_or(0);
     conn.execute(
-        "INSERT INTO checkin_definitions (id, label, icon, kind, built_in, sort_order, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO checkin_definitions
+           (id, label, icon, kind, built_in, sort_order, auto_kind, auto_metric, auto_threshold, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
          ON CONFLICT(id) DO UPDATE SET
              label = excluded.label,
              icon = excluded.icon,
              kind = excluded.kind,
+             auto_kind = excluded.auto_kind,
+             auto_metric = excluded.auto_metric,
+             auto_threshold = excluded.auto_threshold,
              updated_at = excluded.updated_at",
-        params![id, c.label.trim(), icon, c.kind, c.built_in as i64, sort, now],
+        params![id, c.label.trim(), icon, c.kind, c.built_in as i64, sort, c.auto_kind, auto_metric, auto_threshold, now],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -433,11 +474,83 @@ pub fn delete_checkin_definition(conn: &Connection, id: &str) -> Result<(), Stri
     Ok(())
 }
 
-/// All check-in definitions with their value for `day` (0 when not logged).
+/// Raw detected amount for an auto check-in on `day`: active (non-idle) minutes
+/// on the matching app/site for `target`, or matching output-event count for
+/// `output`. Returns 0 for manual check-ins.
+pub fn auto_detected_amount(conn: &Connection, day: &str, def: &CheckinDefinition) -> i64 {
+    match def.auto_kind.as_str() {
+        "target" => {
+            // Any of the comma-separated names may match (substring, lowercased),
+            // summed across the desktop and browser lanes. Idle time never counts —
+            // leaving the app open while AFK doesn't tick the check-in.
+            let mut seconds = 0i64;
+            for m in def.auto_metric.split(',') {
+                let pat = format!("%{}%", m.trim().to_ascii_lowercase());
+                if pat == "%%" {
+                    continue;
+                }
+                seconds += conn
+                    .query_row(
+                        "SELECT COALESCE(SUM(duration_seconds), 0) FROM activity_log
+                         WHERE day = ?1 AND is_idle = 0 AND LOWER(app_name) LIKE ?2",
+                        params![day, pat],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .unwrap_or(0);
+                seconds += conn
+                    .query_row(
+                        "SELECT COALESCE(SUM(duration_seconds), 0) FROM browser_activity
+                         WHERE day = ?1 AND is_idle = 0 AND LOWER(domain) LIKE ?2",
+                        params![day, pat],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .unwrap_or(0);
+            }
+            seconds / 60
+        }
+        "output" => {
+            let metric = def.auto_metric.trim().to_ascii_lowercase();
+            if metric.is_empty() {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM output_events WHERE day = ?1",
+                    [day],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap_or(0)
+            } else {
+                // Match the event type exactly, or the watched folder's label.
+                conn.query_row(
+                    "SELECT COUNT(*) FROM output_events e
+                     LEFT JOIN watched_folders w ON w.path = e.folder_path
+                     WHERE e.day = ?1 AND (e.event_type = ?2 OR LOWER(w.label) LIKE ?3)",
+                    params![day, metric, format!("%{metric}%")],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap_or(0)
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// Effective auto value from a detected amount: toggles flip at the threshold;
+/// counters count files (output) or full threshold-blocks of time (target).
+fn auto_value(def: &CheckinDefinition, amount: i64) -> i64 {
+    let thr = def.auto_threshold.max(1);
+    if def.kind == "counter" {
+        if def.auto_kind == "target" { amount / thr } else { amount }
+    } else {
+        (amount >= thr) as i64
+    }
+}
+
+/// All check-in definitions with their effective value for `day` (0 when not
+/// logged). Auto check-ins read live detection unless a manual row overrides.
 pub fn checkin_values_for_day(conn: &Connection, day: &str) -> Vec<CheckinValue> {
     let _ = ensure_checkin_defaults(conn);
     let mut stmt = match conn.prepare(
-        "SELECT d.id, d.label, d.icon, d.kind, COALESCE(v.value, 0)
+        "SELECT d.id, d.label, d.icon, d.kind, d.built_in, d.auto_kind, d.auto_metric,
+                d.auto_threshold, v.value
          FROM checkin_definitions d
          LEFT JOIN checkin_values v ON v.checkin_id = d.id AND v.day = ?1
          ORDER BY d.sort_order, d.label",
@@ -446,18 +559,44 @@ pub fn checkin_values_for_day(conn: &Connection, day: &str) -> Vec<CheckinValue>
         Err(_) => return Vec::new(),
     };
     let rows = stmt.query_map([day], |r| {
-        Ok(CheckinValue {
+        let def = CheckinDefinition {
             id: r.get(0)?,
             label: r.get(1)?,
             icon: r.get(2)?,
             kind: r.get(3)?,
-            value: r.get(4)?,
-        })
+            built_in: r.get::<_, i64>(4)? != 0,
+            auto_kind: r.get(5)?,
+            auto_metric: r.get(6)?,
+            auto_threshold: r.get(7)?,
+        };
+        Ok((def, r.get::<_, Option<i64>>(8)?))
     });
-    match rows {
+    let pairs: Vec<(CheckinDefinition, Option<i64>)> = match rows {
         Ok(rs) => rs.filter_map(Result::ok).collect(),
-        Err(_) => Vec::new(),
-    }
+        Err(_) => return Vec::new(),
+    };
+    pairs
+        .into_iter()
+        .map(|(def, manual)| {
+            let auto = !def.auto_kind.is_empty();
+            let detected = if auto { auto_detected_amount(conn, day, &def) } else { 0 };
+            let value = match manual {
+                Some(v) => v,
+                None if auto => auto_value(&def, detected),
+                None => 0,
+            };
+            CheckinValue {
+                id: def.id,
+                label: def.label,
+                icon: def.icon,
+                kind: def.kind,
+                value,
+                auto,
+                detected,
+                overridden: auto && manual.is_some(),
+            }
+        })
+        .collect()
 }
 
 /// Check-in values for `day` as an id → value map (only definitions that exist).
@@ -479,6 +618,15 @@ pub fn set_checkin_value(conn: &Connection, day: &str, id: &str, value: i64) -> 
         params![day, id, v, chrono::Utc::now().to_rfc3339()],
     )
     .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Remove a manual check-in row for a day, so an auto check-in falls back to
+/// live detection (and a manual one back to 0).
+pub fn clear_checkin_value(conn: &Connection, day: &str, id: &str) -> Result<(), String> {
+    let id = id.trim().to_ascii_lowercase();
+    conn.execute("DELETE FROM checkin_values WHERE day = ?1 AND checkin_id = ?2", params![day, id])
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -880,8 +1028,12 @@ pub struct Streak {
     pub metric: String,
     pub threshold: i64,
     pub enabled: bool,
+    /// 0 = daily streak (current/best in days); 1..7 = weekly (current/best in weeks).
+    pub days_per_week: i64,
     pub current: i64,
     pub best: i64,
+    /// Met days so far in the current ISO week (weekly streaks only).
+    pub week_met_days: i64,
     pub last_completed_day: Option<String>,
     pub calendar: Vec<StreakDay>, // oldest → newest (today last)
 }
@@ -895,6 +1047,7 @@ pub struct StreakDefinition {
     pub metric: String,
     pub threshold: i64,
     pub enabled: bool,
+    pub days_per_week: i64,
 }
 
 // ------------------------------------------------------- proof-of-work timeline

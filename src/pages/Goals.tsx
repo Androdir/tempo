@@ -1,10 +1,12 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import {
   addGoal,
+  clearCheckin,
   copyLockinPlanToGoals,
   copyPreviousGoals,
   deleteCheckinDefinition,
   deleteGoal,
+  getCheckinDefinitions,
   getCheckins,
   getGoals,
   getProjects,
@@ -15,15 +17,47 @@ import {
   upsertCheckinDefinition,
 } from "../api";
 import { isoOffset } from "../components/LockinPlan";
-import type { CheckinDefinition, CheckinValue, Goal, GoalDraft, Priority, Project } from "../types";
+import type {
+  CheckinAutoKind,
+  CheckinDefinition,
+  CheckinValue,
+  Goal,
+  GoalDraft,
+  Priority,
+  Project,
+} from "../types";
 
 const PRIORITIES: Priority[] = ["high", "medium", "low"];
 
-const EMPTY_CHECKIN: CheckinDefinition = { id: "", label: "", icon: "✅", kind: "toggle", builtIn: false };
+const EMPTY_CHECKIN: CheckinDefinition = {
+  id: "",
+  label: "",
+  icon: "✅",
+  kind: "toggle",
+  builtIn: false,
+  autoKind: "",
+  autoMetric: "",
+  autoThreshold: 0,
+};
+
+const AUTO_OPTIONS: { value: CheckinAutoKind; label: string; hint: string }[] = [
+  { value: "", label: "Manual only", hint: "You tap it yourself." },
+  {
+    value: "target",
+    label: "Auto: app/site time",
+    hint: "Ticks itself after N active minutes on a matching app or website — idle/AFK time never counts. You can still override it by hand.",
+  },
+  {
+    value: "output",
+    label: "Auto: detected file output",
+    hint: "Ticks itself when the proof-of-output watcher detects N new files (match an output type or a watched-folder label; blank = any output). Counters count the files.",
+  },
+];
 
 export default function Goals() {
   const [goals, setGoals] = useState<Goal[]>([]);
   const [checkins, setCheckins] = useState<CheckinValue[] | null>(null);
+  const [checkinDefs, setCheckinDefs] = useState<CheckinDefinition[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -47,9 +81,15 @@ export default function Goals() {
 
   const load = useCallback(async () => {
     try {
-      const [g, c, p] = await Promise.all([getGoals(), getCheckins(), getProjects()]);
+      const [g, c, d, p] = await Promise.all([
+        getGoals(),
+        getCheckins(),
+        getCheckinDefinitions(),
+        getProjects(),
+      ]);
       setGoals(g);
       setCheckins(c);
+      setCheckinDefs(d);
       setProjects(p);
       setError(null);
     } catch (e) {
@@ -180,11 +220,29 @@ export default function Goals() {
     }
   }
 
+  async function revertToAuto(id: string) {
+    try {
+      await clearCheckin(id);
+      await load();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  function editCheckinDef(id: string) {
+    const def = checkinDefs.find((d) => d.id === id);
+    if (def) setCheckinDraft({ ...def });
+  }
+
   async function saveCheckinDef() {
     const id =
       (checkinDraft.id || checkinDraft.label).trim().toLowerCase().replace(/\s+/g, "_").replace(/[^a-z0-9_-]/g, "");
     if (!id || !checkinDraft.label.trim()) {
       setError("Check-in label is required");
+      return;
+    }
+    if (checkinDraft.autoKind === "target" && !checkinDraft.autoMetric.trim()) {
+      setError("Enter the app/site name this check-in watches");
       return;
     }
     try {
@@ -415,11 +473,36 @@ export default function Goals() {
             <p className="empty-hint">No check-ins defined — add the habits you want to log below.</p>
           ) : (
             <div className="checkin-grid">
-              {checkins.map((c) =>
-                c.kind === "counter" ? (
+              {checkins.map((c) => {
+                const def = checkinDefs.find((d) => d.id === c.id);
+                const autoBadge = c.auto ? (
+                  <span
+                    className="ci-auto"
+                    title={
+                      (def?.autoKind === "output"
+                        ? `Auto: ${c.detected} file(s) detected today`
+                        : `Auto: ${c.detected} active min on “${def?.autoMetric ?? ""}” today (needs ${def?.autoThreshold ?? 0}m)`) +
+                      (c.overridden ? " — manually overridden" : "")
+                    }
+                  >
+                    ⚡{def?.autoKind === "output" ? c.detected : `${c.detected}m`}
+                  </span>
+                ) : null;
+                const revert = c.overridden ? (
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    title="Remove manual override — back to auto detection"
+                    onClick={() => revertToAuto(c.id)}
+                  >
+                    ↺
+                  </button>
+                ) : null;
+                return c.kind === "counter" ? (
                   <div key={c.id} className={`checkin-chip ${c.value > 0 ? "on" : ""}`}>
                     <span className="ci-icon">{c.icon}</span>
                     <span className="ci-label">{c.label}</span>
+                    {autoBadge}
                     <span className="ci-stepper">
                       <button type="button" onClick={() => setValue(c.id, c.value - 1)}>
                         −
@@ -429,9 +512,10 @@ export default function Goals() {
                         +
                       </button>
                     </span>
+                    {revert}
                     {manageCheckins && (
                       <CheckinManageButtons
-                        onEdit={() => setCheckinDraft({ id: c.id, label: c.label, icon: c.icon, kind: c.kind, builtIn: false })}
+                        onEdit={() => editCheckinDef(c.id)}
                         onDelete={() => removeCheckinDef(c)}
                       />
                     )}
@@ -445,54 +529,113 @@ export default function Goals() {
                     >
                       <span className="ci-icon">{c.icon}</span>
                       <span className="ci-label">{c.label}</span>
+                      {autoBadge}
                       <span className="ci-state">{c.value > 0 ? "✓" : "+"}</span>
                     </button>
+                    {revert}
                     {manageCheckins && (
                       <CheckinManageButtons
-                        onEdit={() => setCheckinDraft({ id: c.id, label: c.label, icon: c.icon, kind: c.kind, builtIn: false })}
+                        onEdit={() => editCheckinDef(c.id)}
                         onDelete={() => removeCheckinDef(c)}
                       />
                     )}
                   </div>
-                ),
-              )}
+                );
+              })}
             </div>
           )}
           {manageCheckins && (
-            <div className="checkin-editor">
-              <input
-                className="search"
-                placeholder="Label, e.g. Posted affiliate video"
-                value={checkinDraft.label}
-                onChange={(e) => setCheckinDraft({ ...checkinDraft, label: e.target.value })}
-              />
-              <input
-                className="search ci-icon-input"
-                placeholder="✅"
-                value={checkinDraft.icon}
-                maxLength={4}
-                onChange={(e) => setCheckinDraft({ ...checkinDraft, icon: e.target.value })}
-                aria-label="Check-in icon (emoji)"
-              />
-              <select
-                className="select"
-                value={checkinDraft.kind}
-                onChange={(e) =>
-                  setCheckinDraft({ ...checkinDraft, kind: e.target.value as CheckinDefinition["kind"] })
-                }
-              >
-                <option value="toggle">Done / not done</option>
-                <option value="counter">Counter (×N)</option>
-              </select>
-              <button className="btn btn-primary" onClick={saveCheckinDef}>
-                {checkinDraft.id ? "Save" : "Add"}
-              </button>
-              {checkinDraft.id && (
-                <button className="btn" onClick={() => setCheckinDraft({ ...EMPTY_CHECKIN })}>
-                  Cancel
+            <>
+              <div className="checkin-editor">
+                <input
+                  className="search"
+                  placeholder="Label, e.g. Posted affiliate video"
+                  value={checkinDraft.label}
+                  onChange={(e) => setCheckinDraft({ ...checkinDraft, label: e.target.value })}
+                />
+                <input
+                  className="search ci-icon-input"
+                  placeholder="✅"
+                  value={checkinDraft.icon}
+                  maxLength={4}
+                  onChange={(e) => setCheckinDraft({ ...checkinDraft, icon: e.target.value })}
+                  aria-label="Check-in icon (emoji)"
+                />
+                <select
+                  className="select"
+                  value={checkinDraft.kind}
+                  onChange={(e) =>
+                    setCheckinDraft({ ...checkinDraft, kind: e.target.value as CheckinDefinition["kind"] })
+                  }
+                >
+                  <option value="toggle">Done / not done</option>
+                  <option value="counter">Counter (×N)</option>
+                </select>
+                <button className="btn btn-primary" onClick={saveCheckinDef}>
+                  {checkinDraft.id ? "Save" : "Add"}
                 </button>
-              )}
-            </div>
+                {checkinDraft.id && (
+                  <button className="btn" onClick={() => setCheckinDraft({ ...EMPTY_CHECKIN })}>
+                    Cancel
+                  </button>
+                )}
+              </div>
+              <div className="checkin-editor-auto">
+                <select
+                  className="select"
+                  value={checkinDraft.autoKind}
+                  onChange={(e) => {
+                    const autoKind = e.target.value as CheckinAutoKind;
+                    setCheckinDraft({
+                      ...checkinDraft,
+                      autoKind,
+                      autoMetric: "",
+                      autoThreshold: autoKind === "target" ? 30 : autoKind === "output" ? 1 : 0,
+                    });
+                  }}
+                >
+                  {AUTO_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
+                </select>
+                {checkinDraft.autoKind === "target" && (
+                  <input
+                    className="search"
+                    placeholder="app/site to watch, e.g. bible or youlearn.ai"
+                    value={checkinDraft.autoMetric}
+                    onChange={(e) => setCheckinDraft({ ...checkinDraft, autoMetric: e.target.value })}
+                  />
+                )}
+                {checkinDraft.autoKind === "output" && (
+                  <input
+                    className="search"
+                    placeholder="output type or folder label (blank = any), e.g. video_export"
+                    value={checkinDraft.autoMetric}
+                    onChange={(e) => setCheckinDraft({ ...checkinDraft, autoMetric: e.target.value })}
+                  />
+                )}
+                {checkinDraft.autoKind !== "" && (
+                  <label className="folder-num">
+                    <input
+                      className="pf-input"
+                      type="number"
+                      min={1}
+                      value={String(checkinDraft.autoThreshold || "")}
+                      onChange={(e) =>
+                        setCheckinDraft({
+                          ...checkinDraft,
+                          autoThreshold: Math.max(0, parseInt(e.target.value, 10) || 0),
+                        })
+                      }
+                    />
+                    {checkinDraft.autoKind === "target" ? "min" : "files"}
+                  </label>
+                )}
+              </div>
+              <p className="card-hint" style={{ marginTop: 8, marginBottom: 0 }}>
+                {AUTO_OPTIONS.find((o) => o.value === checkinDraft.autoKind)?.hint}
+              </p>
+            </>
           )}
         </div>
       )}

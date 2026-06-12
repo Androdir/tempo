@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use chrono::{Duration, Local, Utc};
+use chrono::{Datelike, Duration, Local, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::classify;
@@ -733,11 +733,17 @@ pub fn compute_streaks(conn: &Connection) -> Result<Vec<Streak>, String> {
         .collect();
     let metrics: Vec<crate::streaks::DayMetrics> = days.iter().map(|d| day_metrics(conn, d)).collect();
 
+    let today_weekday0 = today.weekday().num_days_from_monday() as usize;
     let mut out = Vec::new();
     for def in &defs {
         let status: Vec<bool> = metrics.iter().map(|m| crate::streaks::streak_met(def, m)).collect();
-        let current = crate::streaks::current_run(&status);
-        let best = def.best_streak.max(crate::streaks::best_run(&status)).max(current);
+        // Daily streaks run in days; weekly ("N days per week") streaks in weeks.
+        let (current, window_best, week_met_days) = if def.days_per_week > 0 {
+            crate::streaks::weekly_runs(&status, today_weekday0, def.days_per_week)
+        } else {
+            (crate::streaks::current_run(&status), crate::streaks::best_run(&status), 0)
+        };
+        let best = def.best_streak.max(window_best).max(current);
         let last = days
             .iter()
             .zip(&status)
@@ -759,8 +765,10 @@ pub fn compute_streaks(conn: &Connection) -> Result<Vec<Streak>, String> {
             metric: def.metric.clone(),
             threshold: def.threshold,
             enabled: def.enabled,
+            days_per_week: def.days_per_week,
             current,
             best,
+            week_met_days,
             last_completed_day: last,
             calendar,
         });

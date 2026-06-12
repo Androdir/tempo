@@ -34,7 +34,9 @@ A local-first desktop productivity tracker. It samples your **active window** ev
   rule-based fallback; editable, and one click sends it to tomorrow's goals.
 - **Streaks** — consistency on the behaviours *you* choose: create your own streaks (check-in
   logged, minutes in a category, main goal, unbroken focus block, no-major-distraction day),
-  or start from a suggested set; current/best runs and a 4-week heatmap.
+  or start from a suggested set; current/best runs and a 4-week heatmap. Each streak is daily
+  **or weekly** ("gym 4×/week") — weekly streaks count consecutive qualifying weeks, so rest
+  days never break them.
 - **Activity Log** — all desktop/web/screen samples with final classification, project match,
   confidence score, and ability to manually correct any entry.
 - **Browser Activity** — per-website time breakdown; click a site to see recent pages with
@@ -62,6 +64,12 @@ A local-first desktop productivity tracker. It samples your **active window** ev
   or delete check-ins (done/not-done toggles or ×N counters); the defaults (video posted, gym,
   wrestling, studied…) are just seeded rows you can remove. Check-ins feed the score, streaks,
   timeline, weekly review, and AI review, and sync across devices.
+- **Auto check-ins** — a check-in can tick itself from real evidence instead of a tap:
+  *app/site time* (e.g. "Read Bible" once you've spent 30+ active minutes on the Bible app —
+  idle/AFK time never counts) or *detected file output* via the proof-of-output watcher (e.g.
+  "Posted video" counts new exports in your edited-footage folder). Threshold and match are
+  per-check-in. A manual tap always overrides auto detection (with one click back to auto), so
+  a false positive never sticks. The hub recomputes auto check-ins across **all** devices.
 
 ### Accountability (soft enforcement)
 - **Distraction warnings** — when spending >X continuous minutes on a distracting app/site,
@@ -429,9 +437,17 @@ gym, 60+ min focus block…) to start from. For each of the last 28 days a `DayM
 from check-ins + category minutes + block maxima + output counts, and each streak's condition is
 evaluated. The **current run** counts consecutive met days ending today (or yesterday, if
 today's still in progress); **best** is the longest run, persisted so it survives the window.
-Streaks can be renamed, re-thresholded, enabled/disabled, and deleted. Pure run-maths and
-condition evaluation are unit-tested; integration tests check consecutive/broken runs and the
-disabled filter.
+
+Each streak has a **cadence**: daily (default) or **N days per week** — built for schedules
+like "gym 4×/week" where rest days are part of the plan. Weekly streaks group the window into
+ISO weeks (Mon–Sun) and count **consecutive qualifying weeks** (N+ met days); the in-progress
+week joins the run as soon as it qualifies and never breaks it before it ends, mirroring how
+daily runs treat an unfinished today. The card shows the cadence chip, runs in weeks, and a
+"this week: 2/4 days" progress line.
+
+Streaks can be renamed, re-thresholded, enabled/disabled, and deleted. Pure run-maths
+(daily + weekly) and condition evaluation are unit-tested; integration tests check
+consecutive/broken runs and the disabled filter.
 
 ### Daily Lock-In Plan (`lockin.rs`)
 A concrete plan for **tomorrow**, generated from today: score, completed/missed goals, biggest
@@ -552,15 +568,21 @@ CREATE TABLE daily_checkin (
 );
 
 -- Editable check-in definitions ("things the tracker can't see");
--- kind: 'toggle' (done/not done) or 'counter' (0..N per day)
+-- kind: 'toggle' (done/not done) or 'counter' (0..N per day).
+-- auto_kind: '' = manual only, 'target' = met after auto_threshold active
+-- minutes on an app/site matching auto_metric, 'output' = met after
+-- auto_threshold detected output files. Manual rows always override auto.
 CREATE TABLE checkin_definitions (
-    id         TEXT PRIMARY KEY,
-    label      TEXT NOT NULL,
-    icon       TEXT NOT NULL,
-    kind       TEXT NOT NULL,
-    built_in   INTEGER NOT NULL DEFAULT 0,
-    sort_order INTEGER NOT NULL DEFAULT 0,
-    updated_at TEXT NOT NULL
+    id             TEXT PRIMARY KEY,
+    label          TEXT NOT NULL,
+    icon           TEXT NOT NULL,
+    kind           TEXT NOT NULL,
+    built_in       INTEGER NOT NULL DEFAULT 0,
+    sort_order     INTEGER NOT NULL DEFAULT 0,
+    auto_kind      TEXT NOT NULL DEFAULT '',
+    auto_metric    TEXT NOT NULL DEFAULT '',
+    auto_threshold INTEGER NOT NULL DEFAULT 0,
+    updated_at     TEXT NOT NULL
 );
 
 -- One row per (day, check-in) actually logged

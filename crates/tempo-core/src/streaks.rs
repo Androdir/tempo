@@ -40,6 +40,9 @@ pub struct StreakDef {
     pub enabled: bool,
     pub best_streak: i64,
     pub last_completed_day: Option<String>,
+    /// 0 = every day (runs in days); 1..7 = met on N+ days per ISO week
+    /// (runs in weeks; the in-progress week never breaks a run).
+    pub days_per_week: i64,
 }
 
 /// (id, name, kind, metric, threshold) for the seeded defaults.
@@ -129,6 +132,80 @@ pub fn best_run(status: &[bool]) -> i64 {
     best
 }
 
+/// Group a daily met/not-met window (oldest→newest, today last) into ISO weeks
+/// (Mon–Sun). `today_weekday0` is today's weekday, 0 = Monday. Returns per-week
+/// met-day counts (current week last) and whether the first week is clipped by
+/// the window start (its count may under-report).
+fn week_counts(status: &[bool], today_weekday0: usize) -> (Vec<i64>, bool) {
+    let n = status.len();
+    if n == 0 {
+        return (Vec::new(), false);
+    }
+    let weekday0 = |i: usize| -> usize {
+        let offset = (n - 1 - i) as i64; // days before today
+        (((today_weekday0 as i64 - offset) % 7) + 7) as usize % 7
+    };
+    let mut counts: Vec<i64> = Vec::new();
+    for (i, &met) in status.iter().enumerate() {
+        if i == 0 || weekday0(i) == 0 {
+            counts.push(0);
+        }
+        if met {
+            *counts.last_mut().unwrap() += 1;
+        }
+    }
+    (counts, weekday0(0) != 0)
+}
+
+/// Run maths for a weekly ("N days per week") streak over a daily window.
+/// Returns `(current_run_weeks, best_run_weeks, current_week_met_days)`.
+///
+/// The current (in-progress) week counts toward the run as soon as it reaches
+/// `per_week` met days, and never breaks the run before it ends — mirroring how
+/// daily runs treat an unfinished today. A clipped first week only counts when
+/// it already qualifies from the visible days.
+pub fn weekly_runs(status: &[bool], today_weekday0: usize, per_week: i64) -> (i64, i64, i64) {
+    let per_week = per_week.max(1);
+    let (counts, first_clipped) = week_counts(status, today_weekday0);
+    if counts.is_empty() {
+        return (0, 0, 0);
+    }
+    let last = counts.len() - 1;
+    let qualifies = |i: usize| counts[i] >= per_week;
+
+    let mut current = 0i64;
+    let mut i = last;
+    if qualifies(i) {
+        current += 1;
+    }
+    // Whether the in-progress week qualifies yet or not, keep counting back.
+    while i > 0 {
+        i -= 1;
+        if qualifies(i) {
+            // A clipped first week can only confirm a run, never extend past it.
+            current += 1;
+        } else if i == 0 && first_clipped {
+            break; // unknowable, don't break what we've counted
+        } else {
+            break;
+        }
+    }
+
+    let mut best = 0i64;
+    let mut run = 0i64;
+    for i in 0..counts.len() {
+        if qualifies(i) {
+            run += 1;
+            best = best.max(run);
+        } else if i == last || (i == 0 && first_clipped) {
+            // In-progress / clipped weeks don't break a run, they just don't add.
+        } else {
+            run = 0;
+        }
+    }
+    (current, best, counts[last])
+}
+
 /// Seed the default streaks when none exist yet. Production starts empty (you
 /// create the streaks you actually want); this is used by tests and by the
 /// explicit "Add suggested streaks" action.
@@ -169,6 +246,7 @@ pub fn add_definition(
     kind: &str,
     metric: &str,
     threshold: i64,
+    days_per_week: i64,
 ) -> Result<(), String> {
     let id = id.trim().to_ascii_lowercase();
     if id.is_empty()
@@ -212,12 +290,22 @@ pub fn add_definition(
         .unwrap_or(0);
     conn.execute(
         "INSERT INTO streak_definitions
-           (id, name, kind, metric, threshold, enabled, sort_order, best_streak, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, 0, ?7)
+           (id, name, kind, metric, threshold, enabled, sort_order, best_streak, days_per_week, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, 0, ?7, ?8)
          ON CONFLICT(id) DO UPDATE SET
              name = excluded.name, kind = excluded.kind, metric = excluded.metric,
-             threshold = excluded.threshold, updated_at = excluded.updated_at",
-        rusqlite::params![id, name.trim(), kind, metric, threshold.clamp(0, 100_000), sort, now],
+             threshold = excluded.threshold, days_per_week = excluded.days_per_week,
+             updated_at = excluded.updated_at",
+        rusqlite::params![
+            id,
+            name.trim(),
+            kind,
+            metric,
+            threshold.clamp(0, 100_000),
+            sort,
+            days_per_week.clamp(0, 7),
+            now
+        ],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -231,7 +319,7 @@ pub fn delete_definition(conn: &Connection, id: &str) -> Result<(), String> {
 
 pub fn load_defs(conn: &Connection) -> Vec<StreakDef> {
     let mut stmt = match conn.prepare(
-        "SELECT id, name, kind, metric, threshold, enabled, best_streak, last_completed_day
+        "SELECT id, name, kind, metric, threshold, enabled, best_streak, last_completed_day, days_per_week
          FROM streak_definitions ORDER BY sort_order, id",
     ) {
         Ok(s) => s,
@@ -247,6 +335,7 @@ pub fn load_defs(conn: &Connection) -> Vec<StreakDef> {
             enabled: r.get::<_, i64>(5)? != 0,
             best_streak: r.get(6)?,
             last_completed_day: r.get(7)?,
+            days_per_week: r.get(8)?,
         })
     });
     match rows {
@@ -269,6 +358,7 @@ mod tests {
             enabled: true,
             best_streak: 0,
             last_completed_day: None,
+            days_per_week: 0,
         }
     }
 
@@ -326,6 +416,53 @@ mod tests {
         assert!(!streak_met(&d2, &m2));
         m2.checkins.insert("videos_posted".into(), 2);
         assert!(streak_met(&d2, &m2));
+    }
+
+    #[test]
+    fn weekly_runs_count_qualifying_weeks() {
+        // 14 days ending on a Sunday (today_weekday0 = 6): two full Mon–Sun weeks.
+        // Week 1: met Mon/Wed/Fri (3). Week 2: met Tue/Thu/Sat (3).
+        let status = [
+            true, false, true, false, true, false, false, // week 1: 3 met
+            false, true, false, true, false, true, false, // week 2: 3 met
+        ];
+        let (current, best, this_week) = weekly_runs(&status, 6, 3);
+        assert_eq!((current, best, this_week), (2, 2, 3));
+        // Needing 4 days/week, neither week qualifies.
+        let (current, best, _) = weekly_runs(&status, 6, 4);
+        assert_eq!((current, best), (0, 0));
+    }
+
+    #[test]
+    fn weekly_in_progress_week_does_not_break_run() {
+        // Last week qualified (3 met); this week is only Tuesday with 0 met so far.
+        // today_weekday0 = 1 (Tuesday) → last 2 entries are the current week.
+        let status = [
+            true, true, true, false, false, false, false, // full week: 3 met
+            false, false, // Mon, Tue of current week: nothing yet
+        ];
+        let (current, best, this_week) = weekly_runs(&status, 1, 3);
+        assert_eq!((current, best, this_week), (1, 1, 0));
+        // Once this week reaches 3 met days it extends the run immediately.
+        let status2 = [
+            true, true, true, false, false, false, false, //
+            true, true, true, false, // Mon–Wed met, Thursday today
+        ];
+        let (current2, _, this_week2) = weekly_runs(&status2, 3, 3);
+        assert_eq!((current2, this_week2), (2, 3));
+    }
+
+    #[test]
+    fn weekly_failed_completed_week_breaks_run() {
+        // Week 1 qualifies, week 2 fails, week 3 (complete) qualifies, current week empty.
+        let status = [
+            true, true, true, false, false, false, false, // 3 met ✓
+            true, false, false, false, false, false, false, // 1 met ✗
+            true, true, true, false, false, false, false, // 3 met ✓
+            false, // Monday of current week
+        ];
+        let (current, best, _) = weekly_runs(&status, 0, 3);
+        assert_eq!((current, best), (1, 1));
     }
 
     #[test]

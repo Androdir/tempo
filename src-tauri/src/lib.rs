@@ -121,6 +121,7 @@ pub fn run() {
             commands::get_llm_errors,
             commands::get_daily_score,
             commands::set_checkin,
+            commands::clear_checkin,
             commands::get_checkins,
             commands::get_checkin_definitions,
             commands::upsert_checkin_definition,

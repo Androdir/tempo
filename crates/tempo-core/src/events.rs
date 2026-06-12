@@ -114,6 +114,9 @@ fn register_checkin_from_event(conn: &Connection, e: &SyncEvent, id: &str) {
             icon,
             kind: kind.to_string(),
             built_in: false,
+            auto_kind: String::new(),
+            auto_metric: String::new(),
+            auto_threshold: 0,
         },
     );
 }
@@ -188,9 +191,37 @@ fn apply_to_domain(conn: &Connection, e: &SyncEvent) -> rusqlite::Result<()> {
                         "UPDATE daily_checkin SET main_goal_completed = ?1 WHERE day = ?2",
                         params![(value != 0) as i64, e.day],
                     )?;
+                } else if e.m_bool("cleared") {
+                    // A manual override was removed on the source device → fall
+                    // back to auto detection here too.
+                    let _ = crate::models::clear_checkin_value(conn, &e.day, &field);
                 } else {
                     register_checkin_from_event(conn, e, &field);
                     let _ = crate::models::set_checkin_value(conn, &e.day, &field, value);
+                }
+            }
+        }
+        "checkin_def" => {
+            // Full check-in definition sync (create/edit/delete). The desktop is
+            // the editor of record, so its copy overwrites the hub's.
+            if let Some(id) = e.m_str("id") {
+                if e.m_bool("deleted") {
+                    let _ = crate::models::delete_checkin_definition(conn, &id);
+                } else {
+                    let def = crate::models::CheckinDefinition {
+                        id: id.clone(),
+                        label: e.m_str("label").unwrap_or_else(|| id.replace(['_', '-'], " ")),
+                        icon: e.m_str("icon").unwrap_or_else(|| "✅".into()),
+                        kind: match e.m_str("kind").as_deref() {
+                            Some("counter") => "counter".into(),
+                            _ => "toggle".into(),
+                        },
+                        built_in: false,
+                        auto_kind: e.m_str("autoKind").unwrap_or_default(),
+                        auto_metric: e.m_str("autoMetric").unwrap_or_default(),
+                        auto_threshold: e.m_i64("autoThreshold").unwrap_or(0),
+                    };
+                    let _ = crate::models::upsert_checkin_definition(conn, &def);
                 }
             }
         }

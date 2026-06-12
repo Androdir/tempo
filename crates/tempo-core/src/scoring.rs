@@ -514,6 +514,9 @@ mod tests {
                 icon: "📈".into(),
                 kind: "toggle".into(),
                 built_in: false,
+                auto_kind: String::new(),
+                auto_metric: String::new(),
+                auto_threshold: 0,
             },
         )
         .unwrap();

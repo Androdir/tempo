@@ -965,6 +965,7 @@ pub fn get_streak_definitions(db: State<'_, Db>) -> Result<Vec<StreakDefinition>
             metric: d.metric,
             threshold: d.threshold,
             enabled: d.enabled,
+            days_per_week: d.days_per_week,
         })
         .collect())
 }
@@ -1011,9 +1012,10 @@ pub fn add_streak_definition(
     kind: String,
     metric: String,
     threshold: i64,
+    days_per_week: Option<i64>,
 ) -> Result<(), String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
-    crate::streaks::add_definition(&conn, &id, &name, &kind, &metric, threshold)
+    crate::streaks::add_definition(&conn, &id, &name, &kind, &metric, threshold, days_per_week.unwrap_or(0))
 }
 
 #[tauri::command]
@@ -1106,6 +1108,13 @@ pub fn set_checkin(db: State<'_, Db>, field: String, value: i64) -> Result<(), S
 pub fn get_checkins(db: State<'_, Db>) -> Result<Vec<CheckinValue>, String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
     Ok(crate::models::checkin_values_for_day(&conn, &today()))
+}
+
+/// Drop today's manual override so an auto check-in returns to live detection.
+#[tauri::command]
+pub fn clear_checkin(db: State<'_, Db>, field: String) -> Result<(), String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    crate::models::clear_checkin_value(&conn, &today(), &field)
 }
 
 #[tauri::command]
@@ -1685,6 +1694,9 @@ mod tests {
                 icon: "📈".into(),
                 kind: "toggle".into(),
                 built_in: false,
+                auto_kind: String::new(),
+                auto_metric: String::new(),
+                auto_threshold: 0,
             },
         )
         .unwrap();
@@ -1716,6 +1728,121 @@ mod tests {
         let report = score_report_for_day(&conn, day).unwrap();
         assert!(report.lines.iter().all(|l| l.id != "growth"));
         assert!(report.checkins.iter().all(|c| c.id != "growth_research"));
+    }
+
+    #[test]
+    fn auto_target_checkin_detects_overrides_and_clears() {
+        let conn = db::test_conn();
+        let day = "2026-03-01";
+        crate::models::upsert_checkin_definition(
+            &conn,
+            &crate::models::CheckinDefinition {
+                id: "read_bible".into(),
+                label: "Read Bible".into(),
+                icon: "📖".into(),
+                kind: "toggle".into(),
+                built_in: false,
+                auto_kind: "target".into(),
+                auto_metric: "bible".into(),
+                auto_threshold: 30,
+            },
+        )
+        .unwrap();
+        let get = |conn: &Connection| {
+            crate::models::checkin_values_for_day(conn, day)
+                .into_iter()
+                .find(|c| c.id == "read_bible")
+                .unwrap()
+        };
+
+        // 20 active minutes on the app: detected but below the 30-minute bar.
+        ins_app(&conn, day, "Bible App", "Genesis", 20 * 60, false);
+        let c = get(&conn);
+        assert!(c.auto && c.value == 0 && c.detected == 20 && !c.overridden);
+
+        // 15 more on the site (browser lane) → 35 minutes, auto-met.
+        ins_web(&conn, day, "bible.com", "John 3", 15 * 60);
+        assert_eq!(get(&conn).value, 1);
+
+        // AFK time with the app open never counts.
+        ins_app(&conn, day, "Bible App", "afk", 600 * 60, true);
+        assert_eq!(get(&conn).detected, 35);
+
+        // Manual override forces it off and survives more detection…
+        crate::models::set_checkin_value(&conn, day, "read_bible", 0).unwrap();
+        let c = get(&conn);
+        assert!(c.value == 0 && c.overridden);
+        // …and clearing the override returns to live auto detection.
+        crate::models::clear_checkin_value(&conn, day, "read_bible").unwrap();
+        let c = get(&conn);
+        assert!(c.value == 1 && !c.overridden);
+
+        // The auto value feeds streaks/score through the same map everyone reads.
+        let metrics = day_metrics(&conn, day);
+        assert_eq!(metrics.checkin("read_bible"), 1);
+    }
+
+    #[test]
+    fn auto_output_checkin_counts_detected_files() {
+        let conn = db::test_conn();
+        let day = "2026-03-02";
+        crate::models::upsert_checkin_definition(
+            &conn,
+            &crate::models::CheckinDefinition {
+                id: "videos_posted".into(), // convert the built-in counter to auto
+                label: "Posted video".into(),
+                icon: "🎬".into(),
+                kind: "counter".into(),
+                built_in: true,
+                auto_kind: "output".into(),
+                auto_metric: "video_export".into(),
+                auto_threshold: 1,
+            },
+        )
+        .unwrap();
+        for f in ["a.mp4", "b.mp4"] {
+            conn.execute(
+                "INSERT INTO output_events (timestamp, day, folder_path, file_path, file_name, event_type)
+                 VALUES (?1, ?2, 'C:/exports', ?3, ?3, 'video_export')",
+                params![format!("{day}T10:00:00+00:00"), day, f],
+            )
+            .unwrap();
+        }
+        let c = crate::models::checkin_values_for_day(&conn, day)
+            .into_iter()
+            .find(|c| c.id == "videos_posted")
+            .unwrap();
+        assert!(c.auto);
+        assert_eq!(c.value, 2); // counter = number of detected exports
+        assert_eq!(c.detected, 2);
+        // Manual override can still correct a false positive down to 1.
+        crate::models::set_checkin_value(&conn, day, "videos_posted", 1).unwrap();
+        let c = crate::models::checkin_values_for_day(&conn, day)
+            .into_iter()
+            .find(|c| c.id == "videos_posted")
+            .unwrap();
+        assert!(c.overridden);
+        assert_eq!(c.value, 1);
+    }
+
+    #[test]
+    fn weekly_streak_definition_round_trips_and_counts_this_week() {
+        let conn = db::test_conn();
+        crate::models::ensure_checkin_defaults(&conn).unwrap();
+        crate::streaks::add_definition(&conn, "gym_4x", "Gym 4×/week", "checkin", "gym_logged", 0, 4)
+            .unwrap();
+        crate::models::set_checkin_value(&conn, &local_day(0), "gym_logged", 1).unwrap();
+        let streaks = compute_streaks(&conn).unwrap();
+        let s = streaks.iter().find(|s| s.id == "gym_4x").unwrap();
+        assert_eq!(s.days_per_week, 4);
+        assert_eq!(s.week_met_days, 1); // today counts toward this week
+        assert_eq!(s.current, 0); // 1 of 4 days — week not qualified yet, run not broken
+        // A 1×/week streak qualifies immediately from today alone.
+        crate::streaks::add_definition(&conn, "gym_1x", "Gym weekly", "checkin", "gym_logged", 0, 1)
+            .unwrap();
+        let streaks = compute_streaks(&conn).unwrap();
+        let s = streaks.iter().find(|s| s.id == "gym_1x").unwrap();
+        assert!(s.current >= 1);
     }
 
     #[test]

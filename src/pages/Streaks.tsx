@@ -87,6 +87,7 @@ export default function Streaks() {
   const [newKind, setNewKind] = useState("checkin");
   const [newMetric, setNewMetric] = useState("");
   const [newThreshold, setNewThreshold] = useState("60");
+  const [newCadence, setNewCadence] = useState("0"); // 0 = every day, 1..7 = days/week
 
   const load = useCallback(async () => {
     try {
@@ -147,7 +148,8 @@ export default function Streaks() {
       return;
     }
     const threshold = THRESHOLD_KINDS.has(newKind) ? Math.max(1, parseInt(newThreshold, 10) || 0) : 0;
-    await run(() => addStreakDefinition({ id, name, kind: newKind, metric, threshold }));
+    const daysPerWeek = parseInt(newCadence, 10) || 0;
+    await run(() => addStreakDefinition({ id, name, kind: newKind, metric, threshold, daysPerWeek }));
     setNewName("");
   }
 
@@ -226,11 +228,26 @@ export default function Streaks() {
                 min
               </label>
             )}
+            <select
+              className="select"
+              value={newCadence}
+              onChange={(e) => setNewCadence(e.target.value)}
+              title="How often this streak must be met"
+            >
+              <option value="0">Every day</option>
+              {[1, 2, 3, 4, 5, 6].map((n) => (
+                <option key={n} value={String(n)}>{n}×/week</option>
+              ))}
+            </select>
             <button className="btn btn-primary" onClick={addStreak}>
               Add streak
             </button>
           </div>
-          <p className="card-hint">{KIND_OPTIONS.find((k) => k.value === newKind)?.hint}</p>
+          <p className="card-hint">
+            {KIND_OPTIONS.find((k) => k.value === newKind)?.hint}
+            {newCadence !== "0" &&
+              ` — weekly cadence: the streak counts consecutive weeks with ${newCadence}+ met days, so rest days never break it.`}
+          </p>
 
           {defs.length === 0 ? (
             <p className="muted-num" style={{ marginBottom: 0 }}>
@@ -245,7 +262,10 @@ export default function Streaks() {
               {defs.map((d) => (
                 <li key={d.id} className="streak-manage-row">
                   <span className="folder-icon">{iconFor(d.id, d.kind, d.metric)}</span>
-                  <span className="streak-manage-name">{d.name}</span>
+                  <span className="streak-manage-name">
+                    {d.name}
+                    {d.daysPerWeek > 0 && <span className="streak-cadence"> {d.daysPerWeek}×/wk</span>}
+                  </span>
                   {THRESHOLD_KINDS.has(d.kind) && (
                     <label className="folder-num">
                       <input
@@ -308,15 +328,30 @@ export default function Streaks() {
               <div className="streak-head">
                 <span className="streak-icon">{iconFor(s.id, s.kind, s.metric)}</span>
                 <span className="streak-name">{s.name}</span>
+                {s.daysPerWeek > 0 && (
+                  <span className="streak-cadence" title={`Met on ${s.daysPerWeek}+ days per week`}>
+                    {s.daysPerWeek}×/wk
+                  </span>
+                )}
               </div>
               <div className="streak-figures">
                 <div className="streak-current">
                   <span className="streak-flame">{s.current > 0 ? "🔥" : "·"}</span>
                   <span className="streak-num">{s.current}</span>
-                  <span className="streak-unit">day{s.current === 1 ? "" : "s"}</span>
+                  <span className="streak-unit">
+                    {s.daysPerWeek > 0
+                      ? `week${s.current === 1 ? "" : "s"}`
+                      : `day${s.current === 1 ? "" : "s"}`}
+                  </span>
                 </div>
                 <div className="streak-best">best {s.best}</div>
               </div>
+              {s.daysPerWeek > 0 && (
+                <div className="streak-weekly muted-num">
+                  this week: <b>{s.weekMetDays}</b>/{s.daysPerWeek} days
+                  {s.weekMetDays >= s.daysPerWeek ? " ✓" : ""}
+                </div>
+              )}
               <StreakHeatmap calendar={s.calendar} />
               <div className="streak-foot muted-num">
                 {s.lastCompletedDay ? `last: ${fmtDay(s.lastCompletedDay)}` : "not yet"}

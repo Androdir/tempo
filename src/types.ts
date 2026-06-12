@@ -222,22 +222,37 @@ export interface GoalDraft {
   recurring: boolean;
 }
 
-/** A user-editable check-in definition ("things the tracker can't see"). */
+/** How a check-in auto-detects: "" = manual only, "target" = active minutes on
+ * an app/site, "output" = files detected by the proof-of-output watcher. */
+export type CheckinAutoKind = "" | "target" | "output";
+
+/** A user-editable check-in definition ("things the tracker can't see" — unless
+ * an auto source is configured, in which case it ticks itself). */
 export interface CheckinDefinition {
   id: string;
   label: string;
   icon: string;
   kind: "toggle" | "counter";
   builtIn: boolean;
+  autoKind: CheckinAutoKind;
+  autoMetric: string;
+  autoThreshold: number;
 }
 
-/** A check-in definition with its value for a day (toggles 0/1, counters 0..N). */
+/** A check-in definition with its effective value for a day (toggles 0/1,
+ * counters 0..N). Auto check-ins read live detection unless overridden. */
 export interface CheckinValue {
   id: string;
   label: string;
   icon: string;
   kind: "toggle" | "counter";
   value: number;
+  /** This check-in has an auto-detection source configured. */
+  auto: boolean;
+  /** Raw detected amount today: active minutes (target) or file count (output). */
+  detected: number;
+  /** Auto check-in whose value was manually overridden today. */
+  overridden: boolean;
 }
 
 // ----------------------------------------------------------- accountability
@@ -346,8 +361,12 @@ export interface Streak {
   metric: string;
   threshold: number;
   enabled: boolean;
+  /** 0 = daily (current/best in days); 1..7 = weekly (current/best in weeks). */
+  daysPerWeek: number;
   current: number;
   best: number;
+  /** Met days so far in the current ISO week (weekly streaks only). */
+  weekMetDays: number;
   lastCompletedDay: string | null;
   calendar: StreakDay[];
 }
@@ -359,6 +378,8 @@ export interface StreakDefinition {
   metric: string;
   threshold: number;
   enabled: boolean;
+  /** 0 = every day; 1..7 = met on N+ days per week. */
+  daysPerWeek: number;
 }
 
 // --------------------------------------------------- proof-of-output detection

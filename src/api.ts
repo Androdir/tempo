@@ -314,6 +314,7 @@ export async function addStreakDefinition(def: {
   kind: string;
   metric: string;
   threshold: number;
+  daysPerWeek: number;
 }): Promise<void> {
   if (isTauri() || isRemote()) {
     await callBackend("add_streak_definition", { ...def });
@@ -336,12 +337,12 @@ export async function deleteStreakDefinition(id: string): Promise<void> {
 export async function seedDefaultStreaks(): Promise<number> {
   if (isTauri() || isRemote()) return callBackend<number>("seed_default_streaks");
   const suggested: StreakDefinition[] = [
-    { id: "posted_video", name: "Posted a video", kind: "output", metric: "video_export", threshold: 0, enabled: true },
-    { id: "main_goal", name: "Completed main goal", kind: "goal", metric: "main_goal", threshold: 0, enabled: true },
-    { id: "gym", name: "Gym", kind: "checkin", metric: "gym_logged", threshold: 0, enabled: true },
-    { id: "studied", name: "Studied", kind: "checkin", metric: "studied", threshold: 0, enabled: true },
-    { id: "productive_block_60", name: "60+ min focus block", kind: "block", metric: "productive", threshold: 60, enabled: true },
-    { id: "no_major_distraction", name: "No major distraction", kind: "distraction", metric: "max_block", threshold: 30, enabled: true },
+    { id: "posted_video", name: "Posted a video", kind: "output", metric: "video_export", threshold: 0, enabled: true, daysPerWeek: 0 },
+    { id: "main_goal", name: "Completed main goal", kind: "goal", metric: "main_goal", threshold: 0, enabled: true, daysPerWeek: 0 },
+    { id: "gym", name: "Gym", kind: "checkin", metric: "gym_logged", threshold: 0, enabled: true, daysPerWeek: 0 },
+    { id: "studied", name: "Studied", kind: "checkin", metric: "studied", threshold: 0, enabled: true, daysPerWeek: 0 },
+    { id: "productive_block_60", name: "60+ min focus block", kind: "block", metric: "productive", threshold: 60, enabled: true, daysPerWeek: 0 },
+    { id: "no_major_distraction", name: "No major distraction", kind: "distraction", metric: "max_block", threshold: 30, enabled: true, daysPerWeek: 0 },
   ];
   let added = 0;
   for (const s of suggested) {
@@ -1020,9 +1021,33 @@ export async function setCheckin(field: string, value: number): Promise<void> {
   if (def) mockCheckinValues.set(field, def.kind === "counter" ? Math.max(0, value) : value ? 1 : 0);
 }
 
+/** Drop today's manual value so an auto check-in returns to live detection. */
+export async function clearCheckin(field: string): Promise<void> {
+  if (isTauri() || isRemote()) {
+    await callBackend("clear_checkin", { field });
+    return;
+  }
+  mockCheckinValues.delete(field);
+}
+
 export async function getCheckins(): Promise<CheckinValue[]> {
   if (isTauri() || isRemote()) return callBackend<CheckinValue[]>("get_checkins");
-  return mockCheckinDefs.map((d) => ({ ...d, value: mockCheckinValues.get(d.id) ?? 0 }));
+  return mockCheckinDefs.map((d) => mockCheckinValue(d));
+}
+
+/** Preview has no tracker, so auto check-ins show as "nothing detected yet". */
+function mockCheckinValue(d: CheckinDefinition): CheckinValue {
+  const manual = mockCheckinValues.get(d.id);
+  return {
+    id: d.id,
+    label: d.label,
+    icon: d.icon,
+    kind: d.kind,
+    value: manual ?? 0,
+    auto: d.autoKind !== "",
+    detected: 0,
+    overridden: d.autoKind !== "" && manual !== undefined,
+  };
 }
 
 export async function getCheckinDefinitions(): Promise<CheckinDefinition[]> {
@@ -1190,12 +1215,12 @@ const DEFAULT_SCORE_RULES: ScoreRule[] = [
 ];
 
 const DEFAULT_CHECKIN_DEFS: CheckinDefinition[] = [
-  { id: "videos_posted", label: "Posted video", icon: "🎬", kind: "counter", builtIn: true },
-  { id: "gym_logged", label: "Went gym", icon: "🏋️", kind: "toggle", builtIn: true },
-  { id: "wrestled", label: "Wrestled", icon: "🤼", kind: "toggle", builtIn: true },
-  { id: "studied", label: "Studied", icon: "📚", kind: "toggle", builtIn: true },
-  { id: "edited_video", label: "Edited video", icon: "✂️", kind: "toggle", builtIn: true },
-  { id: "analysed_content", label: "Analysed content", icon: "🔍", kind: "toggle", builtIn: true },
+  { id: "videos_posted", label: "Posted video", icon: "🎬", kind: "counter", builtIn: true, autoKind: "", autoMetric: "", autoThreshold: 0 },
+  { id: "gym_logged", label: "Went gym", icon: "🏋️", kind: "toggle", builtIn: true, autoKind: "", autoMetric: "", autoThreshold: 0 },
+  { id: "wrestled", label: "Wrestled", icon: "🤼", kind: "toggle", builtIn: true, autoKind: "", autoMetric: "", autoThreshold: 0 },
+  { id: "studied", label: "Studied", icon: "📚", kind: "toggle", builtIn: true, autoKind: "", autoMetric: "", autoThreshold: 0 },
+  { id: "edited_video", label: "Edited video", icon: "✂️", kind: "toggle", builtIn: true, autoKind: "", autoMetric: "", autoThreshold: 0 },
+  { id: "analysed_content", label: "Analysed content", icon: "🔍", kind: "toggle", builtIn: true, autoKind: "", autoMetric: "", autoThreshold: 0 },
 ];
 
 let mockMainGoalCompleted = false;
@@ -1206,9 +1231,7 @@ let mockGoalId = 1;
 let mockGoals: Goal[] = [];
 
 function mockLoggedCheckins(): CheckinValue[] {
-  return mockCheckinDefs
-    .map((d) => ({ ...d, value: mockCheckinValues.get(d.id) ?? 0 }))
-    .filter((c) => c.value > 0);
+  return mockCheckinDefs.map((d) => mockCheckinValue(d)).filter((c) => c.value > 0);
 }
 
 function mockScore(): ScoreReport {
@@ -1425,8 +1448,10 @@ function mockStreaks(): Streak[] {
         metric: def.id,
         threshold: def.threshold,
         enabled: def.enabled,
+        daysPerWeek: def.daysPerWeek,
         current: cur,
         best,
+        weekMetDays: def.daysPerWeek > 0 ? Math.min(cur, def.daysPerWeek) : 0,
         lastCompletedDay: last,
         calendar,
       };
