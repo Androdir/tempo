@@ -92,7 +92,7 @@ export default function Projects() {
     <>
       <div className="page-head">
         <div>
-          <h1 className="page-title">Projects &amp; Goals</h1>
+          <h1 className="page-title">Projects</h1>
           <div className="page-subtitle">
             Define intents — activity is matched to them by app/domain and keywords.
           </div>

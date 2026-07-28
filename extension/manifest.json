@@ -2,10 +2,11 @@
   "manifest_version": 3,
   "name": "Tempo — Local Browser Tracker",
   "version": "0.1.0",
-  "description": "Sends the active tab (and optional readable page text) to the local Tempo desktop app. 100% local — nothing is uploaded.",
+  "description": "Sends the active tab and optional readable page text to the Tempo desktop app on this device. Nothing is sent to a third-party cloud.",
   "permissions": ["tabs", "idle", "storage"],
   "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
   "background": {
+    "scripts": ["src/background.js"],
     "service_worker": "src/background.js",
     "type": "module"
   },
@@ -32,5 +33,19 @@
     "32": "icons/32.png",
     "48": "icons/48.png",
     "128": "icons/128.png"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "tempo-browser-tracker@androdir.local",
+      "strict_min_version": "142.0",
+      "data_collection_permissions": {
+        "required": [
+          "authenticationInfo",
+          "browsingActivity",
+          "searchTerms",
+          "websiteContent"
+        ]
+      }
+    }
   }
 }

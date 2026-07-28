@@ -7,6 +7,8 @@ import {
   getOutputEvents,
   getStreaks,
   getTodaySummary,
+  isRemote,
+  isTauri,
   onOutputsUpdated,
   onTrackingUpdated,
   toggleGoal,
@@ -91,16 +93,7 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: Page) => voi
       <DevicesCard />
 
       {isEmpty ? (
-        <div className="card card-pad">
-          <div className="empty">
-            <div className="empty-glyph">🌱</div>
-            <h3>No activity tracked yet</h3>
-            <p>
-              The tracker records the active window every 10 seconds while the app
-              is running. Come back in a moment and your activity will appear here.
-            </p>
-          </div>
-        </div>
+        <GettingStarted onNavigate={onNavigate} />
       ) : (
         <>
           <div className="stat-grid">
@@ -237,6 +230,87 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: Page) => voi
   );
 }
 
+function GettingStarted({ onNavigate }: { onNavigate: (p: Page) => void }) {
+  const desktopApp = isTauri();
+  const hubDashboard = isRemote();
+  const firstTitle = desktopApp
+    ? "Desktop tracking is on"
+    : hubDashboard
+      ? "Connect a tracking device"
+      : "Preview mode is active";
+  const firstDetail = desktopApp
+    ? "Use your computer normally. Tempo records only the active app and window title every 10 seconds."
+    : hubDashboard
+      ? "Pair the Tempo desktop app or Android tracker to start sending activity to this self-hosted hub."
+      : "Run npm run app to start desktop tracking. This browser preview is safe to explore without recording activity.";
+  const offset = desktopApp ? 0 : 1;
+  const status = desktopApp ? "Tracking now" : hubDashboard ? "Hub ready" : "Preview mode";
+
+  const steps: { icon: string; title: string; detail: string; action?: string; page?: Page }[] = [
+    {
+      icon: desktopApp ? "✓" : "1",
+      title: firstTitle,
+      detail: firstDetail,
+      action: hubDashboard ? "Open settings" : undefined,
+      page: hubDashboard ? "privacy" : undefined,
+    },
+    {
+      icon: String(1 + offset),
+      title: "Choose today's main mission",
+      detail: "A clear goal makes your score and end-of-day review useful.",
+      action: "Set a goal",
+      page: "goals",
+    },
+    {
+      icon: String(2 + offset),
+      title: "Teach Tempo what matters",
+      detail: "After a few apps appear, classify them once and Tempo will reuse those rules.",
+      action: "Open categories",
+      page: "categories",
+    },
+    {
+      icon: String(3 + offset),
+      title: "Add optional evidence",
+      detail: "Review optional screen context and browser tracking; output folders live under Activity → Outputs.",
+      action: "Open settings",
+      page: "privacy",
+    },
+  ];
+
+  return (
+    <div className="card card-pad getting-started">
+      <div className="getting-started-head">
+        <div>
+          <div className="eyebrow">GETTING STARTED</div>
+          <h2 className="card-title">Make your first day useful</h2>
+          <p className="card-hint">
+            Start with the basics. Optional tracking sources can wait until the daily workflow feels useful.
+          </p>
+        </div>
+        <div className="getting-started-actions">
+          <span className="setup-status"><span className="pulse" /> {status}</span>
+          <button className="btn btn-primary" onClick={() => onNavigate("guide")}>
+            Open setup guide
+          </button>
+        </div>
+      </div>
+      <div className="setup-steps">
+        {steps.map((step) => (
+          <div className="setup-step" key={step.title}>
+            <span className={`setup-step-icon${step.icon === "✓" ? " done" : ""}`}>{step.icon}</span>
+            <div className="setup-step-copy">
+              <b>{step.title}</b>
+              <span>{step.detail}</span>
+            </div>
+            {step.page && step.action && (
+              <button className="btn" onClick={() => onNavigate(step.page as Page)}>{step.action}</button>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 function MissionsCard({ onNavigate }: { onNavigate: (p: Page) => void }) {
   const [goals, setGoals] = useState<Goal[]>([]);
 
@@ -470,7 +544,7 @@ function PageHead({ date }: { date?: string }) {
       <div className="head-actions">
         <span className="live-dot">
           <span className="pulse" />
-          Tracking every 10s
+          {isTauri() ? "Tracking every 10s" : isRemote() ? "Hub dashboard" : "Preview mode"}
         </span>
       </div>
     </div>

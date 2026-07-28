@@ -2,7 +2,7 @@
     <string name="app_name">Tempo</string>
     <string name="setup_title">Connect to your Tempo Hub</string>
     <string name="setup_blurb">Point this phone at your hub. It will track which apps you use and add that time to your shared dashboard.</string>
-    <string name="hub_url_hint">Hub URL — e.g. http://192.168.1.50:7700</string>
+    <string name="hub_url_hint">Tailscale HTTPS URL — e.g. https://tempo-hub.your-tailnet.ts.net</string>
     <string name="secret_hint">Pairing secret</string>
     <string name="grant_usage">1. Grant usage access</string>
     <string name="pair_button">2. Pair &amp; start tracking</string>

@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Local-first desktop productivity tracker (Tauri + React + SQLite). 100% local, no cloud.",
+  "description": "Local-first desktop productivity tracker with optional self-hosted sync.",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
@@ -12,7 +12,8 @@
     "app": "tauri dev",
     "app:build": "tauri build",
     "test": "cargo test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "extension:check": "node scripts/check-extension.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.1.1",

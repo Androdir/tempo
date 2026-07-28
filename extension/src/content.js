@@ -12,13 +12,14 @@
 (() => {
   if (window.top !== window) return; // top frame only
 
+  const tempoBrowser = globalThis.browser || globalThis.chrome;
   const SAMPLE_MS = 10000;
 
   // --- tick loop -----------------------------------------------------------
   setInterval(() => {
     if (document.visibilityState === "visible" && document.hasFocus()) {
       try {
-        chrome.runtime.sendMessage({ action: "tick" });
+        tempoBrowser.runtime.sendMessage({ action: "tick" });
       } catch {
         /* background asleep / extension reloading — ignore */
       }
@@ -26,7 +27,7 @@
   }, SAMPLE_MS);
 
   // --- extraction request --------------------------------------------------
-  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  tempoBrowser.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg && msg.action === "extract") {
       try {
         sendResponse(extractReadable(msg.maxLength || 8000));

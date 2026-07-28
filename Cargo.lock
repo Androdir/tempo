@@ -2579,6 +2579,7 @@ dependencies = [
  "tempo-core",
  "tiny_http",
  "ureq",
+ "url",
  "windows 0.58.0",
 ]
 

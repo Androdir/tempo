@@ -1,3 +1,4 @@
+const tempoBrowser = globalThis.browser || globalThis.chrome;
 const DEFAULTS = { endpoint: "http://127.0.0.1:48710", token: "", enabled: true };
 
 const $ = (id) => document.getElementById(id);
@@ -9,7 +10,7 @@ function setStatus(msg, kind) {
 }
 
 async function load() {
-  const o = await chrome.storage.local.get(DEFAULTS);
+  const o = await tempoBrowser.storage.local.get(DEFAULTS);
   $("endpoint").value = o.endpoint || DEFAULTS.endpoint;
   $("token").value = o.token || "";
   $("enabled").checked = o.enabled !== false;
@@ -19,9 +20,9 @@ async function save() {
   const endpoint = $("endpoint").value.trim().replace(/\/+$/, "") || DEFAULTS.endpoint;
   const token = $("token").value.trim();
   const enabled = $("enabled").checked;
-  await chrome.storage.local.set({ endpoint, token, enabled });
+  await tempoBrowser.storage.local.set({ endpoint, token, enabled });
   try {
-    await chrome.runtime.sendMessage({ action: "optionsUpdated" });
+    await tempoBrowser.runtime.sendMessage({ action: "optionsUpdated" });
   } catch {
     /* worker asleep */
   }

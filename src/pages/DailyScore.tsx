@@ -27,6 +27,14 @@ const VERDICT_COLOR: Record<string, string> = {
   cooked: "#dc2626",
 };
 
+const VERDICT_LABEL: Record<string, string> = {
+  excellent: "Excellent",
+  good: "Good",
+  mid: "Fair",
+  bad: "Needs attention",
+  cooked: "Fresh start tomorrow",
+};
+
 const RULE_KIND_OPTIONS: { value: ScoreRuleKind; label: string; needsMetric: "checkin" | "category" | "text" | "none"; hasThreshold: boolean }[] = [
   { value: "checkin", label: "Check-in logged", needsMetric: "checkin", hasThreshold: true },
   { value: "category", label: "Minutes in a category", needsMetric: "category", hasThreshold: true },
@@ -170,7 +178,7 @@ export default function DailyScore() {
           </div>
         </div>
         <div className="score-hero-body">
-          <div className="verdict-pill" style={{ background: color }}>{r.verdict.toUpperCase()}</div>
+          <div className="verdict-pill" style={{ background: color }}>{VERDICT_LABEL[r.verdict] ?? r.verdict}</div>
           <p className="score-suggestion">💡 {r.suggestion}</p>
         </div>
       </div>

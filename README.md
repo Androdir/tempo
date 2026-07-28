@@ -3,11 +3,16 @@
 A local-first desktop productivity tracker. It samples your **active window** every
 10 seconds, classifies time by app and category, and shows a clean daily dashboard.
 
-**Everything stays on your machine.** No cloud, no account, no telemetry.
+> **New to Tempo?** Follow the [setup and everyday-use guide](docs/getting-started.md),
+> or open **Settings → Setup Guide** inside the app for live setup checks and direct links.
+
+**Tempo starts local-only.** There is no cloud account, advertising telemetry, or hidden upload.
 
 - 🔒 **No keystrokes recorded** — idle is detected from the OS "time since last input" value only.
 - 🔇 **No audio, no clipboard, no mouse coordinates.**
-- 📦 **No network calls.** Data lives in a local SQLite file.
+- 📦 **Local SQLite by default** — activity stays on this device in local-only mode.
+- 🔌 **Optional connections are explicit** — the browser extension and Ollama use loopback;
+  self-hosted Tempo Hub sync uses the LAN address you configure. All are off until you enable them.
 
 ---
 
@@ -17,7 +22,7 @@ A local-first desktop productivity tracker. It samples your **active window** ev
 - **10-second window sampling** — timestamp, app/process name, window title, duration, idle/active.
 - **Privacy-preserving idle detection** — uses `GetLastInputInfo` (Windows), which reports only
   *how long* since the last input, never *what* the input was.
-- **Browser tracking** — optional Chrome extension samples the active tab and page title.
+- **Browser tracking** — optional Firefox/Chromium extension samples the active tab and page title.
 - **Smart screen OCR** — optional local screenshot + OCR (Windows only, OFF by default).
 
 ### Dashboard & reporting
@@ -115,7 +120,7 @@ A local-first desktop productivity tracker. It samples your **active window** ev
 | Tracking    | `active-win-pos-rs` + `GetLastInputInfo`      |
 | OCR         | Windows.Media.Ocr (built-in, Windows-only)   |
 | LLM         | [Ollama](https://ollama.com/) (optional)      |
-| Chrome ext. | Manifest v3, zero dependencies                |
+| Browser ext. | Firefox/Chromium Manifest V3, zero dependencies |
 | Hub server  | `tempo-hub` (`tiny_http`) + Docker, arm64-ready |
 | Phone       | Native Android (Kotlin · UsageStatsManager · WorkManager) |
 
@@ -135,7 +140,7 @@ ai_usage_tracker_app/
 ├── src-tauri/           # Desktop app (tracker, platform idle/media, extension server, OCR,
 │                        #   accountability, output watcher, sync client) → depends on tempo-core
 ├── src/                 # React frontend (used by both the desktop app and the hub dashboard)
-├── extension/           # Chrome extension (Manifest v3) → forwards to the desktop
+├── extension/           # Firefox/Chromium extension (Manifest V3) → forwards to the desktop
 ├── android/             # Native Android tracker + WebView dashboard (Kotlin)
 └── Dockerfile, docker-compose.yml   # build & run the hub (arm64-ready)
 ```
@@ -151,7 +156,7 @@ Desktop-app internals (`src-tauri/src/` and `src/`):
 ├── app-icon.png                # Source icon
 ├── scripts/gen_icon.py         # Dependency-free PNG icon generator
 │
-├── extension/                  # Chrome extension (Manifest v3)
+├── extension/                  # Firefox/Chromium extension (Manifest V3)
 │   ├── README.md              # Extension setup & token config
 │   ├── manifest.json
 │   ├── background.js          # Service worker
@@ -185,7 +190,8 @@ Desktop-app internals (`src-tauri/src/` and `src/`):
 │       ├── DailyReview.tsx     # AI review (Ollama or fallback)
 │       ├── Focus.tsx           # Focus mode session UI
 │       ├── WeeklyReview.tsx    # 7-day trends & charts
-│       └── PrivacySettings.tsx # All settings + toggles
+│       ├── PrivacySettings.tsx # All settings + toggles
+│       └── SetupGuide.tsx      # Live setup checks + everyday-use guide
 │
 ├── crates/tempo-core/          # Shared Rust core (desktop + hub)
 │   └── src/
@@ -256,40 +262,24 @@ npm run app          # = tauri dev: launches the desktop app
 The tracker starts immediately — leave it running, use your computer normally, and watch the
 dashboard refresh live.
 
-On an empty day, click **"Load sample data"** on the Dashboard to preview the UI.
+On an empty day, follow the short checklist on **Today**, then open **Settings → Setup Guide**.
+The in-app guide checks what is already working, takes you to each required screen, and keeps
+browser tracking, output folders, OCR, local AI, and Hub sync clearly optional. For a printable
+walkthrough, see [`docs/getting-started.md`](docs/getting-started.md).
 
-### 2. (Optional) Set up browser tracking with the Chrome extension
+### 2. (Optional) Set up Firefox, Chrome, or Edge tracking
 
-The Chrome extension tracks your active browser tab (while Chrome is the focused desktop window)
-and sends samples to the app's local server over `http://127.0.0.1:48710`.
+The same Manifest V3 extension supports Firefox 142+ and current Chromium
+browsers. Start Tempo, open **Settings → Setup Guide**, expand **Add browser
+tracking**, and follow the browser-specific steps shown there.
 
-**Setup steps:**
+- Firefox: load `extension/manifest.json` temporarily from
+  `about:debugging#/runtime/this-firefox`.
+- Chrome/Edge: enable Developer mode and load the `extension/` folder unpacked.
 
-1. **Get the endpoint + token** from the app:
-   - Open the app (from step 1 above).
-   - Go to **Privacy & Settings**.
-   - Under **Browser extension**, copy the **Endpoint** (e.g., `http://127.0.0.1:48710`) and **Token**.
-
-2. **Load the extension into Chrome:**
-   - Open `chrome://extensions` in Chrome.
-   - Enable **Developer mode** (toggle, top-right).
-   - Click **Load unpacked**.
-   - Navigate to the `extension/` folder in this repo and select it.
-   - The extension will appear in your extensions list.
-
-3. **Configure the extension:**
-   - Click the extension icon → **Options** (or right-click → Manage extension → Extension options).
-   - Paste the **Endpoint** and **Token** from step 1.
-   - (Optional) Enable **Capture page content** to store text summaries + keywords; keep OFF for
-     pure domain/URL tracking.
-   - Click **Test connection** — it should say "Connected ✓".
-
-4. **Start tracking:**
-   - The extension is now tracking. Visit websites normally; samples arrive every ~10 seconds
-     while Chrome is focused.
-   - View them on **Browser Activity** page in the app.
-
-For full extension details, see [`extension/README.md`](extension/README.md).
+Paste the endpoint and token into the extension Options page, save, and test the
+connection. For permanent Firefox signing, permission details, and troubleshooting,
+see [`extension/README.md`](extension/README.md).
 
 ### 3. (Optional) Enable local LLM classification with Ollama
 
@@ -311,7 +301,7 @@ Ollama server. Completely optional; the app works fine with rule-based only.
    ```
 
 3. **Configure the app:**
-   - Open the app's **Privacy & Settings**.
+   - Open the app's **Settings → Connections**.
    - Under **Local AI classification (Ollama)**, you'll see:
      - **URL** (defaults to `http://localhost:11434`)
      - **Model** (type the model name, e.g., `llama3.1:8b`)
@@ -324,7 +314,7 @@ Ollama server. Completely optional; the app works fine with rule-based only.
 Periodically captures and OCRs the active window for better context (off by default).
 
 **Setup:**
-- Open **Privacy & Settings**.
+- Open **Settings → Tracking**.
 - Under **Personal Smart Tracking Mode**, toggle ON.
 - Set the interval (default 60s, range 10–3600s).
 - The app warns about privacy implications; read them carefully.
@@ -356,7 +346,7 @@ Every 10 seconds a background thread:
 4. emits a `tracking-updated` event so the dashboard refreshes.
 
 ### Browser extension (`extension/`, `server.rs`, `ingest.rs`)
-If the Chrome extension is loaded and configured:
+If the Firefox/Chromium extension is loaded and configured:
 - Every ~10 seconds it sends the active tab's domain, URL, title, and optional page content to
   `POST /ingest` on the app's loopback server.
 - The app validates the request token, parses the payload, and stores it in `browser_activity`.
@@ -716,19 +706,19 @@ cargo test --manifest-path src-tauri/Cargo.toml
 - Delete `src-tauri/target/` and try `npm run app` again (full rebuild).
 
 ### Extension not connecting
-- Verify the **Token** is pasted correctly (copy from Privacy & Settings in the app).
+- Verify the **Token** is pasted correctly (copy from Settings → Connections in the app).
 - Check the **Endpoint** matches (default `http://127.0.0.1:48710`).
 - Make sure the app is running (the server must be listening).
 - Click **Test connection** in the extension options.
 
 ### LLM classification not working
 - Ensure Ollama is running: `ollama serve` in a terminal.
-- Check the URL in **Privacy & Settings** is correct (`http://localhost:11434`).
+- Check the URL in **Settings → Connections** is correct (`http://localhost:11434`).
 - Verify the model exists: `ollama list` in a terminal.
 - Click **Test connection** in the app's LLM settings.
 
 ### Smart OCR slow or not working (Windows only)
-- Smart tracking is OFF by default. Enable it in **Privacy & Settings** if you want it.
+- Smart tracking is OFF by default. Enable it in **Settings → Tracking** if you want it.
 - On slower machines, increase the interval (60s default).
 - The first capture may take a few seconds to initialize Windows.Media.Ocr.
 
@@ -752,41 +742,42 @@ Pick your level — each builds on the last:
 - **Just the desktop?** Install the desktop app ([Running the app](#running-the-app)) and you're
   done; everything is local. The steps below add the optional hub + phone.
 
-**A — The hub on a Raspberry Pi 500.** (A Pi 500 is a Pi 5 inside → arm64, so Docker just works.
-Any always-on Linux box works too.)
+**A — Put the Hub on the Raspberry Pi.** Use Raspberry Pi OS **64-bit** on a Pi 4/400/5/500
+(or another arm64 Linux box).
 
-1. Install Docker on Raspberry Pi OS (64-bit): `curl -fsSL https://get.docker.com | sh`, then
-   `sudo apt install -y docker-compose-plugin`.
-2. Clone and start it:
+1. Install Docker Engine + the Compose plugin, and install Tailscale on the Pi.
+2. Clone Tempo, sign the Pi into your tailnet, and run the guided setup:
    ```bash
-   git clone <this repo> && cd ai_usage_tracker_app
-   echo "TEMPO_PAIRING_SECRET=$(openssl rand -hex 24)" > .env   # a strong random secret
-   docker compose up -d --build      # builds the dashboard + hub for arm64, serves on :7700
-   cat .env                          # copy the pairing secret — you'll enter it on each device
+   git clone <this repo> tempo
+   cd tempo
+   sudo tailscale up
+   bash scripts/setup-pi-hub.sh
    ```
-3. **Reach it privately.** Install [Tailscale](https://tailscale.com) on the Pi *and* each device
-   (`curl -fsSL https://tailscale.com/install.sh | sh`). Your hub URL is then
-   `http://<pi-tailscale-name>:7700`. (On a trusted home LAN you can use the Pi's LAN IP instead —
-   but never port-forward to the internet.)
-4. Open `http://<hub>:7700` in a browser and enter the pairing secret once.
+3. The script generates a strong secret, builds the arm64-compatible Hub container, verifies its
+   health, and configures Tailscale Serve. Copy the exact private HTTPS URL shown by
+   `tailscale serve status`, such as `https://tempo-hub.example-tailnet.ts.net`.
+4. Keep the default loopback-only Docker host binding. Do **not** forward port 7700 and do not
+   enable Tailscale Funnel.
 
-**B — Point the desktop at the hub.**
+**B — Point the desktop at the Hub.**
 
-1. Install + run the desktop app ([Running the app](#running-the-app)).
-2. **Privacy & Settings → Sync**: set Mode to *Connect to Tempo Hub*, enter the hub URL + pairing
-   secret, **Pair**, then **Import history** to backfill. It keeps tracking locally and uploads in
-   the background, buffering through any hub downtime.
+1. Install Tailscale on the computer and sign into the same tailnet.
+2. In Tempo, open **Settings → Connections**, choose *Connect to Tempo Hub*, and paste the exact
+   HTTPS URL plus the secret from the Pi's `.env` file.
+3. Choose **Pair**, then **Import history** once if you want existing desktop data on the Hub.
+   Tempo continues tracking locally and safely queues uploads while the Hub is unavailable.
 
-**C — Track your phone (Android).**
+**C — Add an Android phone.**
 
-1. Open the [`android/`](android/) project in **Android Studio** and **Run ▶** on your phone
-   (builds as-is with the Android SDK — see [`android/README.md`](android/README.md)).
-2. In the app: **Grant usage access**, enter the same hub URL + pairing secret, **Pair & start
-   tracking**. Phone app-usage now flows to the hub, and the app shows the shared dashboard.
+1. Install Tailscale on the phone and sign into the same tailnet.
+2. Open [`android/`](android/) in Android Studio and **Run ▶** it on the phone (see the
+   [Android guide](android/README.md)).
+3. Grant Usage Access, enter the same HTTPS Hub URL and pairing secret, then choose
+   **Pair & start tracking**.
 
-The desktop app keeps its own local dashboard; the **hub dashboard** (browser or phone) shows
-everything combined — per-device breakdown, cross-device focus, and check-ins/goals/notes from any
-device. (iOS can view the dashboard in Safari but can't track — Apple exposes no per-app usage API.)
+Open the private HTTPS URL from any tailnet-connected browser to see the combined Hub dashboard.
+The desktop keeps its local dashboard as well. Android can contribute per-app foreground time;
+iOS can use the web dashboard but cannot contribute per-app tracking.
 
 ### Architecture
 
@@ -810,48 +801,56 @@ device. (iOS can view the dashboard in Safari but can't track — Apple exposes 
 
 ### Security (read this)
 
-- The hub **binds to `127.0.0.1` by default**; it prints a loud warning if you set
-  `TEMPO_BIND=0.0.0.0`. In Docker it binds `0.0.0.0` *inside the container* — the host port mapping
-  + your firewall control real exposure. **Never expose it to the internet.**
-- For remote access, use **[Tailscale](https://tailscale.com)** (or a VPN) and reach the hub on its
-  private IP. Don't port-forward.
-- Auth: a **pairing secret** (admin) exchanges for a **per-device token**; only the token's
-  **SHA-256 hash** is stored. Devices can be **revoked**; unknown/revoked tokens are rejected. The
-  device sync token is **separate** from the browser-extension loopback token. CORS is restricted and
-  the pairing endpoint is rate-limited.
+- Docker listens on `0.0.0.0` only *inside* the container, while Compose publishes port 7700 to
+  the Pi's `127.0.0.1` by default. `TEMPO_HOST_BIND=0.0.0.0` is an explicit LAN-only opt-in.
+- **Tailscale Serve** is the recommended remote path: it provides a private tailnet HTTPS URL and
+  proxies to the loopback Hub. Do not port-forward 7700 and do not enable public Funnel access.
+- A **pairing secret** exchanges for a separate per-device token; only each token's SHA-256 hash
+  is stored. Devices can be revoked, unknown/revoked tokens are rejected, and pairing is
+  rate-limited. The extension's desktop-loopback token is unrelated.
+- The web dashboard is same-origin by default. Cross-origin API access is closed unless an exact
+  `TEMPO_ALLOWED_ORIGINS` allowlist is supplied, and Hub responses include restrictive browser
+  security headers.
 
 ### Run Tempo Hub on Raspberry Pi
 
-On the Pi (Docker + compose installed):
+The guided path performs the build, health check, secret generation, and private HTTPS setup:
 
 ```bash
-git clone <this repo> && cd ai_usage_tracker_app
-echo "TEMPO_PAIRING_SECRET=$(openssl rand -hex 24)" > .env   # a strong random secret
-docker compose up -d --build                                  # builds web + hub, starts on :7700
-docker compose logs -f tempo-hub                              # note the secret you set in .env
+git clone <this repo> tempo
+cd tempo
+sudo tailscale up
+bash scripts/setup-pi-hub.sh
 ```
 
-The DB persists on the `tempo-data` volume. Open the dashboard at `http://<pi-ip>:7700` (or your
-Tailscale IP) and enter the pairing secret once.
+Then use `tailscale serve status` to see the exact HTTPS URL and
+`grep '^TEMPO_PAIRING_SECRET=' .env` to retrieve the secret. The SQLite database persists in the
+`tempo-data` Docker volume. The full guide covers prerequisites, verification, backups, updating,
+and troubleshooting: **[docs/raspberry-pi-setup.md](docs/raspberry-pi-setup.md)**.
 
-Run without Docker (any Linux/arm64):
+For a deliberate non-Docker installation, keep the Hub on loopback and put Tailscale Serve in
+front of it:
 
 ```bash
-npm run build                                  # build the dashboard → dist/
-cargo build --release -p tempo-hub             # build only the hub (no Tauri deps)
-TEMPO_PAIRING_SECRET=... TEMPO_BIND=0.0.0.0 TEMPO_STATIC_DIR=dist \
+npm run build
+cargo build --release --locked -p tempo-hub
+TEMPO_PAIRING_SECRET=... TEMPO_BIND=127.0.0.1 TEMPO_STATIC_DIR=dist \
   ./target/release/tempo-hub
+sudo tailscale serve --bg http://127.0.0.1:7700
 ```
 
-**Env vars:** `TEMPO_PAIRING_SECRET` (required) · `TEMPO_PORT` (7700) · `TEMPO_BIND` (127.0.0.1) ·
-`TEMPO_DB` (path) · `TEMPO_STATIC_DIR` (dashboard dir) · `TEMPO_ALLOWED_ORIGINS` (CORS allowlist).
+**Key env vars:** `TEMPO_PAIRING_SECRET` (required) · `TEMPO_HOST_BIND` (Compose host binding,
+`127.0.0.1`) · `TEMPO_PORT` (7700) · `TEMPO_BIND` (process binding) · `TEMPO_DB` ·
+`TEMPO_STATIC_DIR` · `TEMPO_ALLOWED_ORIGINS` (exact CORS allowlist).
 
 ### Connect the desktop
 
-In the desktop app's **Sync** settings: switch **Mode** to *Connect to Tempo Hub*, enter the hub
-URL + pairing secret, and **Pair**. The desktop keeps tracking locally and uploads event batches in
-the background; **Import history** re-sends existing local history once. The browser extension is
-unchanged — it forwards to the desktop, which forwards to the hub.
+Install Tailscale on the desktop and sign into the same tailnet. In **Settings → Connections**,
+choose *Connect to Tempo Hub*, paste the exact `https://…ts.net` URL printed on the Pi, enter the
+pairing secret, and choose **Pair**. **Import history** sends existing local records once. Future
+events upload in the background, and Tempo safely queues them during Hub downtime. The browser
+extension still sends to the desktop loopback service; the desktop forwards those events to the
+Hub.
 
 ### API (LAN/VPN only)
 
@@ -912,7 +911,8 @@ doesn't have; the storage layer is seamed so it could be swapped later if that e
 | --- | --- | --- |
 | `TEMPO_PAIRING_SECRET` | *(required)* | Admin secret devices exchange for a token; also the dashboard password. Use a long random value (`openssl rand -hex 24`). |
 | `TEMPO_PORT` | `7700` | Port the hub listens on. |
-| `TEMPO_BIND` | `127.0.0.1` | Bind address. `0.0.0.0` exposes it to the network (prints a warning) — only behind Tailscale/a firewall. |
+| `TEMPO_HOST_BIND` | `127.0.0.1` | Docker Compose host binding. Keep loopback for Tailscale Serve; `0.0.0.0` is a deliberate trusted-LAN opt-in. |
+| `TEMPO_BIND` | `127.0.0.1` (`0.0.0.0` inside Docker) | Hub process binding. Compose still keeps the published host port on loopback by default. |
 | `TEMPO_DB` | `/data/tempo.db` | SQLite database path (a Docker volume by default). |
 | `TEMPO_STATIC_DIR` | `./web` | Folder of the built dashboard the hub serves. |
 | `TEMPO_ALLOWED_ORIGINS` | same-origin | CORS allowlist for the dashboard. |
@@ -928,7 +928,7 @@ doesn't have; the storage layer is seamed so it could be swapped later if that e
 > stays desktop-only regardless; without this, the hub's reviews/plans are the deterministic
 > fallback (no error).
 
-### Desktop — in-app settings (Privacy & Settings)
+### Desktop — in-app settings (Settings)
 
 | Setting | Default | What it does |
 | --- | --- | --- |

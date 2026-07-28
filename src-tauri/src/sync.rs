@@ -23,6 +23,33 @@ const HUB_DEVICE_ID: &str = "hub_device_id";
 const SYNC_LAST_AT: &str = "sync_last_at";
 const SYNC_CONNECTED: &str = "sync_connected";
 
+fn normalize_hub_url(raw: &str) -> Result<String, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("Hub URL is required".into());
+    }
+    let candidate = if raw.contains("://") { raw.to_string() } else { format!("https://{raw}") };
+    let mut parsed = url::Url::parse(&candidate).map_err(|_| "Enter a valid Hub URL".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("Hub URL must start with http:// or https://".into());
+    }
+    if parsed.host_str().is_none() {
+        return Err("Hub URL must include a host name or IP address".into());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("Do not put a username or password in the Hub URL".into());
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("Hub URL cannot include a query string or fragment".into());
+    }
+    let path = parsed.path().trim_end_matches('/');
+    if !path.is_empty() {
+        return Err("Hub URL should not include /api or another path".into());
+    }
+    parsed.set_path("");
+    Ok(parsed.to_string().trim_end_matches('/').to_string())
+}
+
 fn wm_key(table: &str) -> String {
     format!("sync_wm_{table}")
 }
@@ -699,10 +726,7 @@ pub fn set_app_mode(db: State<'_, Db>, mode: String) -> Result<(), String> {
 /// Pair this device with a hub: exchanges the pairing secret for a device token.
 #[tauri::command]
 pub fn pair_with_hub(db: State<'_, Db>, hub_url: String, pairing_secret: String) -> Result<(), String> {
-    let url = hub_url.trim().trim_end_matches('/').to_string();
-    if url.is_empty() {
-        return Err("Hub URL is required".into());
-    }
+    let url = normalize_hub_url(&hub_url)?;
     let resp = ureq::post(&format!("{url}/api/pair"))
         .timeout(Duration::from_secs(15))
         .send_json(serde_json::json!({
@@ -762,6 +786,15 @@ mod tests {
         }
     }
 
+    #[test]
+    fn hub_urls_are_normalized_and_limited_to_http() {
+        assert_eq!(normalize_hub_url("tempo-hub.example.ts.net").unwrap(), "https://tempo-hub.example.ts.net");
+        assert_eq!(normalize_hub_url("http://100.90.80.70:7700/").unwrap(), "http://100.90.80.70:7700");
+        assert!(normalize_hub_url("ftp://tempo-hub").is_err());
+        assert!(normalize_hub_url("https://user:secret@tempo-hub.example.ts.net").is_err());
+        assert!(normalize_hub_url("https://tempo-hub.example.ts.net?token=nope").is_err());
+        assert!(normalize_hub_url("https://tempo-hub.example.ts.net/api/health").is_err());
+    }
     #[test]
     fn local_mode_has_no_sync_target() {
         let conn = db::test_conn();

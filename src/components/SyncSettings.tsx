@@ -99,10 +99,18 @@ export default function SyncSettings() {
       <form className="folder-form" onSubmit={pair}>
         <input
           className="pf-input"
-          placeholder="Hub URL  e.g. http://tempo-pi:7700"
+          type="url"
+          inputMode="url"
+          autoCapitalize="none"
+          spellCheck={false}
+          aria-label="Tempo Hub URL"
+          placeholder="https://tempo-hub.your-tailnet.ts.net"
           value={hubUrl}
           onChange={(e) => setHubUrl(e.target.value)}
         />
+        <div className="card-hint" style={{ margin: "-4px 0 2px" }}>
+          Tailscale: paste the exact private HTTPS URL printed by <code>tailscale serve</code>.
+        </div>
         <div className="folder-form-row">
           <input
             className="pf-input"

@@ -56,9 +56,11 @@ compileSdk/targetSdk 34 · minSdk 26 (Android 8.0+).
 
 ## Set it up on your phone
 
-First make sure the **hub is reachable from the phone**: run it with `TEMPO_BIND=0.0.0.0`
-on your LAN (it prints a warning — that's expected), or put both devices on **Tailscale**.
-The hub URL is then `http://<pi-lan-ip>:7700` (or your Tailscale name).
+Use the private **HTTPS URL printed by `tailscale serve status`** on the Raspberry Pi,
+for example `https://tempo-hub.example-tailnet.ts.net`. Keep Tailscale connected on
+the Pi and phone. The recommended setup keeps Docker's host port on `127.0.0.1`,
+uses Tailscale Serve as the private HTTPS proxy, and requires no router port forwarding.
+Follow the copy-paste [Raspberry Pi setup guide](../docs/raspberry-pi-setup.md) first.
 
 In the app:
 
@@ -86,10 +88,11 @@ buffering through any hub downtime. To re-pair against a different hub, clear th
   aggregation, including the cross-device focus summary.
 - `SyncWorker` (WorkManager, every 15 min, network-constrained) scans since the watermark,
   uploads, and advances the watermark only on success.
-- `MainActivity` shows setup when unpaired, else a WebView of the hub with the pairing secret
-  injected as `tempo_web_token` so the dashboard authenticates silently. A thin status strip on
-  top shows "✅ Tracking on · N app opens today · synced Nm ago" (tap to sync now, or to grant
-  Usage access if it's paused).
+- `MainActivity` shows setup when unpaired, then opens the same-origin hub dashboard. It passes
+  the pairing secret once in the URL fragment; the web app stores it locally and immediately
+  removes the fragment from the address. External origins open in the phone's normal browser.
+  A thin status strip on top shows tracking and sync state (tap to sync now, or grant Usage
+  Access if tracking is paused).
 - The pairing token + secret are stored with **EncryptedSharedPreferences** (AES-256, key in the
   Android Keystore), not in plaintext prefs.
 

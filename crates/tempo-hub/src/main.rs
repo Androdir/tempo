@@ -129,21 +129,22 @@ fn build_response(
     let method = req.method().clone();
     let path = req.url().split('?').next().unwrap_or("").to_string();
     let origin = header(req, "origin");
-    let cors = cors_headers(cfg, origin.as_deref());
+    let mut common_headers = security_headers();
+    common_headers.extend(cors_headers(cfg, origin.as_deref()));
 
     if method == Method::Options {
-        return with_headers(Response::from_data(Vec::new()).with_status_code(204), &cors);
+        return with_headers(Response::from_data(Vec::new()).with_status_code(204), &common_headers);
     }
 
     if path.starts_with("/api/") {
         let (status, body) = api_route(db, cfg, limiter, &method, &path, req);
-        let mut headers = cors;
+        let mut headers = common_headers;
         headers.push(content_type("application/json"));
         return with_headers(Response::from_data(body.into_bytes()).with_status_code(status), &headers);
     }
 
     let (status, bytes, ctype) = serve_static(cfg, &path);
-    let mut headers = cors;
+    let mut headers = common_headers;
     headers.push(content_type(ctype));
     with_headers(Response::from_data(bytes).with_status_code(status), &headers)
 }
@@ -900,12 +901,24 @@ fn content_type(ct: &str) -> Header {
     Header::from_bytes(&b"Content-Type"[..], ct.as_bytes()).expect("valid header")
 }
 
-/// CORS: same-origin needs none; for cross-origin clients we only reflect an
-/// Origin that's in the allowlist (empty allowlist = LAN-only, reflect any).
+fn security_headers() -> Vec<Header> {
+    [
+        ("X-Content-Type-Options", "nosniff"),
+        ("X-Frame-Options", "DENY"),
+        ("Referrer-Policy", "no-referrer"),
+        ("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'"),
+    ]
+    .into_iter()
+    .map(|(name, value)| Header::from_bytes(name.as_bytes(), value.as_bytes()).unwrap())
+    .collect()
+}
+
+/// Same-origin dashboards need no CORS headers. Cross-origin browser clients
+/// are allowed only when their exact Origin is explicitly configured.
 fn cors_headers(cfg: &Config, origin: Option<&str>) -> Vec<Header> {
     let mut out = Vec::new();
     let allow = match origin {
-        Some(o) if cfg.allowed_origins.is_empty() || cfg.allowed_origins.iter().any(|a| a == o) => Some(o),
+        Some(o) if cfg.allowed_origins.iter().any(|a| a == o) => Some(o),
         _ => None,
     };
     if let Some(o) = allow {
@@ -971,6 +984,15 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cors_is_closed_by_default_and_exact_when_configured() {
+        let mut cfg = Config { pairing_secret: "secret".into(), static_dir: "web".into(), allowed_origins: vec![] };
+        assert!(cors_headers(&cfg, Some("https://example.com")).is_empty());
+        cfg.allowed_origins = vec!["https://tempo.example.ts.net".into()];
+        let headers = cors_headers(&cfg, Some("https://tempo.example.ts.net"));
+        assert!(headers.iter().any(|h| h.field.as_str().as_str() == "Access-Control-Allow-Origin"));
+        assert!(cors_headers(&cfg, Some("https://evil.example")).is_empty());
+    }
     #[test]
     fn pairing_token_lifecycle_and_revoke() {
         let conn = db::test_conn();

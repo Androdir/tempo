@@ -1,194 +1,265 @@
-# Tempo Hub on a Raspberry Pi — beginner, headless setup
+# Run Tempo Hub on a Raspberry Pi over Tailscale
 
-A complete, copy-paste walkthrough to run the **Tempo Hub** on a Raspberry Pi **with no
-monitor or keyboard attached** (fully headless), and connect your desktop + phone to it over a
-private network. Written for first-timers — if you've never used SSH, you're in the right place.
+This is the recommended private setup for a Raspberry Pi 4, 400, 5, or 500
+running a 64-bit Raspberry Pi OS. The Hub stays bound to the Pi itself; Tailscale
+Serve gives it one private HTTPS address for your computer and Android phone.
 
-Works on **Pi 4 / 400 / 5 / 500** (all arm64). The Pi never needs a screen — a hub is just a
-background server.
-
-**What you're building:** three pieces talking to one shared database.
-
-```
- Desktop app (tracker) ─┐
- Phone app  (tracker) ──┼──►  Raspberry Pi  =  Tempo Hub (shared DB + dashboard)
- Any browser (viewer) ──┘        reached privately over Tailscale
+```text
+Windows Tempo tracker ─┐
+Android Tempo tracker ─┼─ Tailscale ─ https://tempo-hub.<tailnet>.ts.net
+Browser dashboard ─────┘                         │
+                                      Raspberry Pi + Docker
+                                      Tempo Hub + SQLite
 ```
 
-**You'll need:** the Pi + its microSD card, a microSD→SD adapter (or a USB card reader), a
-computer to flash the card, and ideally an ethernet cable.
+Nothing needs to be port-forwarded on your router and this guide does not use
+Tailscale Funnel. The Hub is available only to devices permitted by your
+tailnet.
 
----
+## What you need
 
-## Phase 1 — Flash the SD card
+- Raspberry Pi 4/400/5/500 with a 64-bit CPU and power supply
+- Raspberry Pi OS Lite **64-bit** on a microSD card or SSD
+- Ethernet if possible, or reliable Wi-Fi
+- A Tailscale account
+- The Tempo source repository on the Pi
 
-1. Install **Raspberry Pi Imager**: <https://www.raspberrypi.com/software/>
-2. Put the microSD in the adapter/reader and into your computer. If Windows says *"format this
-   disk?"* → **Cancel** (you don't need to format — Imager does it).
-3. In Imager:
-   - **Choose Device** → your model (Pi 4 for a 400; Pi 5 for a 500).
-   - **Choose OS** → *Raspberry Pi OS (other)* → **Raspberry Pi OS Lite (64-bit)** (no desktop —
-     perfect for a server).
-   - **Choose Storage** → your SD card.
-4. **Next** → *"apply OS customisation?"* → **Edit Settings**. This is what makes headless work:
-   - **Hostname:** `tempo`
-   - **Username:** `pi` · **Password:** something you'll remember (write it down).
-   - **Configure wireless LAN:** your WiFi name + password + country — *or skip it if you'll plug
-     in an ethernet cable (recommended).*
-   - **Locale:** your timezone.
-   - **Services** tab → ✅ **Enable SSH** → "Use password authentication".
-   - *(Optional)* Raspberry Pi Connect — harmless extra, gives browser-based access as a backup;
-     not required since we use SSH + Tailscale.
-   - **Save** → **Yes** → write (~5–10 min) → eject.
+Docker's current Raspberry Pi guidance recommends the Debian `arm64` packages
+for a 64-bit OS. Do not use a 32-bit image for this setup.
 
----
+## 1. Prepare the Pi
 
-## Phase 2 — Boot it (no screen needed)
+Use [Raspberry Pi Imager](https://www.raspberrypi.com/software/) to install
+**Raspberry Pi OS Lite (64-bit)**. In the Imager customisation screen:
 
-1. Put the microSD into the Pi (slot is on the back/underside edge).
-2. **Plug an ethernet cable** from the Pi to your router (most reliable), or rely on the WiFi you
-   configured.
-3. Power on. Wait **~2 minutes** for it to boot and join the network.
+- set the hostname to `tempo-hub`;
+- create your username and password;
+- configure Wi-Fi if you are not using Ethernet;
+- enable SSH;
+- set your locale and timezone.
 
----
+Boot the Pi, wait about two minutes, then connect from your computer:
 
-## Phase 3 — SSH into the Pi
-
-SSH = "control the Pi by typing commands on it from your own computer."
-
-1. Open **Windows Terminal** / PowerShell (or Terminal on macOS).
-2. Run:
-   ```bash
-   ssh pi@tempo.local
-   ```
-3. First time it asks to confirm the fingerprint → type **`yes`** → Enter.
-4. Type your password. **Nothing appears on screen while you type a password — that's normal.**
-   Press Enter.
-5. You see `pi@tempo:~ $` → **you're in.** Every command below runs here, on the Pi.
-
-> **If `tempo.local` doesn't resolve:** open your router admin page (often `http://192.168.1.1`),
-> find the device named `tempo`, note its IP, and use `ssh pi@192.168.1.xx` instead.
-
----
-
-## Phase 4 — Install the hub
-
-**4a. Add swap** (do this on a 4 GB Pi like the 400 so the build doesn't get "Killed" — harmless
-on 8 GB models too):
 ```bash
-sudo dphys-swapfile swapoff
-sudo sed -i 's/^CONF_SWAPSIZE=.*/CONF_SWAPSIZE=2048/' /etc/dphys-swapfile
-sudo dphys-swapfile setup && sudo dphys-swapfile swapon
+ssh <your-user>@tempo-hub.local
 ```
 
-**4b. Install Docker:**
+If the `.local` name does not resolve, use the Pi's LAN IP from your router.
+
+## 2. Install Docker and Tailscale
+
+Install Docker Engine and the Compose plugin using Docker's instructions for
+[Debian arm64](https://docs.docker.com/engine/install/debian/). The convenience
+installer also works for a personal Pi:
+
 ```bash
 curl -fsSL https://get.docker.com | sh
-sudo usermod -aG docker $USER
+sudo usermod -aG docker "$USER"
 ```
-Now **log out and back in** so Docker works without `sudo`: type `exit`, then `ssh pi@tempo.local`
-again.
 
-**4c. Get the code and start the hub:**
+Log out and reconnect after changing the Docker group:
+
+```bash
+exit
+ssh <your-user>@tempo-hub.local
+```
+
+Install and connect Tailscale:
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up --hostname=tempo-hub
+```
+
+Open the authentication link it prints. Install Tailscale on the Windows
+computer and Android phone as well, using the same tailnet.
+
+Verify both services before continuing:
+
+```bash
+docker version
+docker compose version
+tailscale status
+```
+
+## 3. Start Tempo Hub
+
+Get the code and run the Pi helper:
+
 ```bash
 git clone https://github.com/Androdir/tempo.git
 cd tempo
-echo "TEMPO_PAIRING_SECRET=$(openssl rand -hex 24)" > .env
-docker compose up -d --build
+bash scripts/setup-pi-hub.sh
 ```
-⏳ The first build compiles Rust on the Pi — **expect 20–40 min on a Pi 4, ~10–15 on a Pi 5.**
 
-> If `git clone` asks for a username/password, your GitHub repo is **private**. Easiest fix: on
-> GitHub → repo → **Settings → General → Change visibility → Public** (safe — no secrets are
-> committed). Or use a personal access token in place of the password.
+The helper:
 
-**4d. When it finishes — grab the secret and confirm it's running:**
+1. verifies that the Pi is running a 64-bit ARM OS;
+2. creates `.env` with a strong pairing secret if needed;
+3. validates the Compose configuration;
+4. builds the React dashboard and ARM64 Rust Hub image;
+5. waits for `/api/health` to pass;
+6. publishes the loopback-only Hub through persistent Tailscale Serve HTTPS.
+
+The first native build can take 10–40 minutes depending on the Pi. Later builds
+reuse Docker layers.
+
+At the end, Tailscale prints an address similar to:
+
+```text
+https://tempo-hub.example-tailnet.ts.net
+```
+
+Copy the **exact HTTPS URL it prints**. Do not add `:7700`; Tailscale terminates
+HTTPS on the private URL and proxies it to the loopback Hub.
+
+View the pairing secret only when you are ready to pair a device:
+
 ```bash
-cat .env                                  # copy the TEMPO_PAIRING_SECRET value
-docker compose logs --tail 20 tempo-hub   # should say: listening on http://0.0.0.0:7700
+grep '^TEMPO_PAIRING_SECRET=' .env
 ```
 
----
+Keep `.env` private. The helper gives it owner-only file permissions and Docker
+never copies it into the image.
 
-## Phase 5 — Tailscale (private access from anywhere)
+## 4. Verify the Pi before pairing
 
-This puts the Pi + your devices on one private network — reachable from anywhere, invisible to the
-public internet. Free for personal use.
+Run all four checks on the Pi:
 
-**On the Pi:**
 ```bash
-curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up
-```
-It prints a **URL** → open it on your computer → log in. The Pi joins your network.
-
-Then install the **Tailscale app** on your **desktop** and **phone**, signed into the **same
-account**. Your hub's address is now:
-```
-http://tempo:7700
+docker compose ps
+curl --fail http://127.0.0.1:7700/api/health
+tailscale serve status
+curl --fail https://tempo-hub.example-tailnet.ts.net/api/health
 ```
 
-> **Check it works:** open `http://tempo:7700` in a browser on a device that has Tailscale on. It
-> should prompt for the secret — paste it, and you'll see the dashboard.
+The health response should contain:
 
----
+```json
+{"app":"tempo-hub","ok":true}
+```
 
-## Phase 6 — Connect your desktop (the tracker)
+From the Windows computer and phone, with Tailscale connected, open the same
+HTTPS URL in a browser. Tempo should load and ask for the Hub secret.
 
-In the **Tempo desktop app** → **Privacy & Settings → Sync**:
-- Mode → **Connect to Tempo Hub**
-- Hub URL: `http://tempo:7700`
-- Pairing secret: *(from `cat .env`)*
-- **Pair**, then **Import history** to backfill your existing data.
+## 5. Connect the Windows desktop tracker
 
-It keeps tracking locally and uploads in the background, buffering through any hub downtime.
+In Tempo:
 
----
+1. Open **Settings → Connections**.
+2. Under **Tempo Hub sync**, paste the exact Tailscale HTTPS URL.
+3. Paste the pairing secret from the Pi.
+4. Select **Pair this device**.
+5. Select **Import history** if you want to copy existing local events to the Hub.
 
-## Phase 7 — Connect your phone (Android)
+The desktop still records locally. If the Pi or Tailscale is temporarily
+offline, events remain queued and upload later.
 
-1. Build/install the Android app — open the `android/` folder in **Android Studio** and **Run ▶**
-   on your phone (see [`../android/README.md`](../android/README.md)).
-2. In the app: **Grant usage access** → enter `http://tempo:7700` + the secret → **Pair & start
-   tracking**.
+A successful setup shows **Connected**, a recent sync time, and zero queued
+events after the next sync cycle.
 
-Now the hub dashboard (browser or phone) shows desktop + phone combined; the desktop app keeps its
-own local view too.
+## 6. Connect the Android tracker
 
----
+Build and install the app from the `android` folder as described in
+[`android/README.md`](../android/README.md). On the phone:
 
-## (Optional) LLM-written reviews on the dashboard
+1. Install Tailscale, sign into the same tailnet, and make sure it is connected.
+2. Open Tempo and grant Android **Usage access**.
+3. Paste the same Tailscale HTTPS URL and pairing secret.
+4. Select **Pair & start tracking**.
 
-The Pi doesn't run an AI model. If you want the hub's Daily Review / Lock-In Plan to be
-LLM-written (instead of the deterministic fallback), point the hub at an **Ollama you run on your
-desktop**. On the desktop set `OLLAMA_HOST=0.0.0.0` and keep it awake, then add to the Pi's `.env`:
+Tempo normalises and validates the URL before saving it. The dashboard receives
+the secret through a one-time URL fragment, removes it immediately, and never
+injects it into pages outside the Hub origin.
+
+Android uploads on its WorkManager schedule and also triggers a sync directly
+after pairing. The top status strip shows tracking permission, app pickups, and
+last sync time.
+
+## 7. Confirm combined data
+
+Use the computer and phone for a few minutes, then open the Hub dashboard. Check:
+
+- **Today** shows activity;
+- the device breakdown includes both Windows and Android;
+- the desktop connection reports no growing queue;
+- the Android status strip reports a recent sync.
+
+The Hub deduplicates repeated uploads by device and event ID, so reconnecting or
+importing history does not double-count the same event from one device.
+
+## Updates and day-to-day commands
+
 ```bash
-TEMPO_LLM_ENABLED=1
-TEMPO_OLLAMA_URL=http://<desktop-tailscale-or-LAN-ip>:11434
-TEMPO_OLLAMA_MODEL=llama3.1:8b
+cd tempo
+docker compose logs -f tempo-hub
+docker compose restart tempo-hub
+tailscale serve status
 ```
-and `docker compose up -d` again. Only LAN/Tailscale addresses are accepted (cloud is refused).
 
----
+Update without deleting the database:
+
+```bash
+cd tempo
+git pull
+bash scripts/setup-pi-hub.sh
+```
+
+The SQLite database lives in the named `tempo-data` Docker volume and survives
+container rebuilds.
+
+## Back up the Hub
+
+Stop the Hub briefly so SQLite and its WAL are consistent, copy the data folder,
+then restart:
+
+```bash
+cd tempo
+docker compose stop tempo-hub
+mkdir -p "$HOME/tempo-backups"
+docker compose cp tempo-hub:/data "$HOME/tempo-backups/data-$(date +%F-%H%M)"
+docker compose start tempo-hub
+```
+
+Copy that backup off the Pi periodically.
+
+## Direct LAN access instead of Tailscale Serve
+
+The default Compose configuration publishes port 7700 only on `127.0.0.1`, so
+other LAN devices cannot bypass Tailscale. If you deliberately want LAN access,
+set this in `.env` and recreate the container:
+
+```bash
+TEMPO_HOST_BIND=0.0.0.0
+```
+
+```bash
+docker compose up -d
+```
+
+Then use `http://<pi-lan-ip>:7700`. This exposes the port on every Pi network
+interface, and Docker-published ports can bypass simple UFW rules. Tailscale
+Serve is the recommended default.
 
 ## Troubleshooting
 
-| Symptom | Fix |
+| Symptom | What to check |
 | --- | --- |
-| `ssh: Could not resolve hostname tempo.local` | Use the Pi's IP from your router page instead. |
-| SSH password "isn't working" | It is — the screen just shows nothing as you type. Type it blind, press Enter. |
-| `docker: permission denied` | You skipped the log-out/in after `usermod -aG docker`. Run `exit`, SSH back in. |
-| `docker compose` build ends with **Killed** | Out of memory — apply the swap step (4a), then rebuild. |
-| `git clone` asks for a password | Repo is private — make it public, or use a token (see 4c). |
-| Can't reach `tempo:7700` from a device | Make sure Tailscale is **on** and signed into the same account on that device. |
+| Helper says the Pi is not ARM64 | Reinstall Raspberry Pi OS Lite **64-bit**. |
+| Docker permission denied | Log out and reconnect after `usermod -aG docker`. |
+| Build is killed | Add swap on a low-memory Pi, then rerun the helper. |
+| Local health check fails | Run `docker compose logs --tail 100 tempo-hub`. |
+| Tailscale URL does not open | Confirm Tailscale is connected on both devices and run `tailscale serve status`. |
+| Desktop pairing fails | Paste the exact HTTPS URL without a trailing `/api` path and re-copy the secret. |
+| Phone pairing fails | Open the HTTPS URL in the phone browser first to confirm Tailscale reachability. |
+| Hub works locally but not remotely | Confirm `.env` keeps `TEMPO_HOST_BIND=127.0.0.1` and that Tailscale Serve targets `http://127.0.0.1:7700`. |
+| Temporary loss of connection | Leave both clients running; their local queues retry automatically. |
 
-## Day-to-day
+For a low-memory Pi, create a 2 GB swap file before building:
 
 ```bash
-docker compose logs -f tempo-hub                # watch logs
-docker compose restart tempo-hub                # restart
-git pull && docker compose up -d --build        # update to the latest code (data is preserved)
+sudo dphys-swapfile swapoff
+sudo sed -i 's/^CONF_SWAPSIZE=.*/CONF_SWAPSIZE=2048/' /etc/dphys-swapfile
+sudo dphys-swapfile setup
+sudo dphys-swapfile swapon
 ```
-Your data lives on the `tempo-data` Docker volume and survives rebuilds. Back it up by copying
-`/var/lib/docker/volumes/` periodically, or `docker compose cp tempo-hub:/data ./backup`.
-</content>

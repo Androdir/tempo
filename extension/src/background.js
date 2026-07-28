@@ -6,11 +6,12 @@
 
 import { detectContentType, summarize } from "./summarize.js";
 
+const tempoBrowser = globalThis.browser || globalThis.chrome;
 const DEFAULTS = { endpoint: "http://127.0.0.1:48710", token: "", enabled: true };
 let configCache = { at: 0, value: null };
 
 async function getOptions() {
-  const o = await chrome.storage.local.get(DEFAULTS);
+  const o = await tempoBrowser.storage.local.get(DEFAULTS);
   return { ...DEFAULTS, ...o };
 }
 
@@ -18,8 +19,8 @@ async function setBadge(state) {
   const map = { ok: ["", "#16a34a"], warn: ["!", "#dc2626"], off: ["॥", "#94a3b8"] };
   const [text, color] = map[state] || map.warn;
   try {
-    await chrome.action.setBadgeText({ text });
-    await chrome.action.setBadgeBackgroundColor({ color });
+    await tempoBrowser.action.setBadgeText({ text });
+    await tempoBrowser.action.setBadgeBackgroundColor({ color });
   } catch {
     /* no action surface */
   }
@@ -97,7 +98,7 @@ async function handleTick(tab) {
 
   let idle = false;
   try {
-    const state = await chrome.idle.queryState(Math.max(15, cfg.idleSeconds || 60));
+    const state = await tempoBrowser.idle.queryState(Math.max(15, cfg.idleSeconds || 60));
     idle = state !== "active";
   } catch {
     /* idle API unavailable */
@@ -117,7 +118,7 @@ async function handleTick(tab) {
   const allowText = cfg.capturePageContent && mode === "text" && !idle;
   if (allowText) {
     try {
-      const extracted = await chrome.tabs.sendMessage(tab.id, {
+      const extracted = await tempoBrowser.tabs.sendMessage(tab.id, {
         action: "extract",
         maxLength: cfg.maxTextLength || 8000,
       });
@@ -149,7 +150,7 @@ async function postIngest(opts, record) {
   }
 }
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+tempoBrowser.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg) return;
   if (msg.action === "tick") {
     handleTick(sender.tab);
@@ -176,8 +177,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 });
 
-chrome.runtime.onInstalled.addListener(async () => {
-  const o = await chrome.storage.local.get(DEFAULTS);
-  await chrome.storage.local.set({ ...DEFAULTS, ...o });
+tempoBrowser.runtime.onInstalled.addListener(async () => {
+  const o = await tempoBrowser.storage.local.get(DEFAULTS);
+  await tempoBrowser.storage.local.set({ ...DEFAULTS, ...o });
   setBadge(o.token ? "ok" : "warn");
 });

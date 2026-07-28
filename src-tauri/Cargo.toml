@@ -26,6 +26,7 @@ active-win-pos-rs = "0.8"
 tiny_http = "0.12"
 # Blocking HTTP client for the local Ollama server (LLM classification).
 ureq = { version = "2", features = ["json"] }
+url = "2"
 
 # Windows-only: idle check (GetLastInputInfo) + Smart Tracking screen OCR
 # (Windows.Media.Ocr — fully local, no model download, no Tesseract install).

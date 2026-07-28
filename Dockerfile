@@ -21,11 +21,15 @@ FROM rust:1-bookworm AS build
 WORKDIR /build
 COPY crates/ ./crates/
 COPY Cargo.hub.toml ./Cargo.toml
-RUN cargo build --release -p tempo-hub
+COPY Cargo.hub.lock ./Cargo.lock
+RUN cargo build --release --locked -p tempo-hub
 
 # ---- 3. Runtime ---------------------------------------------------------------
 FROM debian:bookworm-slim
-RUN useradd -r -u 10001 tempo \
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd -r -u 10001 tempo \
  && mkdir -p /data /app/web \
  && chown -R tempo /data
 COPY --from=build /build/target/release/tempo-hub /usr/local/bin/tempo-hub
@@ -38,6 +42,8 @@ ENV TEMPO_PORT=7700 \
     TEMPO_STATIC_DIR=/app/web
 EXPOSE 7700
 VOLUME ["/data"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD curl --fail --silent --show-error http://127.0.0.1:7700/api/health || exit 1
 USER tempo
 WORKDIR /app
 # TEMPO_PAIRING_SECRET must be supplied at runtime (compose / -e), never baked in.

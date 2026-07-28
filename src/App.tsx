@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import Sidebar, { type Page } from "./components/Sidebar";
+import Sidebar, { navSectionForPage, type Page } from "./components/Sidebar";
 import AccountabilityLayer from "./components/AccountabilityLayer";
 import Dashboard from "./pages/Dashboard";
 import Goals from "./pages/Goals";
@@ -15,6 +15,7 @@ import DailyReview from "./pages/DailyReview";
 import WeeklyReview from "./pages/WeeklyReview";
 import Streaks from "./pages/Streaks";
 import PrivacySettings from "./pages/PrivacySettings";
+import SetupGuide from "./pages/SetupGuide";
 
 type Theme = "light" | "dark";
 
@@ -23,6 +24,26 @@ function initialTheme(): Theme {
   const saved = window.localStorage.getItem("tempo_theme");
   if (saved === "light" || saved === "dark") return saved;
   return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function SectionTabs({ page, onNavigate }: { page: Page; onNavigate: (page: Page) => void }) {
+  const section = navSectionForPage(page);
+  if (section.pages.length <= 1) return null;
+
+  return (
+    <nav className="section-tabs" aria-label={`${section.label} views`}>
+      {section.pages.map((item) => (
+        <button
+          key={item.id}
+          className={`section-tab${page === item.id ? " active" : ""}`}
+          onClick={() => onNavigate(item.id)}
+          aria-current={page === item.id ? "page" : undefined}
+        >
+          {item.label}
+        </button>
+      ))}
+    </nav>
+  );
 }
 
 export default function App() {
@@ -49,6 +70,7 @@ export default function App() {
         onToggleTheme={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
       />
       <main className="main" ref={mainRef}>
+        <SectionTabs page={page} onNavigate={setPage} />
         {page === "dashboard" && <Dashboard onNavigate={setPage} />}
         {page === "goals" && <Goals />}
         {page === "focus" && <Focus />}
@@ -63,6 +85,7 @@ export default function App() {
         {page === "weekly" && <WeeklyReview />}
         {page === "streaks" && <Streaks />}
         {page === "privacy" && <PrivacySettings />}
+        {page === "guide" && <SetupGuide onNavigate={setPage} />}
       </main>
       <AccountabilityLayer />
     </div>

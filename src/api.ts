@@ -70,6 +70,21 @@ export function isRemote(): boolean {
 function webToken(): string {
   let t = (typeof localStorage !== "undefined" && localStorage.getItem("tempo_web_token")) || "";
   if (!t && typeof window !== "undefined") {
+    const hash = new URLSearchParams(window.location.hash.slice(1));
+    const seeded = hash.get("tempo_token") || "";
+    if (seeded) {
+      t = seeded;
+      localStorage.setItem("tempo_web_token", t);
+      hash.delete("tempo_token");
+      const rest = hash.toString();
+      window.history.replaceState(
+        null,
+        "",
+        `${window.location.pathname}${window.location.search}${rest ? `#${rest}` : ""}`,
+      );
+    }
+  }
+  if (!t && typeof window !== "undefined") {
     t = window.prompt("Enter the Tempo Hub secret to view the dashboard:") || "";
     if (t) localStorage.setItem("tempo_web_token", t);
   }

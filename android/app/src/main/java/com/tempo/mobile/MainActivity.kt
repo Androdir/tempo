@@ -2,13 +2,14 @@ package com.tempo.mobile
 
 import android.annotation.SuppressLint
 import android.content.Intent
-import android.graphics.Bitmap
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.view.ViewGroup
+import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
@@ -21,7 +22,7 @@ import androidx.appcompat.app.AppCompatActivity
  * Two states in one Activity:
  *  - not paired  -> a small setup screen (grant Usage access, enter hub URL + secret).
  *  - paired      -> a WebView of the hub dashboard (the same web app the desktop serves),
- *                   with the pairing secret injected as `tempo_web_token` so it just works.
+ *                   with a one-time URL fragment that seeds `tempo_web_token` on the Hub origin.
  */
 class MainActivity : AppCompatActivity() {
 
@@ -60,9 +61,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         pairBtn.setOnClickListener {
-            val url = hubUrl.text.toString().trim().trimEnd('/')
+            val rawUrl = hubUrl.text.toString().trim()
             val sec = secret.text.toString().trim()
-            if (url.isEmpty() || sec.isEmpty()) {
+            if (rawUrl.isEmpty() || sec.isEmpty()) {
                 setStatus("Enter the hub URL and pairing secret.")
                 return@setOnClickListener
             }
@@ -73,6 +74,7 @@ class MainActivity : AppCompatActivity() {
             setStatus("Pairing…")
             Thread {
                 try {
+                    val url = HubClient.normalizeHubUrl(rawUrl)
                     val name = Build.MODEL ?: "Android phone"
                     val p = HubClient.pair(url, sec, name)
                     prefs.savePairing(url, p.token, p.deviceId, sec)
@@ -131,31 +133,31 @@ class MainActivity : AppCompatActivity() {
         web = w
         w.settings.javaScriptEnabled = true
         w.settings.domStorageEnabled = true
-        val secret = prefs.secret()
+        w.settings.allowFileAccess = false
+        w.settings.allowContentAccess = false
         w.webViewClient = object : WebViewClient() {
-            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                injectToken(view, secret)
-            }
-            override fun onPageFinished(view: WebView?, url: String?) {
-                injectToken(view, secret)
+            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                val target = request?.url ?: return false
+                if (sameHubOrigin(target)) return false
+                runCatching { startActivity(Intent(Intent.ACTION_VIEW, target)) }
+                return true
             }
         }
         // weight 1 = the WebView fills the rest below the status strip.
         root.addView(w, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
         setContentView(root)
-        w.loadUrl(prefs.hubUrl())
+        val token = Uri.encode(prefs.secret())
+        w.loadUrl("${prefs.hubUrl().trimEnd('/')}/#tempo_token=$token")
         startStatusTicker()
     }
 
-    /** Seed the dashboard's web token so it authenticates without a prompt. */
-    private fun injectToken(view: WebView?, secret: String) {
-        if (view == null || secret.isEmpty()) return
-        val esc = secret.replace("\\", "\\\\").replace("'", "\\'")
-        view.evaluateJavascript(
-            "try{localStorage.setItem('tempo_web_token','$esc');}catch(e){}",
-            null,
-        )
+    private fun sameHubOrigin(target: Uri): Boolean {
+        val hub = Uri.parse(prefs.hubUrl())
+        fun effectivePort(uri: Uri): Int = if (uri.port >= 0) uri.port else if (uri.scheme == "https") 443 else 80
+        return target.scheme.equals(hub.scheme, ignoreCase = true) &&
+            target.host.equals(hub.host, ignoreCase = true) &&
+            effectivePort(target) == effectivePort(hub)
     }
 
     private fun startStatusTicker() {

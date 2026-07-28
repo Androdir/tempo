@@ -33,6 +33,15 @@ import type {
 
 const CAPTURE_MODES: CaptureMode[] = ["text", "meta", "never"];
 
+type SettingsSection = "tracking" | "content" | "connections" | "data";
+
+function initialSettingsSection(): SettingsSection {
+  if (typeof window === "undefined") return "tracking";
+  const pending = window.sessionStorage.getItem("tempo_settings_section");
+  if (pending === "content" || pending === "connections" || pending === "data") return pending;
+  return "tracking";
+}
+
 export default function PrivacySettings() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [rules, setRules] = useState<DomainRule[]>([]);
@@ -40,6 +49,11 @@ export default function PrivacySettings() {
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [resetting, setResetting] = useState(false);
+  const [section, setSection] = useState<SettingsSection>(initialSettingsSection);
+
+  useEffect(() => {
+    window.sessionStorage.removeItem("tempo_settings_section");
+  }, []);
 
   const [maxLen, setMaxLen] = useState("8000");
   const [smartInterval, setSmartInterval] = useState("60");
@@ -275,6 +289,13 @@ export default function PrivacySettings() {
     navigator.clipboard?.writeText(text).then(() => flash(`${label} copied`)).catch(() => {});
   }
 
+  function selectSection(next: SettingsSection) {
+    setSection(next);
+    window.requestAnimationFrame(() => {
+      document.querySelector<HTMLElement>("main")?.scrollTo({ top: 0, behavior: "smooth" });
+    });
+  }
+
   if (error && !settings) {
     return (
       <>
@@ -297,11 +318,31 @@ export default function PrivacySettings() {
       <Head status={status} />
       {error && <div className="error-box" style={{ marginBottom: 14 }}>{error}</div>}
 
-      <SyncSettings />
+      <nav className="settings-tabs" aria-label="Settings sections">
+        {([
+          ["tracking", "Tracking"],
+          ["content", "Browser & content"],
+          ["connections", "Connections"],
+          ["data", "Data & privacy"],
+        ] as [SettingsSection, string][]).map(([id, label]) => (
+          <button
+            key={id}
+            className={`settings-tab${section === id ? " active" : ""}`}
+            onClick={() => selectSection(id)}
+            aria-current={section === id ? "page" : undefined}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
+
+      <div hidden={section !== "connections"}>
+        <SyncSettings />
+      </div>
 
       {/* Accountability */}
       {acct && (
-        <div className="card card-pad">
+        <div className="card card-pad" hidden={section !== "tracking"}>
           <h2 className="card-title">Accountability</h2>
           <p className="card-hint">
             Local nudges only — distraction warnings and the end-of-day popup fire as desktop
@@ -378,7 +419,7 @@ export default function PrivacySettings() {
       )}
 
       {/* Smart Tracking (screen OCR) — most sensitive, shown first */}
-      <div className="card card-pad smart-card">
+      <div className="card card-pad smart-card section-gap" hidden={section !== "tracking"}>
         <h2 className="card-title">Personal Smart Tracking Mode</h2>
         <div className="warn-box">
           <span className="warn-ico">⚠️</span>
@@ -424,7 +465,7 @@ export default function PrivacySettings() {
 
       {/* Local AI classification (Ollama) */}
       {llm && (
-        <div className="card card-pad section-gap">
+        <div className="card card-pad section-gap" hidden={section !== "connections"}>
           <h2 className="card-title">Local AI classification (Ollama)</h2>
           <p className="card-hint">
             Optional. Uses a locally-running Ollama server to refine activity classification in the
@@ -475,7 +516,7 @@ export default function PrivacySettings() {
       )}
 
       {/* Capture master toggle */}
-      <div className="card card-pad section-gap">
+      <div className="card card-pad section-gap" hidden={section !== "content"}>
         <h2 className="card-title">Page content capture</h2>
         <p className="card-hint">
           Off by default. When off, only domain, URL and title are recorded — never page text.
@@ -489,7 +530,7 @@ export default function PrivacySettings() {
       </div>
 
       {/* Storage */}
-      <div className="card card-pad section-gap">
+      <div className="card card-pad section-gap" hidden={section !== "content"}>
         <h2 className="card-title">What gets stored</h2>
         <p className="card-hint">Summaries &amp; keywords are kept; raw text is optional.</p>
         <SettingRow label="Store raw text excerpt" hint="Keep the raw extracted text (off = summary + keywords only).">
@@ -523,7 +564,7 @@ export default function PrivacySettings() {
       </div>
 
       {/* Domain rules */}
-      <div className="card section-gap">
+      <div className="card section-gap" hidden={section !== "content"}>
         <div className="card-pad" style={{ paddingBottom: 8 }}>
           <h2 className="card-title">Domain rules — allowlist &amp; blocklist</h2>
           <p className="card-hint">
@@ -608,7 +649,7 @@ export default function PrivacySettings() {
       </div>
 
       {/* Extension endpoint */}
-      <div className="card card-pad section-gap">
+      <div className="card card-pad section-gap" hidden={section !== "connections"}>
         <h2 className="card-title">Browser extension</h2>
         <p className="card-hint">
           Paste these into the extension's options page (see <code>extension/README.md</code>). The
@@ -629,7 +670,7 @@ export default function PrivacySettings() {
       </div>
 
       {/* Idle detection */}
-      <div className="card card-pad section-gap">
+      <div className="card card-pad section-gap" hidden={section !== "tracking"}>
         <h2 className="card-title">Idle detection</h2>
         <p className="card-hint">
           After this many seconds with no keyboard or mouse input, the desktop counts as idle and
@@ -665,7 +706,7 @@ export default function PrivacySettings() {
       </div>
 
       {/* Data retention */}
-      <div className="card card-pad section-gap">
+      <div className="card card-pad section-gap" hidden={section !== "data"}>
         <h2 className="card-title">Data retention</h2>
         <p className="card-hint">
           How long to keep raw activity samples on this device. Older rows are pruned automatically at
@@ -694,7 +735,7 @@ export default function PrivacySettings() {
       </div>
 
       {/* Danger zone */}
-      <div className="card card-pad section-gap danger-zone">
+      <div className="card card-pad section-gap danger-zone" hidden={section !== "data"}>
         <h2 className="card-title">Delete captured content</h2>
         <p className="card-hint">Activity rows (domain, URL, title, duration) are preserved.</p>
         <div className="danger-actions">
@@ -703,7 +744,7 @@ export default function PrivacySettings() {
         </div>
       </div>
 
-      <div className="card card-pad section-gap danger-zone">
+      <div className="card card-pad section-gap danger-zone" hidden={section !== "data"}>
         <h2 className="card-title">Reset app data</h2>
         <p className="card-hint">
           Wipe the local SQLite data so you can rebuild projects, goals and rules from scratch.
@@ -727,8 +768,8 @@ function Head({ status }: { status?: string | null }) {
   return (
     <div className="page-head">
       <div>
-        <h1 className="page-title">Privacy &amp; Settings</h1>
-        <div className="page-subtitle">Everything is stored locally — nothing is uploaded.</div>
+        <h1 className="page-title">Settings</h1>
+        <div className="page-subtitle">Local-only by default. Optional connections are always under your control.</div>
       </div>
       {status && <span className="live-dot"><span className="pulse" />{status}</span>}
     </div>

@@ -1,3 +1,4 @@
+const tempoBrowser = globalThis.browser || globalThis.chrome;
 const $ = (id) => document.getElementById(id);
 
 function render(status) {
@@ -16,20 +17,28 @@ function render(status) {
     card.className = "pop-status ok";
   }
 
+  detail.textContent = "";
   if (status.config) {
     const c = status.config;
-    detail.innerHTML =
-      `<div>Page capture: <b>${c.capturePageContent ? "ON" : "OFF"}</b></div>` +
-      `<div>Store raw text: <b>${c.storeRawText ? "ON" : "OFF"}</b></div>` +
-      `<div>Domain rules: <b>${(c.domainRules || []).length}</b></div>`;
-  } else {
-    detail.textContent = "";
+    const rows = [
+      ["Page capture: ", c.capturePageContent ? "ON" : "OFF"],
+      ["Store raw text: ", c.storeRawText ? "ON" : "OFF"],
+      ["Domain rules: ", String((c.domainRules || []).length)],
+    ];
+    for (const [label, value] of rows) {
+      const row = document.createElement("div");
+      const strong = document.createElement("b");
+      row.append(document.createTextNode(label));
+      strong.textContent = value;
+      row.append(strong);
+      detail.append(row);
+    }
   }
 }
 
 async function refresh() {
   try {
-    const status = await chrome.runtime.sendMessage({ action: "getStatus" });
+    const status = await tempoBrowser.runtime.sendMessage({ action: "getStatus" });
     if (status) render(status);
   } catch {
     $("status-card").textContent = "Background worker starting… reopen the popup.";
@@ -37,14 +46,14 @@ async function refresh() {
 }
 
 $("enabled").addEventListener("change", async (e) => {
-  await chrome.storage.local.set({ enabled: e.target.checked });
+  await tempoBrowser.storage.local.set({ enabled: e.target.checked });
   try {
-    await chrome.runtime.sendMessage({ action: "optionsUpdated" });
+    await tempoBrowser.runtime.sendMessage({ action: "optionsUpdated" });
   } catch {
     /* ignore */
   }
 });
 
-$("options").addEventListener("click", () => chrome.runtime.openOptionsPage());
+$("options").addEventListener("click", () => tempoBrowser.runtime.openOptionsPage());
 
 refresh();

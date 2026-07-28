@@ -11,7 +11,10 @@ services:
     image: tempo-hub:latest
     container_name: tempo-hub
     ports:
-      - "7700:7700"
+      # Tailscale-first default: expose the container only to this Pi. Tailscale
+      # Serve proxies it privately over HTTPS. Set TEMPO_HOST_BIND=0.0.0.0 only
+      # when you deliberately want direct LAN access as well.
+      - "${TEMPO_HOST_BIND:-127.0.0.1}:7700:7700"
     volumes:
       - tempo-data:/data
     environment:
@@ -20,7 +23,8 @@ services:
       TEMPO_PORT: "7700"
       TEMPO_BIND: "0.0.0.0"
       TEMPO_DB: "/data/tempo.db"
-      # Optional: lock CORS to specific dashboard origins (default: LAN-permissive).
+      # Optional: allow a separate browser origin. Same-origin Hub dashboards,
+      # desktop clients and Android clients need no CORS configuration.
       # TEMPO_ALLOWED_ORIGINS: "http://tempo-pi:7700,http://100.x.y.z:7700"
       #
       # Optional: let the hub-served Daily Review / Lock-In Plan be LLM-written by
@@ -31,6 +35,9 @@ services:
       # TEMPO_LLM_ENABLED: "1"
       # TEMPO_OLLAMA_URL: "http://192.168.1.50:11434"   # your desktop's LAN IP
       # TEMPO_OLLAMA_MODEL: "llama3.1:8b"
+    init: true
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
 
 volumes:
