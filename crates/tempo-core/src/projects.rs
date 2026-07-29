@@ -25,6 +25,12 @@ pub struct Project {
     pub apps: Vec<String>,
     #[serde(default)]
     pub domains: Vec<String>,
+    #[serde(default)]
+    pub excluded_apps: Vec<String>,
+    #[serde(default)]
+    pub excluded_domains: Vec<String>,
+    #[serde(default)]
+    pub excluded_keywords: Vec<String>,
     #[serde(default = "default_priority")]
     pub priority: i64,
 }
@@ -54,6 +60,87 @@ fn normalize(s: &str) -> String {
         .to_ascii_lowercase()
 }
 
+fn identifier_matches(entries: &[String], identifier: &str) -> bool {
+    let id_norm = normalize(identifier);
+    !id_norm.is_empty()
+        && entries.iter().any(|entry| {
+            let n = normalize(entry);
+            n.len() >= 3 && (id_norm.contains(&n) || n.contains(&id_norm))
+        })
+}
+
+pub fn exclusion_reason(
+    project: &Project,
+    identifier: &str,
+    title: &str,
+    extra: &str,
+) -> Option<String> {
+    if identifier_matches(&project.excluded_apps, identifier) {
+        return Some(format!("excluded app: {identifier}"));
+    }
+    if identifier_matches(&project.excluded_domains, identifier) {
+        return Some(format!("excluded domain: {identifier}"));
+    }
+    let hay = format!("{title} {extra}").to_ascii_lowercase();
+    project.excluded_keywords.iter().find_map(|keyword| {
+        let keyword = keyword.trim();
+        if keyword.len() >= 2 && hay.contains(&keyword.to_ascii_lowercase()) {
+            Some(format!("excluded keyword: {keyword}"))
+        } else {
+            None
+        }
+    })
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectMatchTest {
+    pub status: String, // assigned | candidate | no_match | excluded
+    pub confidence: u8,
+    pub signals: Vec<String>,
+    pub explanation: String,
+}
+
+pub fn test_project_match(
+    project: &Project,
+    identifier: &str,
+    title: &str,
+    extra: &str,
+) -> ProjectMatchTest {
+    if let Some(reason) = exclusion_reason(project, identifier, title, extra) {
+        return ProjectMatchTest {
+            status: "excluded".into(),
+            confidence: 0,
+            signals: vec![reason.clone()],
+            explanation: format!("This project is blocked by {reason}."),
+        };
+    }
+    match match_project(std::slice::from_ref(project), identifier, title, extra) {
+        Some(m) => {
+            let assigned = m.confidence >= OVERRIDE_THRESHOLD;
+            ProjectMatchTest {
+                status: if assigned { "assigned" } else { "candidate" }.into(),
+                confidence: m.confidence,
+                signals: m.signals,
+                explanation: if assigned {
+                    format!("Would assign {} at {}% confidence.", project.name, m.confidence)
+                } else {
+                    format!(
+                        "Found some evidence, but {}% is below the {}% assignment threshold.",
+                        m.confidence, OVERRIDE_THRESHOLD
+                    )
+                },
+            }
+        }
+        None => ProjectMatchTest {
+            status: "no_match".into(),
+            confidence: 0,
+            signals: Vec::new(),
+            explanation: "No related app, domain, or keyword was found.".into(),
+        },
+    }
+}
+
 /// Best-matching project for an activity, or None. `identifier` is the app name
 /// or domain; `title` is the window/page title; `extra` is any extra text
 /// (e.g. a page's summary + keywords).
@@ -64,11 +151,15 @@ pub fn match_project(
     extra: &str,
 ) -> Option<ProjectMatch> {
     let id_norm = normalize(identifier);
-    let hay = format!("{title} {extra}").to_ascii_lowercase();
+    let title_hay = title.to_ascii_lowercase();
+    let extra_hay = extra.to_ascii_lowercase();
 
     let mut best: Option<(i64, i64, ProjectMatch)> = None; // (score, priority, match)
 
     for p in projects {
+        if exclusion_reason(p, identifier, title, extra).is_some() {
+            continue;
+        }
         let mut signals = Vec::new();
 
         let id_match = !id_norm.is_empty()
@@ -83,8 +174,18 @@ pub fn match_project(
         let mut kw_hits = 0u32;
         for kw in &p.keywords {
             let k = kw.trim().to_ascii_lowercase();
-            if k.len() >= 2 && hay.contains(&k) {
-                signals.push(format!("keyword: {kw}"));
+            if k.len() < 2 {
+                continue;
+            }
+            let signal_kind = if title_hay.contains(&k) {
+                Some("title keyword")
+            } else if extra_hay.contains(&k) {
+                Some("content keyword")
+            } else {
+                None
+            };
+            if let Some(kind) = signal_kind {
+                signals.push(format!("{kind}: {kw}"));
                 kw_hits += 1;
             }
         }
@@ -167,7 +268,8 @@ fn now() -> String {
 
 pub fn list_projects(conn: &Connection) -> rusqlite::Result<Vec<Project>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, category, keywords, apps, domains, priority
+        "SELECT id, name, category, keywords, apps, domains,
+                excluded_apps, excluded_domains, excluded_keywords, priority
          FROM projects ORDER BY priority DESC, name",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -178,7 +280,10 @@ pub fn list_projects(conn: &Connection) -> rusqlite::Result<Vec<Project>> {
             keywords: parse_arr(r.get::<_, String>(3)?),
             apps: parse_arr(r.get::<_, String>(4)?),
             domains: parse_arr(r.get::<_, String>(5)?),
-            priority: r.get(6)?,
+            excluded_apps: parse_arr(r.get::<_, String>(6)?),
+            excluded_domains: parse_arr(r.get::<_, String>(7)?),
+            excluded_keywords: parse_arr(r.get::<_, String>(8)?),
+            priority: r.get(9)?,
         })
     })?;
     let mut out = Vec::new();
@@ -190,14 +295,19 @@ pub fn list_projects(conn: &Connection) -> rusqlite::Result<Vec<Project>> {
 
 pub fn create_project(conn: &Connection, p: &Project) -> rusqlite::Result<i64> {
     conn.execute(
-        "INSERT INTO projects (name, category, keywords, apps, domains, priority, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO projects
+           (name, category, keywords, apps, domains, excluded_apps, excluded_domains,
+            excluded_keywords, priority, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             p.name,
             p.category,
             arr_json(&p.keywords),
             arr_json(&p.apps),
             arr_json(&p.domains),
+            arr_json(&p.excluded_apps),
+            arr_json(&p.excluded_domains),
+            arr_json(&p.excluded_keywords),
             p.priority,
             now()
         ],
@@ -208,13 +318,17 @@ pub fn create_project(conn: &Connection, p: &Project) -> rusqlite::Result<i64> {
 pub fn update_project(conn: &Connection, p: &Project) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE projects SET name=?1, category=?2, keywords=?3, apps=?4, domains=?5,
-             priority=?6, updated_at=?7 WHERE id=?8",
+             excluded_apps=?6, excluded_domains=?7, excluded_keywords=?8,
+             priority=?9, updated_at=?10 WHERE id=?11",
         params![
             p.name,
             p.category,
             arr_json(&p.keywords),
             arr_json(&p.apps),
             arr_json(&p.domains),
+            arr_json(&p.excluded_apps),
+            arr_json(&p.excluded_domains),
+            arr_json(&p.excluded_keywords),
             p.priority,
             now(),
             p.id
@@ -278,6 +392,9 @@ pub fn ensure_default_projects(conn: &Connection) -> rusqlite::Result<()> {
             keywords: keywords.iter().map(|s| s.to_string()).collect(),
             apps: apps.iter().map(|s| s.to_string()).collect(),
             domains: domains.iter().map(|s| s.to_string()).collect(),
+            excluded_apps: Vec::new(),
+            excluded_domains: Vec::new(),
+            excluded_keywords: Vec::new(),
             priority: *priority,
         };
         create_project(conn, &p)?;
@@ -297,6 +414,9 @@ mod tests {
             keywords: kw.iter().map(|s| s.to_string()).collect(),
             apps: apps.iter().map(|s| s.to_string()).collect(),
             domains: dom.iter().map(|s| s.to_string()).collect(),
+            excluded_apps: Vec::new(),
+            excluded_domains: Vec::new(),
+            excluded_keywords: Vec::new(),
             priority: prio,
         }
     }
@@ -359,6 +479,58 @@ mod tests {
         assert_eq!(m.project_name, "Exam studying");
         // app match (50) + 2 keywords (35+20) => capped high
         assert!(m.confidence >= 90, "confidence was {}", m.confidence);
+    }
+
+    #[test]
+    fn match_signals_name_where_the_keyword_was_seen() {
+        let title_match = match_project(
+            &sample(),
+            "example.com",
+            "Premiere editing timeline",
+            "captions ready",
+        )
+        .unwrap();
+        assert!(title_match.signals.contains(&"title keyword: Premiere".to_string()));
+        assert!(title_match.signals.contains(&"content keyword: captions".to_string()));
+    }
+
+    #[test]
+    fn explicit_app_exclusion_blocks_an_otherwise_strong_match() {
+        let mut p = project(
+            "AFM Business",
+            "business",
+            &["AFM"],
+            &["DaVinci Resolve"],
+            &[],
+            80,
+        );
+        p.excluded_apps.push("Telegram Desktop".into());
+        assert!(match_project(
+            &[p.clone()],
+            "Telegram Desktop",
+            "AFM launch chat",
+            "AFM captions",
+        )
+        .is_none());
+        let tested = test_project_match(&p, "Telegram Desktop", "AFM launch chat", "");
+        assert_eq!(tested.status, "excluded");
+    }
+
+    #[test]
+    fn excluded_keyword_blocks_project_assignment() {
+        let mut p = project("Client work", "business", &["launch"], &["Telegram"], &[], 80);
+        p.excluded_keywords.push("personal".into());
+        let tested = test_project_match(&p, "Telegram", "Personal launch chat", "");
+        assert_eq!(tested.status, "excluded");
+        assert_eq!(tested.confidence, 0);
+    }
+
+    #[test]
+    fn matcher_test_distinguishes_candidate_from_assignment() {
+        let p = project("Video", "business", &["captions"], &[], &[], 80);
+        let tested = test_project_match(&p, "Telegram", "captions", "");
+        assert_eq!(tested.status, "candidate");
+        assert!(tested.confidence < OVERRIDE_THRESHOLD);
     }
 
     #[test]

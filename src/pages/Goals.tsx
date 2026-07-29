@@ -9,6 +9,7 @@ import {
   getCheckinDefinitions,
   getCheckins,
   getGoals,
+  getOutputEvents,
   getProjects,
   setCheckin,
   setGoalRecurring,
@@ -23,11 +24,13 @@ import type {
   CheckinValue,
   Goal,
   GoalDraft,
+  OutputEvent,
   Priority,
   Project,
 } from "../types";
 
 const PRIORITIES: Priority[] = ["high", "medium", "low"];
+type TargetMode = "none" | "time" | "count";
 
 const EMPTY_CHECKIN: CheckinDefinition = {
   id: "",
@@ -59,21 +62,27 @@ export default function Goals() {
   const [checkins, setCheckins] = useState<CheckinValue[] | null>(null);
   const [checkinDefs, setCheckinDefs] = useState<CheckinDefinition[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [outputs, setOutputs] = useState<OutputEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [manageCheckins, setManageCheckins] = useState(false);
   const [checkinDraft, setCheckinDraft] = useState<CheckinDefinition>({ ...EMPTY_CHECKIN });
+  const [checkinNotice, setCheckinNotice] = useState<string | null>(null);
 
   const [title, setTitle] = useState("");
   const [project, setProject] = useState("");
+  const [targetMode, setTargetMode] = useState<TargetMode>("none");
   const [target, setTarget] = useState("");
+  const [targetUnit, setTargetUnit] = useState("");
   const [priority, setPriority] = useState<Priority>("medium");
   const [recurring, setRecurring] = useState(false);
   const [editing, setEditing] = useState<{
     id: number;
     title: string;
     project: string;
+    targetMode: TargetMode;
     target: string;
+    targetUnit: string;
     priority: Priority;
     recurring: boolean;
     completed: boolean;
@@ -81,16 +90,18 @@ export default function Goals() {
 
   const load = useCallback(async () => {
     try {
-      const [g, c, d, p] = await Promise.all([
+      const [g, c, d, p, o] = await Promise.all([
         getGoals(),
         getCheckins(),
         getCheckinDefinitions(),
         getProjects(),
+        getOutputEvents(new Date().toLocaleDateString("en-CA")),
       ]);
       setGoals(g);
       setCheckins(c);
       setCheckinDefs(d);
       setProjects(p);
+      setOutputs(o);
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -105,11 +116,17 @@ export default function Goals() {
     e.preventDefault();
     const t = title.trim();
     if (!t || busy) return;
-    const minutes = target ? Math.max(1, parseInt(target, 10) || 0) : null;
+    const value = target ? Math.max(1, parseInt(target, 10) || 0) : null;
+    if (targetMode === "count" && value != null && !targetUnit.trim()) {
+      setError("Enter what the count represents, such as video or post");
+      return;
+    }
     const draft: GoalDraft = {
       title: t,
       project: project || null,
-      targetMinutes: minutes,
+      targetMinutes: targetMode === "time" ? value : null,
+      targetCount: targetMode === "count" ? value : null,
+      targetUnit: targetMode === "count" ? targetUnit.trim() : null,
       priority,
       recurring,
     };
@@ -118,7 +135,9 @@ export default function Goals() {
       await addGoal(draft);
       setTitle("");
       setProject("");
+      setTargetMode("none");
       setTarget("");
+      setTargetUnit("");
       setPriority("medium");
       setRecurring(false);
       await load();
@@ -152,7 +171,9 @@ export default function Goals() {
       id: g.id,
       title: g.title,
       project: g.project ?? "",
-      target: g.targetMinutes == null ? "" : String(g.targetMinutes),
+      targetMode: g.targetMinutes != null ? "time" : g.targetCount != null ? "count" : "none",
+      target: g.targetMinutes != null ? String(g.targetMinutes) : g.targetCount != null ? String(g.targetCount) : "",
+      targetUnit: g.targetUnit ?? "",
       priority: g.priority,
       recurring: g.recurring,
       completed: g.completed,
@@ -164,13 +185,19 @@ export default function Goals() {
     if (!editing) return;
     const t = editing.title.trim();
     if (!t) return;
-    const minutes = editing.target ? Math.max(1, parseInt(editing.target, 10) || 0) : null;
+    const value = editing.target ? Math.max(1, parseInt(editing.target, 10) || 0) : null;
+    if (editing.targetMode === "count" && value != null && !editing.targetUnit.trim()) {
+      setError("Enter what the count represents, such as video or post");
+      return;
+    }
     try {
       await updateGoal({
         id: editing.id,
         title: t,
         project: editing.project || null,
-        targetMinutes: minutes,
+        targetMinutes: editing.targetMode === "time" ? value : null,
+        targetCount: editing.targetMode === "count" ? value : null,
+        targetUnit: editing.targetMode === "count" ? editing.targetUnit.trim() : null,
         priority: editing.priority,
         completed: editing.completed,
         recurring: editing.recurring,
@@ -212,9 +239,16 @@ export default function Goals() {
   }
 
   async function setValue(id: string, value: number) {
+    const nextValue = Math.max(0, value);
+    const item = checkins?.find((c) => c.id === id);
     try {
-      await setCheckin(id, value);
+      await setCheckin(id, nextValue);
       await load();
+      setCheckinNotice(
+        nextValue > 0
+          ? `${item?.label ?? "Check-in"} logged for today. It now appears in Activity → Logged today and can count toward score rules, streaks, and reviews. It does not add tracked minutes or complete a Daily Goal.`
+          : `${item?.label ?? "Check-in"} removed from today.`,
+      );
     } catch (e) {
       setError(String(e));
     }
@@ -270,6 +304,24 @@ export default function Goals() {
     }
   }
 
+  function outputEvidence(goal: Goal): OutputEvent[] {
+    if (goal.completed || goal.targetCount == null || !goal.targetUnit) return [];
+    const unit = goal.targetUnit.toLowerCase();
+    const allowed = unit.includes("video") || unit.includes("clip") || unit.includes("reel") || unit.includes("short")
+      ? ["video_export"]
+      : unit.includes("post")
+        ? ["video_export"]
+        : unit.includes("code") || unit.includes("commit") || unit.includes("feature")
+          ? ["code_change"]
+          : unit.includes("document") || unit.includes("proposal") || unit.includes("script") || unit.includes("article")
+            ? ["document_created"]
+            : [];
+    if (allowed.length === 0) return [];
+    return outputs.filter((output) =>
+      allowed.includes(output.eventType)
+      && (!goal.project || output.project?.toLowerCase() === goal.project.toLowerCase())
+    );
+  }
   const total = goals.length;
   const done = goals.filter((g) => g.completed).length;
   const endOfDay = new Date().getHours() >= 18 && total > 0 && done < total;
@@ -337,14 +389,33 @@ export default function Goals() {
                         </option>
                       ))}
                     </select>
-                    <input
-                      className="pf-input goal-target-input"
-                      type="number"
-                      min="1"
-                      placeholder="min"
-                      value={editing.target}
-                      onChange={(e) => setEditing({ ...editing, target: e.target.value })}
-                    />
+                    <select
+                      className="pf-select goal-target-mode"
+                      value={editing.targetMode}
+                      onChange={(e) => setEditing({ ...editing, targetMode: e.target.value as TargetMode, target: "", targetUnit: "" })}
+                    >
+                      <option value="none">No target</option>
+                      <option value="time">Time target</option>
+                      <option value="count">Output / count</option>
+                    </select>
+                    {editing.targetMode !== "none" && (
+                      <input
+                        className="pf-input goal-target-input"
+                        type="number"
+                        min="1"
+                        placeholder={editing.targetMode === "time" ? "minutes" : "count"}
+                        value={editing.target}
+                        onChange={(e) => setEditing({ ...editing, target: e.target.value })}
+                      />
+                    )}
+                    {editing.targetMode === "count" && (
+                      <input
+                        className="pf-input goal-unit-input"
+                        placeholder="unit, e.g. video"
+                        value={editing.targetUnit}
+                        onChange={(e) => setEditing({ ...editing, targetUnit: e.target.value })}
+                      />
+                    )}
                     <select
                       className="pf-select"
                       value={editing.priority}
@@ -385,8 +456,17 @@ export default function Goals() {
                       <div className="goal-meta">
                         <span className={`prio prio-${g.priority}`}>{g.priority}</span>
                         {g.project && <span className="goal-chip">{g.project}</span>}
-                        {g.targetMinutes != null && <span className="goal-chip">{g.targetMinutes}m</span>}
+                        {g.targetMinutes != null && <span className="goal-chip">{g.targetMinutes} min</span>}
+                        {g.targetCount != null && <span className="goal-chip">{g.targetCount} {g.targetUnit}</span>}
                         {g.recurring && <span className="goal-chip recurring">↻ daily</span>}
+                        {outputEvidence(g).length > 0 && (
+                          <>
+                            <span className="goal-evidence-chip" title="File evidence is a suggestion, not proof it was published">
+                              {outputEvidence(g).length} possible {g.targetUnit} output{outputEvidence(g).length === 1 ? "" : "s"}
+                            </span>
+                            <button className="goal-evidence-confirm" onClick={() => toggle(g)}>Confirm complete</button>
+                          </>
+                        )}
                       </div>
                     </div>
                     <button className="goal-edit" onClick={() => startEdit(g)} aria-label="Edit goal">
@@ -410,10 +490,11 @@ export default function Goals() {
           </ul>
         )}
 
+        <p className="card-hint goal-target-help">Targets are optional. Choose time for a timed mission, or output/count for something shippable such as 1 video, 3 clips, or 1 proposal. Completion is manual so Tempo never guesses whether you actually posted it.</p>
         <form className="goal-form" onSubmit={add}>
           <input
             className="pf-input goal-title-input"
-            placeholder="Add a mission… e.g. Code for 60 min"
+            placeholder="Add a mission… e.g. Publish a video"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
           />
@@ -425,14 +506,37 @@ export default function Goals() {
               </option>
             ))}
           </select>
-          <input
-            className="pf-input goal-target-input"
-            type="number"
-            min="1"
-            placeholder="min"
-            value={target}
-            onChange={(e) => setTarget(e.target.value)}
-          />
+          <select
+            className="pf-select goal-target-mode"
+            value={targetMode}
+            onChange={(e) => {
+              setTargetMode(e.target.value as TargetMode);
+              setTarget("");
+              setTargetUnit("");
+            }}
+          >
+            <option value="none">No target</option>
+            <option value="time">Time target</option>
+            <option value="count">Output / count</option>
+          </select>
+          {targetMode !== "none" && (
+            <input
+              className="pf-input goal-target-input"
+              type="number"
+              min="1"
+              placeholder={targetMode === "time" ? "minutes" : "count"}
+              value={target}
+              onChange={(e) => setTarget(e.target.value)}
+            />
+          )}
+          {targetMode === "count" && (
+            <input
+              className="pf-input goal-unit-input"
+              placeholder="unit, e.g. video"
+              value={targetUnit}
+              onChange={(e) => setTargetUnit(e.target.value)}
+            />
+          )}
           <select
             className="pf-select"
             value={priority}
@@ -467,8 +571,14 @@ export default function Goals() {
             </button>
           </div>
           <p className="card-hint">
-            One tap for things the tracker can’t see. These feed your daily score, streaks and AI review.
+            Log something that happened but cannot be timed, such as reading offline or publishing a video. A check-in does not add minutes or finish a Daily Goal; it appears in Activity and affects a score or streak only when one uses it.
           </p>
+          {checkinNotice && (
+            <div className="checkin-feedback" role="status">
+              <span aria-hidden="true">✓</span>
+              <span>{checkinNotice}</span>
+            </div>
+          )}
           {checkins.length === 0 ? (
             <p className="empty-hint">No check-ins defined — add the habits you want to log below.</p>
           ) : (
@@ -525,12 +635,13 @@ export default function Goals() {
                     <button
                       type="button"
                       className="checkin-flip"
+                      aria-pressed={c.value > 0}
                       onClick={() => setValue(c.id, c.value > 0 ? 0 : 1)}
                     >
                       <span className="ci-icon">{c.icon}</span>
                       <span className="ci-label">{c.label}</span>
                       {autoBadge}
-                      <span className="ci-state">{c.value > 0 ? "✓" : "+"}</span>
+                      <span className="ci-state">{c.value > 0 ? "✓ Logged" : "+ Log"}</span>
                     </button>
                     {revert}
                     {manageCheckins && (
@@ -601,7 +712,7 @@ export default function Goals() {
                 {checkinDraft.autoKind === "target" && (
                   <input
                     className="search"
-                    placeholder="app/site to watch, e.g. bible or youlearn.ai"
+                    placeholder="app/site to watch, e.g. DaVinci Resolve or youtube.com"
                     value={checkinDraft.autoMetric}
                     onChange={(e) => setCheckinDraft({ ...checkinDraft, autoMetric: e.target.value })}
                   />

@@ -6,7 +6,7 @@ export const DEFAULT_CATEGORY_DEFINITIONS: CategoryDefinition[] = [
   { id: "productive", label: "Productive", color: "#16a34a", bucket: "productive", blurb: "Deep, focused work", builtIn: true },
   { id: "study", label: "Study", color: "#2563eb", bucket: "productive", blurb: "Learning & research", builtIn: true },
   { id: "business", label: "Business", color: "#0d9488", bucket: "productive", blurb: "Admin, email, ops", builtIn: true },
-  { id: "neutral", label: "Neutral", color: "#64748b", bucket: "neutral", blurb: "Necessary but neutral", builtIn: true },
+  { id: "neutral", label: "Neutral", color: "#64748b", bucket: "neutral", blurb: "Necessary or ambiguous; no automatic penalty", builtIn: true },
   { id: "distraction", label: "Distraction", color: "#dc2626", bucket: "distracting", blurb: "Off-task time", builtIn: true },
   { id: "recovery", label: "Recovery", color: "#9333ea", bucket: "neutral", blurb: "Intentional rest", builtIn: true },
 ];
@@ -51,10 +51,22 @@ export function registerCategoryDefinitions(defs: CategoryDefinition[]) {
 
 export const BUCKET_LIST: Bucket[] = ["productive", "neutral", "distracting"];
 
-export const BUCKET_META: Record<Bucket, { label: string; color: string }> = {
-  productive: { label: "Productive", color: "#16a34a" },
-  neutral: { label: "Neutral", color: "#64748b" },
-  distracting: { label: "Distracting", color: "#dc2626" },
+export const BUCKET_META: Record<Bucket, { label: string; color: string; description: string }> = {
+  productive: {
+    label: "Productive",
+    color: "#16a34a",
+    description: "Supports a goal and earns productive credit.",
+  },
+  neutral: {
+    label: "Neutral",
+    color: "#64748b",
+    description: "Necessary, ambiguous, or recovery time. Tracked, but it earns no productive credit and triggers no distraction warning.",
+  },
+  distracting: {
+    label: "Distracting",
+    color: "#dc2626",
+    description: "Pulls you away from your declared goals and can trigger a nudge.",
+  },
 };
 
 export function categoryMeta(c: string | null | undefined): CategoryMeta {

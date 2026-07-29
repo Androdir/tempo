@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   getDailyReview,
-  isTauri,
+  showNativeNotification,
   onDailyReviewDue,
   onDistractionWarning,
   onFocusViolation,
@@ -21,7 +21,7 @@ interface Toast {
 
 /** Fire a local toast from anywhere (used by the "preview warning" buttons). */
 export function previewToast(kind: ToastKind, title: string, body: string, target?: string) {
-  ensureNotifPermission(); // called from a click → safe to prompt
+  void showNativeNotification(`Tempo · ${title}`, body);
   window.dispatchEvent(new CustomEvent("tempo-toast", { detail: { kind, title, body, target } }));
 }
 
@@ -39,7 +39,7 @@ export default function AccountabilityLayer() {
       const id = Date.now() + Math.random();
       setToasts((cur) => [...cur, { id, kind, title, body, target }].slice(-4));
       window.setTimeout(() => setToasts((cur) => cur.filter((t) => t.id !== id)), 12000);
-      notify(title, body);
+
     },
     [],
   );
@@ -165,27 +165,4 @@ function EodModal({ review, onClose }: { review: DailyAiReview; onClose: () => v
       </div>
     </div>
   );
-}
-
-function notify(title: string, body: string) {
-  // OS notifications only inside the Tauri app; the in-app toast covers preview.
-  if (!isTauri()) return;
-  try {
-    if (typeof Notification !== "undefined" && Notification.permission === "granted") {
-      new Notification(title, { body });
-    }
-  } catch {
-    /* notifications unavailable — the in-app toast already covered it */
-  }
-}
-
-function ensureNotifPermission() {
-  if (!isTauri()) return;
-  try {
-    if (typeof Notification !== "undefined" && Notification.permission === "default") {
-      Notification.requestPermission().catch(() => {});
-    }
-  } catch {
-    /* ignore */
-  }
 }

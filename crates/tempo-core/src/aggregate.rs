@@ -853,6 +853,8 @@ fn merge_samples(mut samples: Vec<TlSample>, max_gap: i64) -> Vec<TimelineBlock>
                 block_key: s.block_key,
                 is_web: s.is_web,
                 sample_count: 1,
+                absorbed_seconds: 0,
+                absorbed_count: 0,
                 longest_productive: false,
                 biggest_distraction: false,
                 first_productive: false,
@@ -868,6 +870,136 @@ fn merge_samples(mut samples: Vec<TlSample>, max_gap: i64) -> Vec<TimelineBlock>
     out
 }
 
+/// Whether two blocks represent the same meaningful activity for the simplified
+/// overview. Titles may change inside an app, but source, label, project,
+/// category and idle state must still agree.
+fn same_overview_activity(a: &TimelineBlock, b: &TimelineBlock) -> bool {
+    a.source == b.source
+        && a.label.eq_ignore_ascii_case(&b.label)
+        && a.category == b.category
+        && a.project == b.project
+        && a.idle == b.idle
+        && a.is_web == b.is_web
+}
+
+fn blocks_are_close(a: &TimelineBlock, b: &TimelineBlock, tolerance_seconds: i64) -> bool {
+    match (parse_utc(&a.end), parse_utc(&b.start)) {
+        (Some(a_end), Some(b_start)) => {
+            let gap = (b_start - a_end).num_seconds();
+            (-5..=tolerance_seconds).contains(&gap)
+        }
+        _ => false,
+    }
+}
+
+fn refresh_timeline_highlights(blocks: &mut [TimelineBlock]) {
+    let mut longest_prod: Option<(usize, i64)> = None;
+    let mut biggest_dist: Option<(usize, i64)> = None;
+    let mut first_prod: Option<usize> = None;
+
+    for (i, block) in blocks.iter_mut().enumerate() {
+        block.longest_productive = false;
+        block.biggest_distraction = false;
+        block.first_productive = false;
+        if block.idle {
+            continue;
+        }
+        match block.bucket.as_str() {
+            "productive" => {
+                longest_prod = Some(match longest_prod {
+                    Some((j, duration)) if duration >= block.duration_seconds => (j, duration),
+                    _ => (i, block.duration_seconds),
+                });
+                if first_prod.is_none() {
+                    first_prod = Some(i);
+                }
+            }
+            "distracting" => {
+                biggest_dist = Some(match biggest_dist {
+                    Some((j, duration)) if duration >= block.duration_seconds => (j, duration),
+                    _ => (i, block.duration_seconds),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    if let Some((i, _)) = longest_prod {
+        blocks[i].longest_productive = true;
+    }
+    if let Some((i, _)) = biggest_dist {
+        blocks[i].biggest_distraction = true;
+    }
+    if let Some(i) = first_prod {
+        blocks[i].first_productive = true;
+    }
+}
+
+/// Build the low-noise Activity overview. A brief intervening block is
+/// absorbed only for an A → B → A pattern where A resumes immediately. Exact
+/// blocks remain untouched and are returned separately.
+fn smooth_brief_interruptions(
+    blocks: &[TimelineBlock],
+    max_interrupt_seconds: i64,
+) -> Vec<TimelineBlock> {
+    let mut overview = blocks.to_vec();
+    if max_interrupt_seconds <= 0 {
+        return overview;
+    }
+
+    loop {
+        let mut found: Option<usize> = None;
+        for i in 1..overview.len().saturating_sub(1) {
+            let left = &overview[i - 1];
+            let interruption = &overview[i];
+            let right = &overview[i + 1];
+            if interruption.duration_seconds <= max_interrupt_seconds
+                && !same_overview_activity(left, interruption)
+                && same_overview_activity(left, right)
+                && blocks_are_close(left, interruption, max_interrupt_seconds)
+                && blocks_are_close(interruption, right, max_interrupt_seconds)
+            {
+                found = Some(i);
+                break;
+            }
+        }
+
+        let Some(i) = found else { break };
+        let left = overview[i - 1].clone();
+        let interruption = overview[i].clone();
+        let right = overview[i + 1].clone();
+        let mut merged = left.clone();
+        merged.end = right.end.clone();
+        merged.duration_seconds =
+            left.duration_seconds + interruption.duration_seconds + right.duration_seconds;
+        merged.title = right.title.clone();
+        merged.summary = right.summary.clone().or(left.summary.clone());
+        merged.sample_count = left.sample_count + interruption.sample_count + right.sample_count;
+        merged.absorbed_seconds = left.absorbed_seconds
+            + interruption.duration_seconds
+            + right.absorbed_seconds;
+        merged.absorbed_count =
+            left.absorbed_count + interruption.absorbed_count + right.absorbed_count + 1;
+        merged.confidence = left.confidence.min(right.confidence);
+        merged.project_confidence = left.project_confidence.min(right.project_confidence);
+        merged.classifier = if left.classifier == "manual" || right.classifier == "manual" {
+            "manual".to_string()
+        } else if left.classifier == "llm" || right.classifier == "llm" {
+            "llm".to_string()
+        } else {
+            "rule".to_string()
+        };
+        merged.goal_related = left.goal_related || right.goal_related;
+        merged.output_linked = left.output_linked || right.output_linked;
+        merged.longest_productive = false;
+        merged.biggest_distraction = false;
+        merged.first_productive = false;
+        overview.splice((i - 1)..=(i + 1), [merged]);
+    }
+
+    refresh_timeline_highlights(&mut overview);
+    overview
+}
 fn overlaps(a: &TimelineBlock, b: &TimelineBlock) -> bool {
     match (parse_utc(&a.start), parse_utc(&a.end), parse_utc(&b.start), parse_utc(&b.end)) {
         (Some(a0), Some(a1), Some(b0), Some(b1)) => a0 < b1 && b0 < a1,
@@ -914,21 +1046,32 @@ pub fn timeline_for_day(conn: &Connection, day: &str, max_gap: i64) -> Result<Ti
                 .entry(key.clone())
                 .or_insert_with(|| {
                     let v = rules::classify_block(&inputs, code, label, title, domain, ctype, summary, keywords);
+                    // A weak keyword hit is useful diagnostic evidence, not a real
+                    // assignment. Only expose projects once the deterministic
+                    // matcher has enough independent evidence to override.
+                    let visible_project = v
+                        .project
+                        .clone()
+                        .filter(|_| v.project_confidence >= projects::OVERRIDE_THRESHOLD);
+                    let visible_project_confidence =
+                        if visible_project.is_some() { v.project_confidence } else { 0 };
                     if let Some(c) = manual.get(&key) {
-                        (c.clone(), v.project, v.project_confidence, 1.0, "manual".to_string())
+                        (c.clone(), visible_project, visible_project_confidence, 1.0, "manual".to_string())
                     } else if v.needs_llm {
                         match llm_cache.get(&key) {
                             Some(c) => (
                                 c.category.clone(),
-                                c.project.clone().or(v.project),
-                                v.project_confidence,
+                                // Project attribution always comes from deterministic evidence;
+                                // the LLM may refine category, never invent a project.
+                                visible_project,
+                                visible_project_confidence,
                                 c.confidence,
                                 "llm".to_string(),
                             ),
-                            None => (v.category, v.project, v.project_confidence, v.confidence, "rule".to_string()),
+                            None => (v.category, visible_project, visible_project_confidence, v.confidence, "rule".to_string()),
                         }
                     } else {
-                        (v.category, v.project, v.project_confidence, v.confidence, "rule".to_string())
+                        (v.category, visible_project, visible_project_confidence, v.confidence, "rule".to_string())
                     }
                 })
                 .clone();
@@ -1042,9 +1185,22 @@ pub fn timeline_for_day(conn: &Connection, day: &str, max_gap: i64) -> Result<Ti
 
     let web_blocks = merge_samples(web, max_gap);
     let mut desk_blocks = merge_samples(desk, max_gap);
-    let scr_blocks = merge_samples(scr, max_gap);
+    let mut scr_blocks = merge_samples(scr, max_gap);
 
-    desk_blocks.retain(|d| !is_browser_app(&d.label) || !web_blocks.iter().any(|w| overlaps(d, w)));
+    // Prefer the richest source for an interval. Browser records replace the
+    // browser process, while Smart Tracking replaces its matching desktop row.
+    // This prevents double-counting and contradictory labels for the same work.
+    scr_blocks.retain(|s| {
+        !is_browser_app(&s.label) || !web_blocks.iter().any(|w| overlaps(s, w))
+    });
+    desk_blocks.retain(|d| {
+        let covered_by_browser =
+            is_browser_app(&d.label) && web_blocks.iter().any(|w| overlaps(d, w));
+        let covered_by_screen = scr_blocks
+            .iter()
+            .any(|s| s.label.eq_ignore_ascii_case(&d.label) && overlaps(d, s));
+        !covered_by_browser && !covered_by_screen
+    });
 
     let mut blocks: Vec<TimelineBlock> = Vec::new();
     blocks.extend(desk_blocks);
@@ -1127,6 +1283,7 @@ pub fn timeline_for_day(conn: &Connection, day: &str, max_gap: i64) -> Result<Ti
         }
     }
 
+    let overview_blocks = smooth_brief_interruptions(&blocks, 20);
     let outputs: Vec<CheckinValue> =
         checkin_values_for_day(conn, day).into_iter().filter(|c| c.value > 0).collect();
 
@@ -1134,6 +1291,7 @@ pub fn timeline_for_day(conn: &Connection, day: &str, max_gap: i64) -> Result<Ti
         day: day.to_string(),
         max_gap_seconds: max_gap,
         blocks,
+        overview_blocks,
         outputs,
         active_seconds: active,
         idle_seconds: idle,
@@ -1513,15 +1671,18 @@ fn goal_lines(conn: &Connection, day: &str) -> (Vec<String>, Vec<String>) {
     let mut done = Vec::new();
     let mut todo = Vec::new();
     if let Ok(mut stmt) = conn.prepare(
-        "SELECT title, target_minutes, completed FROM goals WHERE day = ?1
+        "SELECT title, target_minutes, target_count, target_unit, completed FROM goals WHERE day = ?1
          ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, sort_order, id",
     ) {
         let rows = stmt.query_map([day], |r| {
             let title: String = r.get(0)?;
             let target: Option<i64> = r.get(1)?;
-            let completed: i64 = r.get(2)?;
-            let label = match target {
-                Some(m) if m > 0 => format!("{title} ({m}m)"),
+            let target_count: Option<i64> = r.get(2)?;
+            let target_unit: Option<String> = r.get(3)?;
+            let completed: i64 = r.get(4)?;
+            let label = match (target, target_count, target_unit) {
+                (Some(m), _, _) if m > 0 => format!("{title} ({m}m)"),
+                (_, Some(n), Some(unit)) if n > 0 => format!("{title} ({n} {unit})"),
                 _ => title,
             };
             Ok((label, completed != 0))
@@ -2159,4 +2320,141 @@ pub fn latest_focus_session_today(conn: &Connection) -> Option<FocusSession> {
         s.remaining_seconds = 0;
     }
     Some(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn timeline_test_block(
+        label: &str,
+        start: &str,
+        duration_seconds: i64,
+        category: &str,
+        bucket: &str,
+    ) -> TimelineBlock {
+        let start_dt = parse_utc(start).unwrap();
+        TimelineBlock {
+            source: "desktop".to_string(),
+            start: start_dt.to_rfc3339(),
+            end: (start_dt + Duration::seconds(duration_seconds)).to_rfc3339(),
+            duration_seconds,
+            label: label.to_string(),
+            title: label.to_string(),
+            category: category.to_string(),
+            bucket: bucket.to_string(),
+            project: Some("Content Creation".to_string()),
+            project_confidence: 90,
+            confidence: 0.9,
+            classifier: "rule".to_string(),
+            idle: false,
+            summary: None,
+            block_key: format!("test|{label}|{start}"),
+            is_web: false,
+            sample_count: 1,
+            absorbed_seconds: 0,
+            absorbed_count: 0,
+            longest_productive: false,
+            biggest_distraction: false,
+            first_productive: false,
+            goal_related: false,
+            output_linked: false,
+        }
+    }
+
+    #[test]
+    fn overview_absorbs_one_brief_switch_when_same_work_resumes() {
+        let blocks = vec![
+            timeline_test_block("DaVinci Resolve", "2026-07-28T12:00:00Z", 900, "business", "productive"),
+            timeline_test_block("Telegram", "2026-07-28T12:15:00Z", 10, "distraction", "distracting"),
+            timeline_test_block("DaVinci Resolve", "2026-07-28T12:15:10Z", 900, "business", "productive"),
+        ];
+
+        let overview = smooth_brief_interruptions(&blocks, 20);
+
+        assert_eq!(overview.len(), 1);
+        assert_eq!(overview[0].label, "DaVinci Resolve");
+        assert_eq!(overview[0].duration_seconds, 1810);
+        assert_eq!(overview[0].absorbed_seconds, 10);
+        assert_eq!(overview[0].absorbed_count, 1);
+        assert!(overview[0].longest_productive);
+    }
+
+    #[test]
+    fn overview_keeps_a_meaningful_interruption() {
+        let blocks = vec![
+            timeline_test_block("DaVinci Resolve", "2026-07-28T12:00:00Z", 900, "business", "productive"),
+            timeline_test_block("Telegram", "2026-07-28T12:15:00Z", 60, "distraction", "distracting"),
+            timeline_test_block("DaVinci Resolve", "2026-07-28T12:16:00Z", 900, "business", "productive"),
+        ];
+
+        assert_eq!(smooth_brief_interruptions(&blocks, 20).len(), 3);
+    }
+
+    #[test]
+    fn overview_never_merges_different_surrounding_work() {
+        let blocks = vec![
+            timeline_test_block("DaVinci Resolve", "2026-07-28T12:00:00Z", 900, "business", "productive"),
+            timeline_test_block("Telegram", "2026-07-28T12:15:00Z", 10, "distraction", "distracting"),
+            timeline_test_block("Adobe Premiere Pro", "2026-07-28T12:15:10Z", 900, "business", "productive"),
+        ];
+
+        assert_eq!(smooth_brief_interruptions(&blocks, 20).len(), 3);
+    }
+
+    #[test]
+    fn weak_ocr_keyword_does_not_assign_unrelated_project() {
+        let conn = crate::db::test_conn();
+        crate::settings::ensure_defaults(&conn).unwrap();
+        let day = "2026-07-28";
+        conn.execute(
+            "INSERT INTO projects (name, category, keywords, apps, domains, priority, updated_at)
+             VALUES ('AFM Business', 'business', '[\"tate\"]', '[]', '[]', 100, 't')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO smart_activity
+               (timestamp, day, app_name, window_title, ocr_summary, detected_keywords, category, is_idle)
+             VALUES ('2026-07-28T12:00:00Z', ?1, 'Telegram Desktop', 'Anonymous Chat',
+                     'Chat list includes Tatespeech', '[\"tate\"]', 'distraction', 0)",
+            [day],
+        ).unwrap();
+
+        let timeline = timeline_for_day(&conn, day, 20).unwrap();
+        assert_eq!(timeline.blocks.len(), 1);
+        assert_eq!(timeline.blocks[0].label, "Telegram Desktop");
+        assert!(timeline.blocks[0].project.is_none());
+        assert_eq!(timeline.blocks[0].project_confidence, 0);
+        assert!(!timeline.blocks[0].goal_related);
+    }
+
+    #[test]
+    fn smart_context_replaces_overlapping_desktop_sample() {
+        let conn = crate::db::test_conn();
+        crate::settings::ensure_defaults(&conn).unwrap();
+        let day = "2026-07-28";
+        let ts = "2026-07-28T12:00:00Z";
+        conn.execute(
+            "INSERT INTO activity_log
+               (timestamp, day, app_name, window_title, duration_seconds, is_idle)
+             VALUES (?1, ?2, 'Tempo', 'Tempo', 10, 0)",
+            params![ts, day],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO smart_activity
+               (timestamp, day, app_name, window_title, ocr_summary,
+                detected_keywords, category, is_idle)
+             VALUES (?1, ?2, 'Tempo', 'Tempo', 'Tempo dashboard', '[]', 'neutral', 0)",
+            params![ts, day],
+        )
+        .unwrap();
+
+        let timeline = timeline_for_day(&conn, day, 15).unwrap();
+        let tempo: Vec<_> = timeline.blocks.iter().filter(|b| b.label == "Tempo").collect();
+        assert_eq!(tempo.len(), 1);
+        assert_eq!(tempo[0].source, "screen");
+        assert_eq!(tempo[0].category, "neutral");
+        assert!(tempo[0].project.is_none());
+    }
 }

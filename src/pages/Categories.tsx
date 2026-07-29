@@ -18,10 +18,10 @@ import { AppGlyph } from "../components/ui";
 import { formatDuration } from "../format";
 import type { Bucket, Category, CategoryDefinition, TrackedApp, TrackedDomain } from "../types";
 
-type Tab = "apps" | "websites";
+type Tab = "all" | "apps" | "websites";
 
 export default function Categories() {
-  const [tab, setTab] = useState<Tab>("apps");
+  const [tab, setTab] = useState<Tab>("all");
   const [apps, setApps] = useState<TrackedApp[]>([]);
   const [domains, setDomains] = useState<TrackedDomain[]>([]);
   const [loading, setLoading] = useState(true);
@@ -152,80 +152,110 @@ export default function Categories() {
     <div className="categories-page">
       <div className="page-head">
         <div>
-          <h1 className="page-title">Categories</h1>
-          <div className="page-subtitle">Tag apps and websites — rules are saved locally and reused.</div>
+          <h1 className="page-title">Apps &amp; websites</h1>
+          <div className="page-subtitle">Assign a category once; Tempo reuses it for future activity.</div>
         </div>
         <div className="head-actions">
-          <div className="segmented">
+          <div className="segmented" aria-label="Show apps, websites, or both">
+            <button className={tab === "all" ? "on" : ""} onClick={() => setTab("all")}>All</button>
             <button className={tab === "apps" ? "on" : ""} onClick={() => setTab("apps")}>Apps</button>
             <button className={tab === "websites" ? "on" : ""} onClick={() => setTab("websites")}>Websites</button>
           </div>
           <input
             className="search"
-            placeholder={`Filter ${tab}…`}
+            placeholder={`Filter ${tab === "all" ? "apps & websites" : tab}…`}
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
           />
         </div>
       </div>
 
-      <CategoryManager
-        defs={categoryDefs}
-        draft={draft}
-        onDraft={setDraft}
-        onEdit={editCategory}
-        onSave={saveCategory}
-        onDelete={removeCategory}
-      />
-
-      <BucketLegend defs={categoryDefs} />
-
       {error && <div className="error-box section-gap">{error}</div>}
 
       <div className="card section-gap">
         {loading ? (
           <div className="loading">Loading…</div>
-        ) : tab === "apps" ? (
-          <CategoryTable
-            categories={categoryDefs}
-            empty={apps.length === 0}
-            emptyTitle="No apps tracked yet"
-            emptyHint="Once the tracker has seen a few apps, they'll appear here."
-            rows={visibleApps.map((a) => ({
-              key: a.appName,
-              name: a.appName,
-              seconds: a.totalSeconds,
-              category: a.category,
-              extra: null,
-              onChange: (v: string) => changeApp(a, v),
-              aiReview: a.aiReview,
-              aiDisabled: !a.category,
-              onToggleAi: (v: boolean) => toggleAppAi(a, v),
-            }))}
-          />
         ) : (
-          <CategoryTable
-            categories={categoryDefs}
-            empty={domains.length === 0}
-            emptyTitle="No websites tracked yet"
-            emptyHint="Install the browser extension (extension/README.md) to see websites here."
-            rows={visibleDomains.map((d) => ({
-              key: d.domain,
-              name: d.domain,
-              seconds: d.totalSeconds,
-              category: d.category,
-              extra: (
-                <span className="badge" style={{ color: captureModeMeta(d.captureMode).color }}>
-                  {captureModeMeta(d.captureMode).label}
-                </span>
-              ),
-              onChange: (v: string) => changeDomain(d, v),
-              aiReview: d.aiReview,
-              onToggleAi: (v: boolean) => toggleDomainAi(d, v),
-            }))}
-          />
+          <>
+            {(tab === "all" || tab === "apps") && (
+              <section className="category-source-section">
+                {tab === "all" && (
+                  <div className="category-source-head">
+                    <div>
+                      <h2 className="card-title">Desktop apps</h2>
+                      <p className="card-hint">{visibleApps.length} shown · {apps.length} tracked</p>
+                    </div>
+                  </div>
+                )}
+                <CategoryTable
+                  categories={categoryDefs}
+                  empty={apps.length === 0}
+                  emptyTitle="No apps tracked yet"
+                  emptyHint="Once the tracker has seen a few apps, they’ll appear here."
+                  rows={visibleApps.map((a) => ({
+                    key: a.appName,
+                    name: a.appName,
+                    seconds: a.totalSeconds,
+                    category: a.category,
+                    extra: null,
+                    onChange: (v: string) => changeApp(a, v),
+                    aiReview: a.aiReview,
+                    aiDisabled: !a.category,
+                    onToggleAi: (v: boolean) => toggleAppAi(a, v),
+                  }))}
+                />
+              </section>
+            )}
+
+            {(tab === "all" || tab === "websites") && (
+              <section className={`category-source-section ${tab === "all" ? "with-divider" : ""}`}>
+                {tab === "all" && (
+                  <div className="category-source-head">
+                    <div>
+                      <h2 className="card-title">Websites</h2>
+                      <p className="card-hint">{visibleDomains.length} shown · {domains.length} tracked</p>
+                    </div>
+                  </div>
+                )}
+                <CategoryTable
+                  categories={categoryDefs}
+                  empty={domains.length === 0}
+                  emptyTitle="No websites tracked yet"
+                  emptyHint="Connect the browser extension, browse normally, and visited sites will appear here."
+                  rows={visibleDomains.map((d) => ({
+                    key: d.domain,
+                    name: d.domain,
+                    seconds: d.totalSeconds,
+                    category: d.category,
+                    extra: (
+                      <span className="badge" style={{ color: captureModeMeta(d.captureMode).color }}>
+                        {captureModeMeta(d.captureMode).label}
+                      </span>
+                    ),
+                    onChange: (v: string) => changeDomain(d, v),
+                    aiReview: d.aiReview,
+                    onToggleAi: (v: boolean) => toggleDomainAi(d, v),
+                  }))}
+                />
+              </section>
+            )}
+          </>
         )}
       </div>
+
+      <details className="card card-pad section-gap category-advanced">
+        <summary>Customize categories</summary>
+        <p className="card-hint">Optional: keep the defaults, rename them, or add your own.</p>
+        <CategoryManager
+          defs={categoryDefs}
+          draft={draft}
+          onDraft={setDraft}
+          onEdit={editCategory}
+          onSave={saveCategory}
+          onDelete={removeCategory}
+        />
+        <BucketLegend defs={categoryDefs} />
+      </details>
     </div>
   );
 }
@@ -421,6 +451,7 @@ function BucketLegend({ defs }: { defs: CategoryDefinition[] }) {
               <span className="legend-dot" style={{ background: BUCKET_META[bucket].color }} />
               {BUCKET_META[bucket].label}
             </div>
+            <p className="bucket-description">{BUCKET_META[bucket].description}</p>
             <div className="bucket-cats">
               {defs.filter((c) => c.bucket === bucket).map((c) => (
                 <div className="bucket-cat" key={c.id}>

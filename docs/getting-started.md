@@ -24,7 +24,9 @@ npm run app
 ```
 
 The first start compiles the Rust app and can take a few minutes. Later starts
-are much faster. Keep the desktop window open or minimized while you work.
+are much faster. Closing the window sends Tempo to the system tray, where tracking continues.
+Installed release builds enable **Settings → Tracking → Launch at Windows login** once by default;
+they start hidden in the tray, and you can turn that off at any time.
 
 If you run `npm run dev` instead, you get a browser preview with sample data. It
 is useful for exploring the interface, but it cannot track your computer.
@@ -33,10 +35,14 @@ is useful for exploring the interface, but it cannot track your computer.
 
 ### 1. Confirm tracking is running
 
-Open **Today**. The status at the top should say that Tempo is tracking every
-10 seconds. Use a few normal apps for about a minute.
+Open **Today**. The tracking-health strip should show a recent desktop sample and a verified database. If it turns amber, follow the specific stale tracker, browser extension, sync queue, or database warning. Use a few normal apps for about a minute.
 
-Then open **Activity → Timeline**. You should see blocks for the apps you used.
+Then open **Activity → Timeline**. The default **Overview** shows meaningful runs
+of work and absorbs only a brief (20 seconds or less) A → B → A switch when the
+same activity immediately resumes. Choose **Exact** whenever you want every
+captured switch, full classifier details, or inline corrections. Exact data is
+always retained and the totals remain exact.
+
 Tempo records the foreground app, window title, duration, and whether the
 computer was idle. It does not record keystrokes, audio, clipboard contents, or
 mouse coordinates.
@@ -44,20 +50,35 @@ mouse coordinates.
 ### 2. Add one goal
 
 Open **Plan → Daily Goals** and add the one outcome that would make today
-successful. One to three goals is usually enough.
+successful. One to three goals is usually enough. A target is optional: choose **Time** for a timed block, or **Output / count** for a result such as `1 video`, `3 clips`, or `1 proposal`. If a matching watched folder sees likely output evidence, Tempo offers a **Confirm complete** action; it never auto-completes the mission because an exported file does not prove it was published.
 
 Goals give the score and end-of-day review useful context. They are not required
 for tracking.
 
 ### 3. Classify the apps that matter
 
-Open **Projects → Categories** after Tempo has observed some activity. Classify
-your main apps as productive, study, business, neutral, distracting, recovery,
+Open **Projects → Categories** after Tempo has observed some activity. The
+default **All** view puts desktop apps and browser websites in one place; use the
+Apps or Websites filters only when the list gets long. Classify the activity
+that matters as productive, study, business, neutral, distracting, recovery,
 or excluded.
 
-You normally do this once per app. Tempo saves the rule and applies it to future
-activity. If something is wrong later, correct it from **Activity → Activity
-Log**.
+You normally do this once per app or website. Tempo saves the rule and applies
+it to future activity. Websites appear after the browser extension has sent its
+first samples. If something is wrong later, open **Activity → Classifications** and click the app or website. The side drawer explains the category source, confidence, project threshold, and exact match evidence before you correct it; the newest correction can be undone. For a false project association, use **Never match this app/website to this project**, or edit the project's exclusion list. **Projects → Projects** also includes a matcher tester so you can try a real app, title, and content example before saving.
+
+### 4. Understand Quick check-ins
+
+A Quick check-in means **“this happened today.”** Use one for things Tempo cannot
+time reliably, such as reading a physical Bible, going to the gym, or publishing
+a video. It does not add tracked minutes and it does not complete a Daily Goal.
+
+After you tap one on **Plan → Daily Goals**, it appears under **Activity →
+Timeline → Logged today**. It affects the Daily Score or a streak only if you
+create a rule that uses that check-in; reviews and weekly summaries can also
+include it.
+
+**Insights → Daily Score** begins with only two Tempo starter rules: reward the main goal, and penalize leaving it unfinished. Open **Full breakdown → Edit rules** to change or remove them, or add rules for your check-ins, categories, apps/sites, and detected outputs. Tempo does not assume that studying, coding, gym, Instagram, or YouTube belongs in your score.
 
 At this point, the core setup is complete. Browser tracking, screen context,
 output folders, local AI, and Hub sync are optional.
@@ -78,14 +99,18 @@ the active desktop window.
      choose **Load unpacked**, and select the `extension` folder.
 5. Open Tempo's extension Options page.
 6. Paste the endpoint and token, save, and choose **Test connection**.
-7. Browse normally for about 20 seconds, then check **Activity → Browser**.
+7. Browse normally for about 20 seconds, then check **Activity → Websites**.
 
 Firefox temporary add-ons disappear after Firefox restarts. See
 [`extension/README.md`](../extension/README.md) for permanent signed-XPI steps
 and the exact permission explanation.
 
 Page-text capture is separate and off by default. Review it under
-**Settings → Browser & content** before enabling it.
+**Settings → Browser & content** before enabling it. Keeping the raw text excerpt
+is optional and normally unnecessary: it exists only so you can inspect the
+exact visible text that caused a bad classification. Leave it off (or enable
+“Delete raw text after classification”) when the summary and keywords are
+enough.
 
 ## Optional: count saved work
 
@@ -108,7 +133,8 @@ basic tracking.
 
 Open **Settings → Connections** to connect an Ollama server. Local AI can add
 richer classification and reviews, but all core tracking, categories, scores,
-and rule-based reviews work without it.
+and rule-based reviews work without it. Tempo validates AI output against deterministic evidence:
+goals alone cannot assign a project, and an uncertain app/title-only guess cannot claim near-certainty.
 
 ### Tempo Hub
 
@@ -118,6 +144,19 @@ not required for one Windows computer. If you do want it, the
 secret, and exposes it to your own Tailscale network through a private HTTPS
 URL. Paste that exact URL into Tempo on each device; do not open router ports.
 
+## Export for an accountability review
+
+Open **Settings → Data & privacy → Accountability export** when you want a second opinion on where your time is going.
+
+1. Pick **Last 7 days**, **14 days**, **30 days**, **90 days**, or enter exact dates.
+2. Leave app and website names enabled if you want actionable feedback. Turn them off to replace them with labels such as `Desktop app #1` and `Website #1`.
+3. Leave titles, daily notes, and raw captured text off unless their extra context is genuinely needed. These can contain private chats, client names, or personal information.
+4. Choose **Copy for ChatGPT** for the fastest workflow, or save/download the `.md` file and inspect it before sharing.
+5. Paste or attach the report to ChatGPT. The first block already asks for a brutally honest but practical assessment and warns the AI not to invent conclusions from incomplete tracking.
+
+The report contains summaries rather than a dump of every ten-second sample: active/productive/neutral/distracting time, top leaks, productive sources, projects, daily trends, meaningful switches, goals, check-ins, outputs, and Tempo's own flags. URL paths, local file paths, pairing secrets, ingest tokens, and database identifiers are never exported.
+
+If most time is neutral or the range contains very little tracked activity, correct your classifications or collect more data before treating the analysis as reliable.
 ## A low-friction daily routine
 
 ### Morning — 30 seconds
@@ -130,14 +169,14 @@ URL. Paste that exact URL into Tempo on each device; do not open router ports.
 
 - Leave Tempo running.
 - Work normally.
-- Log offline activities with the quick check-ins on **Today**.
+- Log offline or untimed activities with Quick check-ins on **Plan → Daily Goals**; they record an occurrence, not minutes.
 - Correct a new or misclassified app once; Tempo reuses the rule afterward.
 
 ### Evening — two minutes
 
 - Open **Insights → Daily Review**.
 - Check whether the time breakdown matches reality.
-- Correct obvious mistakes in **Activity → Activity Log**.
+- Correct obvious mistakes in **Activity → Classifications**.
 - Choose one adjustment for tomorrow.
 
 ### Weekly — five minutes
@@ -193,5 +232,4 @@ npm run app
 
 ### You want to start over
 
-Open **Settings → Data & privacy**. Export anything you want to keep before
-using reset or deletion controls.
+Open **Settings → Data & privacy** and choose **Back up now** before using reset or deletion controls. Tempo verifies the backup, and restoring one first preserves the current database as another manual backup.

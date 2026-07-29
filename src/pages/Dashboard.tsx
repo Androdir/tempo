@@ -7,6 +7,7 @@ import {
   getOutputEvents,
   getStreaks,
   getTodaySummary,
+  getTrackingHealth,
   isRemote,
   isTauri,
   onOutputsUpdated,
@@ -18,7 +19,7 @@ import { isoOffset } from "../components/LockinPlan";
 import { AppGlyph, BarRow, StackedBar, StatCard } from "../components/ui";
 import type { Page } from "../components/Sidebar";
 import { formatDuration, formatLongDate, percent } from "../format";
-import type { Bucket, DeviceUsage, Goal, LockinPlan, OutputEvent, Streak, TodaySummary } from "../types";
+import type { Bucket, DeviceUsage, Goal, LockinPlan, OutputEvent, Streak, TodaySummary, TrackingHealth } from "../types";
 import { outputMeta } from "./OutputEvents";
 import { streakIcon } from "./Streaks";
 
@@ -30,12 +31,18 @@ function localTodayIso(): string {
 export default function Dashboard({ onNavigate }: { onNavigate: (p: Page) => void }) {
   const [summary, setSummary] = useState<TodaySummary | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [health, setHealth] = useState<TrackingHealth | null>(null);
   const firstLoad = useRef(true);
 
   const load = useCallback(async () => {
     try {
-      const [data] = await Promise.all([getTodaySummary(), getCategoryDefinitions()]);
+      const [data, , trackingHealth] = await Promise.all([
+        getTodaySummary(),
+        getCategoryDefinitions(),
+        getTrackingHealth(),
+      ]);
       setSummary(data);
+      setHealth(trackingHealth);
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -81,6 +88,8 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: Page) => voi
   return (
     <>
       <PageHead date={s.date} />
+
+      <TrackingHealthCard health={health} onNavigate={onNavigate} />
 
       <MissionsCard onNavigate={onNavigate} />
 
@@ -201,7 +210,7 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: Page) => voi
               <h2 className="card-title">Top websites</h2>
               <p className="card-hint">
                 Browser time today ({formatDuration(s.totalBrowserSeconds)}), merged into the totals
-                above. Open Browser Activity for page-level detail.
+                above. Open Websites for page-level detail.
               </p>
               <div className="bars">
                 {s.perWebsite.slice(0, 8).map((w) => {
@@ -230,6 +239,22 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: Page) => voi
   );
 }
 
+function TrackingHealthCard({ health, onNavigate }: { health: TrackingHealth | null; onNavigate: (p: Page) => void }) {
+  if (!health || (!isTauri() && !isRemote())) return null;
+  const lastSample = health.lastDesktopAt
+    ? new Date(health.lastDesktopAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : "none";
+  return (
+    <div className={`tracking-health-card ${health.status}`}>
+      <div>
+        <strong>{health.status === "healthy" ? "Tracking is healthy" : "Tracking needs attention"}</strong>
+        <span>Desktop last seen {lastSample} · database {health.databaseOk ? "verified" : "needs checking"}</span>
+        {health.issues.map((issue) => <span className="tracking-health-issue" key={issue}>{issue}</span>)}
+      </div>
+      {health.status !== "healthy" && <button className="btn" onClick={() => onNavigate("privacy")}>Fix in Settings</button>}
+    </div>
+  );
+}
 function GettingStarted({ onNavigate }: { onNavigate: (p: Page) => void }) {
   const desktopApp = isTauri();
   const hubDashboard = isRemote();
@@ -332,6 +357,7 @@ function MissionsCard({ onNavigate }: { onNavigate: (p: Page) => void }) {
   }
 
   const done = goals.filter((g) => g.completed).length;
+  const next = goals.find((g) => !g.completed);
 
   return (
     <div className="card card-pad section-gap missions-card">
@@ -362,10 +388,17 @@ function MissionsCard({ onNavigate }: { onNavigate: (p: Page) => void }) {
               </button>
               <span className="mm-title">{g.title}</span>
               {g.targetMinutes != null && <span className="mm-target">{g.targetMinutes}m</span>}
+              {g.targetCount != null && <span className="mm-target">{g.targetCount} {g.targetUnit}</span>}
               <span className={`prio prio-${g.priority}`}>{g.priority}</span>
             </li>
           ))}
         </ul>
+      )}
+      {next && (
+        <div className="mission-next-action">
+          <div><span>Next action</span><strong>{next.title}</strong></div>
+          <button className="btn btn-primary" onClick={() => onNavigate("focus")}>Start focus</button>
+        </div>
       )}
     </div>
   );

@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { categoryMeta, DEFAULT_CATEGORY_DEFINITIONS, registerCategoryDefinitions } from "./categories";
 import type {
+  AccountabilityExport,
+  AccountabilityExportOptions,
   ActivityDetail,
   ActivityLogEntry,
   BrowserActivityView,
@@ -11,7 +13,9 @@ import type {
   CategoryRule,
   CheckinDefinition,
   CheckinValue,
+  CorrectionHistoryEntry,
   DailyAiReview,
+  DatabaseBackup,
   DeviceUsage,
   DistractionWarning,
   DomainRule,
@@ -27,6 +31,7 @@ import type {
   OutputEvent,
   PrivacySettings,
   Project,
+  ProjectMatchTest,
   WatchedFolder,
   ScoreLine,
   ScoreReport,
@@ -37,6 +42,7 @@ import type {
   TimelineBlock,
   TimelineDay,
   TodaySummary,
+  TrackingHealth,
   TrackedApp,
   TrackedDomain,
   WebsiteUsage,
@@ -193,6 +199,14 @@ export async function deleteCategoryRule(appName: string): Promise<void> {
   mockCategories.set(appName, null);
 }
 
+export async function getCorrectionHistory(blockKey: string): Promise<CorrectionHistoryEntry[]> {
+  if (isTauri()) return invoke<CorrectionHistoryEntry[]>("get_correction_history", { blockKey });
+  return [];
+}
+
+export async function undoCorrection(id: number): Promise<void> {
+  if (isTauri()) await invoke("undo_correction", { id });
+}
 export async function correctActivity(
   blockKey: string,
   source: string,
@@ -304,7 +318,7 @@ export async function getStreakDefinitions(): Promise<StreakDefinition[]> {
 
 export async function updateStreakDefinition(
   id: string,
-  patch: { enabled?: boolean; threshold?: number; name?: string },
+  patch: { enabled?: boolean; threshold?: number; name?: string; daysPerWeek?: number },
 ): Promise<void> {
   if (isTauri() || isRemote()) {
     await callBackend("update_streak_definition", {
@@ -320,6 +334,7 @@ export async function updateStreakDefinition(
     if (patch.enabled !== undefined) d.enabled = patch.enabled;
     if (patch.threshold !== undefined) d.threshold = patch.threshold;
     if (patch.name !== undefined) d.name = patch.name;
+    if (patch.daysPerWeek !== undefined) d.daysPerWeek = patch.daysPerWeek;
   }
 }
 
@@ -348,16 +363,22 @@ export async function deleteStreakDefinition(id: string): Promise<void> {
   mockStreakDefs = mockStreakDefs.filter((d) => d.id !== id);
 }
 
-/** Insert the suggested starter streaks; returns how many were added. */
+/** Add suggestions based on the user's actual goals and used/custom check-ins. */
 export async function seedDefaultStreaks(): Promise<number> {
   if (isTauri() || isRemote()) return callBackend<number>("seed_default_streaks");
   const suggested: StreakDefinition[] = [
-    { id: "posted_video", name: "Posted a video", kind: "output", metric: "video_export", threshold: 0, enabled: true, daysPerWeek: 0 },
     { id: "main_goal", name: "Completed main goal", kind: "goal", metric: "main_goal", threshold: 0, enabled: true, daysPerWeek: 0 },
-    { id: "gym", name: "Gym", kind: "checkin", metric: "gym_logged", threshold: 0, enabled: true, daysPerWeek: 0 },
-    { id: "studied", name: "Studied", kind: "checkin", metric: "studied", threshold: 0, enabled: true, daysPerWeek: 0 },
-    { id: "productive_block_60", name: "60+ min focus block", kind: "block", metric: "productive", threshold: 60, enabled: true, daysPerWeek: 0 },
-    { id: "no_major_distraction", name: "No major distraction", kind: "distraction", metric: "max_block", threshold: 30, enabled: true, daysPerWeek: 0 },
+    ...mockCheckinDefs
+      .filter((d) => !d.builtIn || (mockCheckinValues.get(d.id) ?? 0) > 0)
+      .map((d) => ({
+        id: `checkin_${d.id}`,
+        name: d.label,
+        kind: "checkin",
+        metric: d.id,
+        threshold: 1,
+        enabled: true,
+        daysPerWeek: 0,
+      })),
   ];
   let added = 0;
   for (const s of suggested) {
@@ -368,7 +389,6 @@ export async function seedDefaultStreaks(): Promise<number> {
   }
   return added;
 }
-
 // ---- daily lock-in plan ----
 
 export async function generateLockinPlan(day: string): Promise<LockinPlan> {
@@ -396,7 +416,7 @@ export async function copyLockinPlanToGoals(day: string): Promise<number> {
   let n = 0;
   const addG = (title: string, priority: "high" | "medium") => {
     if (title.trim() && !mockGoals.some((g) => g.title === title)) {
-      mockGoals.push({ id: mockGoalId++, title, project: null, targetMinutes: null, priority, completed: false, recurring: false });
+      mockGoals.push({ id: mockGoalId++, title, project: null, targetMinutes: null, targetCount: null, targetUnit: null, priority, completed: false, recurring: false });
       n++;
     }
   };
@@ -516,6 +536,28 @@ export function onDailyReviewDue(cb: () => void) {
   return listenTo<unknown>("daily-review-due", () => cb());
 }
 
+/** Show a native desktop notification. Browser and Hub previews remain no-ops. */
+export async function showNativeNotification(title: string, body: string): Promise<void> {
+  if (isTauri()) await invoke("show_native_notification", { title, body });
+}
+
+let mockLaunchAtLogin = true;
+
+/** OS startup state. Hidden on the Hub because it controls only the desktop device. */
+export async function getLaunchAtLogin(): Promise<boolean | null> {
+  if (isTauri()) return invoke<boolean>("get_launch_at_login");
+  if (isRemote()) return null;
+  return mockLaunchAtLogin;
+}
+
+export async function setLaunchAtLogin(enabled: boolean): Promise<void> {
+  if (isTauri()) {
+    await invoke("set_launch_at_login", { enabled });
+    return;
+  }
+  if (!isRemote()) mockLaunchAtLogin = enabled;
+}
+
 export async function getAccountabilitySettings(): Promise<AccountabilitySettings> {
   if (isTauri()) return invoke<AccountabilitySettings>("get_accountability_settings");
   return { ...mockAccountability };
@@ -605,6 +647,59 @@ export async function pruneOldData(): Promise<number> {
   return 0;
 }
 
+export async function listDatabaseBackups(): Promise<DatabaseBackup[]> {
+  if (isTauri()) return invoke<DatabaseBackup[]>("list_database_backups");
+  return [];
+}
+
+export async function createDatabaseBackup(): Promise<DatabaseBackup> {
+  if (isTauri()) return invoke<DatabaseBackup>("create_database_backup");
+  return { name: "preview-backup.db", createdAt: new Date().toISOString(), bytes: 0, automatic: false };
+}
+
+export async function restoreDatabaseBackup(name: string): Promise<void> {
+  if (isTauri()) await invoke("restore_database_backup", { name });
+}
+
+export async function generateAccountabilityExport(
+  options: AccountabilityExportOptions,
+): Promise<AccountabilityExport> {
+  if (isTauri() || isRemote()) {
+    return callBackend<AccountabilityExport>("generate_accountability_export", { options });
+  }
+  const dayCount = Math.max(1, Math.round((Date.parse(options.endDate) - Date.parse(options.startDate)) / 86400000) + 1);
+  const names = options.includeActivityNames ? "DaVinci Resolve and youtube.com" : "Desktop app #1 and Website #1";
+  return {
+    filename: `tempo-accountability-${options.startDate}_to_${options.endDate}.md`,
+    startDate: options.startDate,
+    endDate: options.endDate,
+    dayCount,
+    trackedDays: Math.min(dayCount, 5),
+    activeSeconds: 18_900,
+    markdown: `# Tempo accountability report\n\n> **Suggested prompt for ChatGPT:** Be my brutally honest but practical accountability coach. Identify where I waste time and give me three changes for the next seven days.\n\n## Scope and privacy\n\n- Date range: **${options.startDate} to ${options.endDate}**\n- Window/page titles: **${options.includeTitles ? "included" : "excluded"}**\n- Raw captured text: **${options.includeRawText ? "included" : "excluded"}**\n\n## Executive snapshot\n\n- Active tracked time: **5h 15m**\n- Productive: **3h 40m**\n- Distracting: **1h 05m**\n\n## Biggest recorded distractions\n\n- ${names}\n`,
+  };
+}
+
+export async function saveAccountabilityExport(options: AccountabilityExportOptions): Promise<string | null> {
+  if (!isTauri()) return null;
+  return invoke<string>("save_accountability_export", { options });
+}
+export async function getTrackingHealth(): Promise<TrackingHealth> {
+  if (isTauri()) return invoke<TrackingHealth>("get_tracking_health");
+  return {
+    status: "healthy",
+    checkedAt: new Date().toISOString(),
+    databaseOk: true,
+    lastDesktopAt: new Date().toISOString(),
+    lastBrowserAt: null,
+    lastScreenAt: null,
+    browserConnected: false,
+    smartEnabled: false,
+    pendingSyncEvents: 0,
+    lastBackupAt: null,
+    issues: [],
+  };
+}
 export async function resetDatabase(): Promise<number> {
   if (isTauri()) return invoke<number>("reset_database");
   return 0;
@@ -936,6 +1031,74 @@ export async function deleteProject(id: number): Promise<void> {
   if (i >= 0) mockProjects.splice(i, 1);
 }
 
+export async function testProjectMatch(
+  project: Project,
+  identifier: string,
+  title: string,
+  extra: string,
+): Promise<ProjectMatchTest> {
+  if (isTauri() || isRemote()) {
+    return callBackend<ProjectMatchTest>("test_project_match", { project, identifier, title, extra });
+  }
+  const normalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const id = normalize(identifier);
+  const excludedId = id.length > 0 ? [...project.excludedApps, ...project.excludedDomains].find((value) => {
+    const item = normalize(value);
+    return item.length >= 3 && (id.includes(item) || item.includes(id));
+  }) : undefined;
+  const hay = `${title} ${extra}`.toLowerCase();
+  const excludedKeyword = project.excludedKeywords.find((value) => value.length >= 2 && hay.includes(value.toLowerCase()));
+  if (excludedId || excludedKeyword) {
+    const reason = excludedId ? `excluded app/domain: ${identifier}` : `excluded keyword: ${excludedKeyword}`;
+    return { status: "excluded", confidence: 0, signals: [reason], explanation: `This project is blocked by ${reason}.` };
+  }
+  const signals: string[] = [];
+  const relatedId = id.length > 0 && [...project.apps, ...project.domains].some((value) => {
+    const item = normalize(value);
+    return item.length >= 3 && (id.includes(item) || item.includes(id));
+  });
+  if (relatedId) signals.push(`app/domain: ${identifier}`);
+  let hits = 0;
+  for (const keyword of project.keywords) {
+    const value = keyword.trim().toLowerCase();
+    if (value.length < 2) continue;
+    if (title.toLowerCase().includes(value)) {
+      signals.push(`title keyword: ${keyword}`);
+      hits += 1;
+    } else if (extra.toLowerCase().includes(value)) {
+      signals.push(`content keyword: ${keyword}`);
+      hits += 1;
+    }
+  }
+  if (!relatedId && hits === 0) {
+    return { status: "no_match", confidence: 0, signals: [], explanation: "No related app, domain, or keyword was found." };
+  }
+  const confidence = Math.min(100, (relatedId ? 50 : 0) + (hits >= 1 ? 35 : 0) + (hits >= 2 ? 20 : 0) + (hits >= 3 ? 10 : 0) + (hits >= 4 ? 10 : 0));
+  return {
+    status: confidence >= 60 ? "assigned" : "candidate",
+    confidence,
+    signals,
+    explanation: confidence >= 60
+      ? `Would assign ${project.name} at ${confidence}% confidence.`
+      : `Found some evidence, but ${confidence}% is below the 60% assignment threshold.`,
+  };
+}
+
+export async function excludeActivityFromProject(
+  projectName: string,
+  source: ActivityLogEntry["source"],
+  label: string,
+): Promise<void> {
+  if (isTauri()) {
+    await invoke("exclude_activity_from_project", { projectName, source, label });
+    return;
+  }
+  const project = mockProjects.find((item) => item.name === projectName);
+  if (!project) return;
+  const list = source === "web" ? project.excludedDomains : project.excludedApps;
+  if (!list.some((item) => item.toLowerCase() === label.toLowerCase())) list.push(label);
+}
+
 export async function getRecentActivity(): Promise<ActivityLogEntry[]> {
   if (isTauri()) return invoke<ActivityLogEntry[]>("get_recent_activity");
   return mockRecentActivity();
@@ -1010,6 +1173,7 @@ function mockRecentActivity(): ActivityLogEntry[] {
     blockKey: `web-${p.id}`,
   }));
   const apps: ActivityLogEntry[] = [];
+
   const screen: ActivityLogEntry[] = [];
   return [...screen, ...apps, ...web];
 }
@@ -1149,7 +1313,7 @@ export async function copyPreviousGoals(): Promise<number> {
       id: mockGoalId++,
       title: extra,
       project: null,
-      targetMinutes: null,
+      targetMinutes: null, targetCount: null, targetUnit: null,
       priority: "medium",
       completed: false,
       recurring: false,
@@ -1217,18 +1381,8 @@ export async function deleteScoreRule(id: string): Promise<void> {
 
 const DEFAULT_SCORE_RULES: ScoreRule[] = [
   { id: "main_goal", label: "Completed main daily goal", kind: "goal", metric: "", weight: 30, threshold: null, builtIn: true },
-  { id: "posted_video", label: "Posted 1+ videos", kind: "checkin", metric: "videos_posted", weight: 25, threshold: 1, builtIn: true },
-  { id: "business_min", label: "90+ min editing / business work", kind: "category", metric: "business", weight: 20, threshold: 90, builtIn: true },
-  { id: "study_min", label: "60+ min studying", kind: "category", metric: "study", weight: 15, threshold: 60, builtIn: true },
-  { id: "coding_min", label: "60+ min coding / building", kind: "category", metric: "productive", weight: 15, threshold: 60, builtIn: true },
-  { id: "gym", label: "Gym / wrestling logged", kind: "checkin", metric: "gym_logged,wrestled", weight: 10, threshold: 1, builtIn: true },
-  { id: "instagram", label: "Instagram distraction over 30 min", kind: "target", metric: "instagram", weight: -15, threshold: 30, builtIn: true },
-  { id: "youtube", label: "YouTube distraction over 45 min", kind: "target", metric: "youtube", weight: -10, threshold: 45, builtIn: true },
-  { id: "recovery", label: "Music / pacing / recovery over 60 min", kind: "category", metric: "recovery", weight: -15, threshold: 60, builtIn: true },
   { id: "no_main_goal", label: "No main goal completed", kind: "no_goal", metric: "", weight: -25, threshold: null, builtIn: true },
-  { id: "late_start", label: "First productive block after 14:00", kind: "late_start", metric: "", weight: -10, threshold: 14, builtIn: true },
 ];
-
 const DEFAULT_CHECKIN_DEFS: CheckinDefinition[] = [
   { id: "videos_posted", label: "Posted video", icon: "🎬", kind: "counter", builtIn: true, autoKind: "", autoMetric: "", autoThreshold: 0 },
   { id: "gym_logged", label: "Went gym", icon: "🏋️", kind: "toggle", builtIn: true, autoKind: "", autoMetric: "", autoThreshold: 0 },
@@ -1398,6 +1552,7 @@ function mockTimeline(day: string): TimelineDay {
     day,
     maxGapSeconds: 120,
     blocks,
+    overviewBlocks: blocks,
     outputs: mockLoggedCheckins(),
     activeSeconds: sum((b) => !b.idle),
     idleSeconds: sum((b) => b.idle),

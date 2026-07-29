@@ -17,7 +17,7 @@ use tiny_http::{Header, Method, Request, Response, Server};
 use tempo_core::db::{self, Db};
 use tempo_core::events::{self, EventBatch};
 use tempo_core::models::{self, Goal, LockinPlan};
-use tempo_core::{aggregate, projects, scoring, settings};
+use tempo_core::{accountability_export, aggregate, projects, scoring, settings};
 
 struct Config {
     pairing_secret: String,
@@ -292,6 +292,14 @@ fn validate_project(conn: &Connection, p: &projects::Project) -> Result<(), Stri
     if !models::category_exists(conn, &p.category) {
         return Err(format!("Unknown category: {}", p.category));
     }
+    let duplicates: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM projects WHERE LOWER(name) = LOWER(?1) AND id != ?2",
+        params![p.name.trim(), p.id],
+        |r| r.get(0),
+    ).unwrap_or(0);
+    if duplicates > 0 {
+        return Err("Project names must be unique so match corrections are unambiguous".into());
+    }
     Ok(())
 }
 
@@ -305,54 +313,46 @@ fn normalize_priority(p: &str) -> String {
 
 fn row_to_goal(r: &rusqlite::Row) -> rusqlite::Result<Goal> {
     Ok(Goal {
-        id: r.get(0)?,
-        title: r.get(1)?,
-        project: r.get(2)?,
-        target_minutes: r.get(3)?,
-        priority: r.get(4)?,
-        completed: r.get::<_, i64>(5)? != 0,
-        recurring: r.get::<_, i64>(6)? != 0,
+        id: r.get(0)?, title: r.get(1)?, project: r.get(2)?, target_minutes: r.get(3)?,
+        target_count: r.get(4)?, target_unit: r.get(5)?, priority: r.get(6)?,
+        completed: r.get::<_, i64>(7)? != 0, recurring: r.get::<_, i64>(8)? != 0,
     })
 }
 
+fn normalize_goal_targets(goal: &Goal) -> Result<(Option<i64>, Option<i64>, Option<String>), String> {
+    let minutes = goal.target_minutes.filter(|m| *m > 0);
+    let count = goal.target_count.filter(|n| *n > 0);
+    let unit = goal.target_unit.as_deref().map(str::trim).filter(|u| !u.is_empty())
+        .map(|u| u.chars().take(32).collect::<String>());
+    if minutes.is_some() && count.is_some() { return Err("Choose either a time target or an output/count target".into()); }
+    if count.is_some() && unit.is_none() { return Err("Enter what the count represents, such as video or post".into()); }
+    Ok((minutes, count, if count.is_some() { unit } else { None }))
+}
+
 fn ensure_recurring_goals(conn: &Connection, day: &str) {
-    if settings::get_setting(conn, settings::RECURRING_MATERIALIZED_DAY).as_deref() == Some(day) {
-        return;
-    }
-
-    let src: Option<String> = conn
-        .query_row("SELECT MAX(day) FROM goals WHERE day < ?1 AND recurring = 1", [day], |r| {
-            r.get::<_, Option<String>>(0)
-        })
-        .ok()
-        .flatten();
-
+    if settings::get_setting(conn, settings::RECURRING_MATERIALIZED_DAY).as_deref() == Some(day) { return; }
+    let src: Option<String> = conn.query_row(
+        "SELECT MAX(day) FROM goals WHERE day < ?1 AND recurring = 1", [day],
+        |r| r.get::<_, Option<String>>(0),
+    ).ok().flatten();
     if let Some(src_day) = src {
-        let mut templates: Vec<(String, Option<String>, Option<i64>, String)> = Vec::new();
+        let mut templates: Vec<(String, Option<String>, Option<i64>, Option<i64>, Option<String>, String)> = Vec::new();
         if let Ok(mut stmt) = conn.prepare(
-            "SELECT title, project, target_minutes, priority FROM goals
+            "SELECT title, project, target_minutes, target_count, target_unit, priority FROM goals
              WHERE day = ?1 AND recurring = 1 ORDER BY sort_order, id",
         ) {
             if let Ok(rows) = stmt.query_map([&src_day], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, Option<String>>(1)?,
-                    r.get::<_, Option<i64>>(2)?,
-                    r.get::<_, String>(3)?,
-                ))
-            }) {
-                templates = rows.filter_map(Result::ok).collect();
-            }
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+            }) { templates = rows.filter_map(Result::ok).collect(); }
         }
         let mut order = aggregate::next_sort_order(conn, day);
-        for (title, project, target, priority) in templates {
-            if aggregate::goal_exists(conn, day, &title) {
-                continue;
-            }
+        for (title, project, target_minutes, target_count, target_unit, priority) in templates {
+            if aggregate::goal_exists(conn, day, &title) { continue; }
             let _ = conn.execute(
-                "INSERT INTO goals (day, title, project, target_minutes, priority, completed, sort_order, recurring, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, 1, ?7)",
-                params![day, title, project, target, priority, order, chrono::Utc::now().to_rfc3339()],
+                "INSERT INTO goals
+                   (day, title, project, target_minutes, target_count, target_unit, priority, completed, sort_order, recurring, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, 1, ?9)",
+                params![day, title, project, target_minutes, target_count, target_unit, priority, order, chrono::Utc::now().to_rfc3339()],
             );
             order += 1;
         }
@@ -362,111 +362,76 @@ fn ensure_recurring_goals(conn: &Connection, day: &str) {
 
 fn list_goals(conn: &Connection, day: &str) -> Result<Vec<Goal>, String> {
     ensure_recurring_goals(conn, day);
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, title, project, target_minutes, priority, completed, recurring
-             FROM goals WHERE day = ?1
-             ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, sort_order, id",
-        )
-        .map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(
+        "SELECT id, title, project, target_minutes, target_count, target_unit, priority, completed, recurring
+         FROM goals WHERE day = ?1
+         ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, sort_order, id",
+    ).map_err(|e| e.to_string())?;
     let rows = stmt.query_map([day], row_to_goal).map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row.map_err(|e| e.to_string())?);
-    }
-    Ok(out)
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
 }
 
 fn add_goal_for_day(conn: &Connection, day: &str, goal: Goal) -> Result<i64, String> {
     let title = goal.title.trim();
-    if title.is_empty() {
-        return Err("Goal title is required".into());
-    }
+    if title.is_empty() { return Err("Goal title is required".into()); }
     let priority = normalize_priority(&goal.priority);
-    let project = goal.project.filter(|p| !p.trim().is_empty());
-    let target = goal.target_minutes.filter(|m| *m > 0);
+    let project = goal.project.as_deref().map(str::trim).filter(|p| !p.is_empty());
+    let (target_minutes, target_count, target_unit) = normalize_goal_targets(&goal)?;
     let order = aggregate::next_sort_order(conn, day);
     conn.execute(
-        "INSERT INTO goals (day, title, project, target_minutes, priority, completed, sort_order, recurring, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8)",
-        params![day, title, project, target, priority, order, goal.recurring as i64, chrono::Utc::now().to_rfc3339()],
-    )
-    .map_err(|e| e.to_string())?;
+        "INSERT INTO goals
+           (day, title, project, target_minutes, target_count, target_unit, priority, completed, sort_order, recurring, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, ?10)",
+        params![day, title, project, target_minutes, target_count, target_unit, priority, order, goal.recurring as i64, chrono::Utc::now().to_rfc3339()],
+    ).map_err(|e| e.to_string())?;
     Ok(conn.last_insert_rowid())
 }
 
 fn update_goal_row(conn: &Connection, goal: Goal) -> Result<(), String> {
-    if goal.id <= 0 {
-        return Err("missing goal id".into());
-    }
+    if goal.id <= 0 { return Err("missing goal id".into()); }
     let title = goal.title.trim();
-    if title.is_empty() {
-        return Err("Goal title is required".into());
-    }
+    if title.is_empty() { return Err("Goal title is required".into()); }
     let priority = normalize_priority(&goal.priority);
-    let project = goal.project.filter(|p| !p.trim().is_empty());
-    let target = goal.target_minutes.filter(|m| *m > 0);
+    let project = goal.project.as_deref().map(str::trim).filter(|p| !p.is_empty());
+    let (target_minutes, target_count, target_unit) = normalize_goal_targets(&goal)?;
     conn.execute(
-        "UPDATE goals SET title = ?1, project = ?2, target_minutes = ?3, priority = ?4,
-                          completed = ?5, recurring = ?6 WHERE id = ?7",
-        params![title, project, target, priority, goal.completed as i64, goal.recurring as i64, goal.id],
-    )
-    .map_err(|e| e.to_string())?;
+        "UPDATE goals SET title = ?1, project = ?2, target_minutes = ?3,
+                          target_count = ?4, target_unit = ?5, priority = ?6,
+                          completed = ?7, recurring = ?8 WHERE id = ?9",
+        params![title, project, target_minutes, target_count, target_unit, priority, goal.completed as i64, goal.recurring as i64, goal.id],
+    ).map_err(|e| e.to_string())?;
     Ok(())
 }
 
 fn copy_previous_goals(conn: &Connection, day: &str) -> Result<i64, String> {
-    let src: Option<String> = conn
-        .query_row("SELECT MAX(day) FROM goals WHERE day < ?1", [day], |r| {
-            r.get::<_, Option<String>>(0)
-        })
-        .map_err(|e| e.to_string())?;
-    let Some(src_day) = src else {
-        return Ok(0);
-    };
-
-    let mut templates: Vec<(String, Option<String>, Option<i64>, String, i64)> = Vec::new();
+    let src: Option<String> = conn.query_row("SELECT MAX(day) FROM goals WHERE day < ?1", [day],
+        |r| r.get::<_, Option<String>>(0)).map_err(|e| e.to_string())?;
+    let Some(src_day) = src else { return Ok(0); };
+    let mut templates: Vec<(String, Option<String>, Option<i64>, Option<i64>, Option<String>, String, i64)> = Vec::new();
     {
-        let mut stmt = conn
-            .prepare(
-                "SELECT title, project, target_minutes, priority, recurring FROM goals
-                 WHERE day = ?1 ORDER BY sort_order, id",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([&src_day], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, Option<String>>(1)?,
-                    r.get::<_, Option<i64>>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, i64>(4)?,
-                ))
-            })
-            .map_err(|e| e.to_string())?;
-        for row in rows {
-            templates.push(row.map_err(|e| e.to_string())?);
-        }
+        let mut stmt = conn.prepare(
+            "SELECT title, project, target_minutes, target_count, target_unit, priority, recurring FROM goals
+             WHERE day = ?1 ORDER BY sort_order, id",
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([&src_day], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+        }).map_err(|e| e.to_string())?;
+        for row in rows { templates.push(row.map_err(|e| e.to_string())?); }
     }
-
     let mut order = aggregate::next_sort_order(conn, day);
     let mut count = 0i64;
-    for (title, project, target, priority, recurring) in templates {
-        if aggregate::goal_exists(conn, day, &title) {
-            continue;
-        }
+    for (title, project, target_minutes, target_count, target_unit, priority, recurring) in templates {
+        if aggregate::goal_exists(conn, day, &title) { continue; }
         conn.execute(
-            "INSERT INTO goals (day, title, project, target_minutes, priority, completed, sort_order, recurring, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8)",
-            params![day, title, project, target, priority, order, recurring, chrono::Utc::now().to_rfc3339()],
-        )
-        .map_err(|e| e.to_string())?;
-        order += 1;
-        count += 1;
+            "INSERT INTO goals
+               (day, title, project, target_minutes, target_count, target_unit, priority, completed, sort_order, recurring, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, ?10)",
+            params![day, title, project, target_minutes, target_count, target_unit, priority, order, recurring, chrono::Utc::now().to_rfc3339()],
+        ).map_err(|e| e.to_string())?;
+        order += 1; count += 1;
     }
     Ok(count)
 }
-
 /// Dispatch a frontend command to the shared aggregation. Covers the full
 /// read dashboard (Today, Timeline, Daily Score, Streaks, Weekly Review, Output
 /// Events, Daily Review, Lock-In Plan, Focus summary) plus goals/check-ins/notes/
@@ -483,6 +448,12 @@ fn dispatch(conn: &Connection, cmd: &str, args: &Value) -> Result<Value, String>
         "get_daily_score" => Ok(serde_json::to_value(aggregate::score_report_for_day(conn, &day)?).unwrap()),
         "get_streaks" => Ok(serde_json::to_value(aggregate::compute_streaks(conn)?).unwrap()),
         "get_weekly_review" => Ok(serde_json::to_value(aggregate::weekly_review(conn)?).unwrap()),
+        "generate_accountability_export" => {
+            let options: accountability_export::AccountabilityExportOptions =
+                serde_json::from_value(args.get("options").cloned().ok_or("missing options")?)
+                    .map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(accountability_export::generate(conn, &options)?).unwrap())
+        }
         "get_output_events" => {
             let mut stmt = conn
                 .prepare(
@@ -534,6 +505,16 @@ fn dispatch(conn: &Connection, cmd: &str, args: &Value) -> Result<Value, String>
             let id = args.get("id").and_then(|v| v.as_i64()).ok_or("missing id")?;
             projects::delete_project(conn, id).map_err(|e| e.to_string())?;
             Ok(Value::Null)
+        }
+        "test_project_match" => {
+            let project: projects::Project =
+                serde_json::from_value(args.get("project").cloned().ok_or("missing project")?)
+                    .map_err(|e| e.to_string())?;
+            validate_project(conn, &project)?;
+            let identifier = args.get("identifier").and_then(|v| v.as_str()).unwrap_or_default();
+            let title = args.get("title").and_then(|v| v.as_str()).unwrap_or_default();
+            let extra = args.get("extra").and_then(|v| v.as_str()).unwrap_or_default();
+            Ok(serde_json::to_value(projects::test_project_match(&project, identifier, title, extra)).unwrap())
         }
         "get_goals" => {
             Ok(serde_json::to_value(list_goals(conn, &day)?).unwrap())
@@ -675,6 +656,13 @@ fn dispatch(conn: &Connection, cmd: &str, args: &Value) -> Result<Value, String>
                 conn.execute(
                     "UPDATE streak_definitions SET name = ?1, updated_at = ?2 WHERE id = ?3",
                     params![name.trim(), now, id],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            if let Some(days) = args.get("daysPerWeek").and_then(|v| v.as_i64()) {
+                conn.execute(
+                    "UPDATE streak_definitions SET days_per_week = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![days.clamp(0, 7), now, id],
                 )
                 .map_err(|e| e.to_string())?;
             }
@@ -1150,7 +1138,8 @@ mod tests {
         }})).unwrap().as_i64().unwrap();
         dispatch(&conn, "update_goal", &json!({"goal": {
             "id": gid, "title": "Ship edited video", "project": "Content Ops",
-            "targetMinutes": 30, "priority": "medium", "completed": true, "recurring": false
+            "targetMinutes": null, "targetCount": 1, "targetUnit": "video",
+            "priority": "medium", "completed": true, "recurring": false
         }})).unwrap();
         dispatch(&conn, "set_goal_recurring", &json!({"id": gid, "recurring": true})).unwrap();
         dispatch(&conn, "toggle_goal", &json!({"id": gid, "completed": false})).unwrap();
@@ -1158,14 +1147,23 @@ mod tests {
         assert_eq!(goals[0]["title"], "Ship edited video");
         assert_eq!(goals[0]["completed"], false);
         assert_eq!(goals[0]["recurring"], true);
+        assert_eq!(goals[0]["targetMinutes"], Value::Null);
+        assert_eq!(goals[0]["targetCount"], 1);
+        assert_eq!(goals[0]["targetUnit"], "video");
 
         let copied = dispatch(&conn, "copy_previous_goals", &json!({"day": "2026-01-03"})).unwrap();
         assert_eq!(copied, 1);
+        let copied_goals = dispatch(&conn, "get_goals", &json!({"day": "2026-01-03"})).unwrap();
+        assert_eq!(copied_goals[0]["targetCount"], 1);
         dispatch(&conn, "delete_goal", &json!({"id": gid})).unwrap();
         let goals_after_delete = dispatch(&conn, "get_goals", &json!({"day": "2026-01-02"})).unwrap();
         assert!(goals_after_delete.as_array().unwrap().is_empty());
 
         dispatch(&conn, "set_scoring_weight", &json!({"id": "main_goal", "weight": 42})).unwrap();
+        dispatch(&conn, "upsert_score_rule", &json!({"rule": {
+            "id": "business_min", "label": "Business time", "kind": "category",
+            "metric": "business", "weight": 20, "threshold": 90, "builtIn": false
+        }})).unwrap();
         dispatch(&conn, "set_scoring_threshold", &json!({"id": "business_min", "threshold": 120})).unwrap();
         let rules = dispatch(&conn, "get_score_rules", &json!({})).unwrap();
         let rules = rules.as_array().unwrap();

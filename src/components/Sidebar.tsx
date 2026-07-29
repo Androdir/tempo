@@ -52,8 +52,8 @@ export const NAV_SECTIONS: NavSection[] = [
     defaultPage: "timeline",
     pages: [
       { id: "timeline", label: "Timeline" },
-      { id: "activity", label: "Activity Log" },
-      { id: "browser", label: "Browser" },
+      { id: "activity", label: "Classifications" },
+      { id: "browser", label: "Websites" },
       { id: "outputs", label: "Outputs" },
     ],
   },

@@ -206,35 +206,78 @@ pub fn weekly_runs(status: &[bool], today_weekday0: usize, per_week: i64) -> (i6
     (current, best, counts[last])
 }
 
-/// Seed the default streaks when none exist yet. Production starts empty (you
-/// create the streaks you actually want); this is used by tests and by the
-/// explicit "Add suggested streaks" action.
-pub fn ensure_defaults(conn: &Connection) -> rusqlite::Result<()> {
-    let count: i64 =
-        conn.query_row("SELECT COUNT(*) FROM streak_definitions", [], |r| r.get(0)).unwrap_or(0);
-    if count > 0 {
+/// Remove only untouched generic suggestions from older versions. Renamed or
+/// edited streaks are treated as user-owned and preserved.
+fn migrate_irrelevant_suggestions(conn: &Connection) -> rusqlite::Result<()> {
+    const FLAG: &str = "streak_suggestions_v2";
+    let done = conn
+        .query_row("SELECT value FROM app_settings WHERE key = ?1", [FLAG], |r| r.get::<_, String>(0))
+        .ok()
+        .is_some_and(|v| v == "1");
+    if done {
         return Ok(());
     }
-    seed_suggested(conn)?;
+    for (id, name, kind, metric, threshold) in DEFAULTS {
+        if *id == "main_goal" {
+            continue;
+        }
+        conn.execute(
+            "DELETE FROM streak_definitions
+             WHERE id = ?1 AND name = ?2 AND kind = ?3 AND metric = ?4 AND threshold = ?5",
+            rusqlite::params![id, name, kind, metric, threshold],
+        )?;
+    }
+    conn.execute(
+        "INSERT INTO app_settings (key, value) VALUES (?1, '1')
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [FLAG],
+    )?;
     Ok(())
 }
 
-/// Insert every suggested streak that isn't already present. Returns how many
-/// were added. Backs the "Add suggested streaks" button.
+/// Test helper: production starts empty until the explicit suggestion action.
+pub fn ensure_defaults(conn: &Connection) -> rusqlite::Result<()> {
+    seed_suggested(conn).map(|_| ())
+}
+
+/// Add suggestions derived from real user state: the universal main-goal streak,
+/// plus check-ins the user created or has actually used. Generic study/coding/
+/// distraction streaks are deliberately not invented.
 pub fn seed_suggested(conn: &Connection) -> rusqlite::Result<i64> {
+    migrate_irrelevant_suggestions(conn)?;
     let now = chrono::Utc::now().to_rfc3339();
-    let mut added = 0i64;
-    for (i, (id, name, kind, metric, threshold)) in DEFAULTS.iter().enumerate() {
+    let mut added = conn.execute(
+        "INSERT OR IGNORE INTO streak_definitions
+           (id, name, kind, metric, threshold, enabled, sort_order, best_streak, days_per_week, updated_at)
+         VALUES ('main_goal', 'Completed main goal', 'goal', 'main_goal', 0, 1, 0, 0, 0, ?1)",
+        [&now],
+    )? as i64;
+
+    let mut relevant: Vec<(String, String)> = Vec::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT id, label FROM checkin_definitions d
+             WHERE d.built_in = 0 OR EXISTS (
+               SELECT 1 FROM checkin_values v WHERE v.checkin_id = d.id AND v.value > 0
+             )
+             ORDER BY d.sort_order, d.id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        relevant.extend(rows.filter_map(Result::ok));
+    }
+    let mut sort = 1i64;
+    for (checkin_id, label) in relevant {
+        let id = format!("checkin_{checkin_id}");
         added += conn.execute(
             "INSERT OR IGNORE INTO streak_definitions
-               (id, name, kind, metric, threshold, enabled, sort_order, best_streak, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, 0, ?7)",
-            rusqlite::params![id, name, kind, metric, threshold, i as i64, now],
+               (id, name, kind, metric, threshold, enabled, sort_order, best_streak, days_per_week, updated_at)
+             VALUES (?1, ?2, 'checkin', ?3, 1, 1, ?4, 0, 0, ?5)",
+            rusqlite::params![id, label, checkin_id, sort, now],
         )? as i64;
+        sort += 1;
     }
     Ok(added)
 }
-
 pub const STREAK_KINDS: [&str; 6] = ["checkin", "goal", "category", "output", "block", "distraction"];
 
 /// Create (or overwrite) a streak definition, validating the metric against the
@@ -318,6 +361,7 @@ pub fn delete_definition(conn: &Connection, id: &str) -> Result<(), String> {
 }
 
 pub fn load_defs(conn: &Connection) -> Vec<StreakDef> {
+    let _ = migrate_irrelevant_suggestions(conn);
     let mut stmt = match conn.prepare(
         "SELECT id, name, kind, metric, threshold, enabled, best_streak, last_completed_day, days_per_week
          FROM streak_definitions ORDER BY sort_order, id",

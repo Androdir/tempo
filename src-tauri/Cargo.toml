@@ -16,10 +16,13 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tempo-core = { path = "../crates/tempo-core" }
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-notification = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 chrono = { version = "0.4", features = ["clock"] }
 active-win-pos-rs = "0.8"
 # Tiny synchronous HTTP server for the loopback ingest endpoint (browser extension).
@@ -27,6 +30,7 @@ tiny_http = "0.12"
 # Blocking HTTP client for the local Ollama server (LLM classification).
 ureq = { version = "2", features = ["json"] }
 url = "2"
+dirs = "6"
 
 # Windows-only: idle check (GetLastInputInfo) + Smart Tracking screen OCR
 # (Windows.Media.Ocr — fully local, no model download, no Tesseract install).

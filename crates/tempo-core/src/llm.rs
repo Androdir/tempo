@@ -40,7 +40,10 @@ pub struct ClassifyRequest {
     pub title: String,
     pub domain: Option<String>,
     pub summary: Option<String>,
+    pub rule_category: String,
+    pub rule_confidence: f64,
     pub matched_project: Option<String>,
+    pub matched_project_confidence: u8,
     pub goals: Vec<String>,
     pub duration_seconds: i64,
     pub prev: Option<String>,
@@ -97,7 +100,13 @@ pub fn build_prompt(req: &ClassifyRequest) -> String {
     s.push_str("You classify a user's computer activity into exactly one category.\n");
     s.push_str("Return ONLY a JSON object with keys: category, productive, confidence, project, reason.\n");
     s.push_str("category must be one of: productive, study, business, neutral, distraction, recovery.\n");
-    s.push_str("productive: boolean. confidence: 0.0-1.0. project: one of the user's projects or null. reason: <= 18 words.\n\n");
+    s.push_str("productive: boolean. confidence: 0.0-1.0. project: one of the user's projects or null. reason: <= 18 words.\n");
+    s.push_str("Evidence rules:\n");
+    s.push_str("- Never choose a project from goals or neighboring activity. Use only the matched project below; if it is none, project must be null.\n");
+    s.push_str("- A goal is not evidence that the current app belongs to that goal.\n");
+    s.push_str("- Tempo itself is neutral tracking/admin time and never study or project work.\n");
+    s.push_str("- Generic Telegram/chat activity is distracting unless the title or visible text clearly shows work.\n");
+    s.push_str("- If evidence is weak, choose neutral and keep confidence at or below 0.55.\n\n");
 
     if !req.goals.is_empty() {
         s.push_str("User's projects / daily goals:\n");
@@ -119,7 +128,12 @@ pub fn build_prompt(req: &ClassifyRequest) -> String {
             s.push_str(&format!("- text summary: {}\n", truncate(sum, 400)));
         }
     }
-    s.push_str(&format!("- matched project (rule-based): {}\n", req.matched_project.as_ref().unwrap_or(&none)));
+    s.push_str(&format!("- rule category: {} ({:.0}% confidence)\n", req.rule_category, req.rule_confidence * 100.0));
+    s.push_str(&format!(
+        "- matched project (rule-based): {} ({}% confidence)\n",
+        req.matched_project.as_ref().unwrap_or(&none),
+        req.matched_project_confidence,
+    ));
     s.push_str(&format!("- duration: {}s\n", req.duration_seconds));
     s.push_str(&format!("- previous activity: {}\n", req.prev.as_ref().unwrap_or(&none)));
     s.push_str(&format!("- next activity: {}\n", req.next.as_ref().unwrap_or(&none)));
@@ -169,6 +183,61 @@ pub fn parse_and_validate(s: &str) -> Result<LlmClassification, String> {
     let reason: String = raw.reason.unwrap_or_default().trim().chars().take(200).collect();
 
     Ok(LlmClassification { category, productive, confidence, project, reason })
+}
+
+fn normalized_app(label: &str) -> String {
+    label
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+/// Enforce evidence boundaries after model output. LLM confidence is not proof:
+/// project attribution must agree with the deterministic matcher, and sparse
+/// desktop context cannot turn Tempo or Telegram into unrelated productive work.
+pub fn apply_evidence_guardrails(
+    req: &ClassifyRequest,
+    mut c: LlmClassification,
+) -> LlmClassification {
+    let model_project = c.project.take();
+    c.project = match (&req.matched_project, model_project) {
+        (Some(expected), Some(actual))
+            if req.matched_project_confidence >= projects::OVERRIDE_THRESHOLD
+                && expected.eq_ignore_ascii_case(actual.trim()) =>
+        {
+            Some(expected.clone())
+        }
+        _ => None,
+    };
+
+    let app = normalized_app(&req.label);
+    let has_visible_evidence = req.summary.as_deref().is_some_and(|s| !s.trim().is_empty());
+    let is_tempo = matches!(
+        app.as_str(),
+        "tempo" | "tempoexe" | "productivitytracker" | "productivitytrackerexe"
+    );
+    let is_telegram = matches!(app.as_str(), "telegram" | "telegramexe" | "telegramdesktop");
+
+    if is_tempo {
+        c.category = "neutral".to_string();
+        c.confidence = 0.98;
+        c.project = None;
+        c.reason = "Tempo is tracking/admin time".to_string();
+    } else if is_telegram && !has_visible_evidence && c.project.is_none() {
+        c.category = "distraction".to_string();
+        c.confidence = c.confidence.max(0.82);
+        c.reason = "Telegram without work evidence".to_string();
+    } else if !has_visible_evidence
+        && c.project.is_none()
+        && req.rule_category == "uncategorized"
+    {
+        // App + title alone can be useful, but cannot justify near-certainty.
+        c.confidence = c.confidence.min(0.70);
+    }
+
+    c.productive = crate::models::bucket_for(&c.category) == "productive";
+    c
 }
 
 // --------------------------------------------------------------- ollama calls
@@ -484,7 +553,13 @@ fn gather_work(db: &Db, max: usize) -> Result<Vec<(String, String, ClassifyReque
                 title: b.title.clone(),
                 domain: b.domain.clone(),
                 summary: b.summary.clone(),
-                matched_project: b.rule_project.clone(),
+                rule_category: b.rule_category.clone(),
+                rule_confidence: b.confidence,
+                matched_project: b
+                    .rule_project
+                    .clone()
+                    .filter(|_| b.rule_project_confidence >= projects::OVERRIDE_THRESHOLD),
+                matched_project_confidence: b.rule_project_confidence,
                 goals: goals.clone(),
                 duration_seconds: b.seconds,
                 prev,
@@ -520,7 +595,10 @@ pub fn start(db: Db) {
         for (key, day, req) in work {
             // On any error we simply don't cache => reads use rule-based.
             match classify(&oc, &req) {
-                Ok(c) => store_classification(&db, &key, &day, &c, &cfg.model),
+                Ok(c) => {
+                    let guarded = apply_evidence_guardrails(&req, c);
+                    store_classification(&db, &key, &day, &guarded, &cfg.model);
+                }
                 Err(e) => log_error(&db, Some(&key), &e),
             }
         }
@@ -541,6 +619,71 @@ mod tests {
         assert!(c.productive);
         assert!((c.confidence - 0.92).abs() < 1e-9);
         assert_eq!(c.project.as_deref(), Some("Exam studying"));
+    }
+
+    fn request(label: &str, summary: Option<&str>, matched_project: Option<&str>) -> ClassifyRequest {
+        ClassifyRequest {
+            source: "app".into(),
+            label: label.into(),
+            title: label.into(),
+            domain: None,
+            summary: summary.map(str::to_string),
+            rule_category: "uncategorized".into(),
+            rule_confidence: 0.3,
+            matched_project: matched_project.map(str::to_string),
+            matched_project_confidence: if matched_project.is_some() { 85 } else { 0 },
+            goals: vec!["Bible Reading (study)".into()],
+            duration_seconds: 20,
+            prev: None,
+            next: None,
+        }
+    }
+
+    #[test]
+    fn rejects_llm_project_without_rule_evidence() {
+        let parsed = parse_and_validate(
+            r#"{"category":"study","productive":true,"confidence":0.95,"project":"Bible Reading","reason":"goal context"}"#,
+        )
+        .unwrap();
+        let guarded = apply_evidence_guardrails(&request("Some App", None, None), parsed);
+        assert!(guarded.project.is_none());
+        assert_eq!(guarded.confidence, 0.70);
+    }
+
+    #[test]
+    fn preserves_only_the_project_the_rules_matched() {
+        let parsed = parse_and_validate(
+            r#"{"category":"business","confidence":0.88,"project":"Content Creation","reason":"editing"}"#,
+        )
+        .unwrap();
+        let guarded = apply_evidence_guardrails(
+            &request("DaVinci Resolve", None, Some("Content Creation")),
+            parsed,
+        );
+        assert_eq!(guarded.project.as_deref(), Some("Content Creation"));
+    }
+
+    #[test]
+    fn tempo_cannot_become_study_or_inherit_a_goal() {
+        let parsed = parse_and_validate(
+            r#"{"category":"study","confidence":0.95,"project":"Bible Reading","reason":"goal context"}"#,
+        )
+        .unwrap();
+        let guarded = apply_evidence_guardrails(&request("Tempo", None, None), parsed);
+        assert_eq!(guarded.category, "neutral");
+        assert!(guarded.project.is_none());
+        assert!(!guarded.productive);
+    }
+
+    #[test]
+    fn telegram_desktop_without_content_stays_distracting() {
+        let parsed = parse_and_validate(
+            r#"{"category":"productive","confidence":0.95,"project":null,"reason":"chat"}"#,
+        )
+        .unwrap();
+        let guarded = apply_evidence_guardrails(&request("Telegram Desktop", None, None), parsed);
+        assert_eq!(guarded.category, "distraction");
+        assert!(!guarded.productive);
     }
 
     #[test]

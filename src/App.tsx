@@ -81,7 +81,7 @@ export default function App() {
         {page === "outputs" && <OutputEvents />}
         {page === "projects" && <Projects />}
         {page === "categories" && <Categories />}
-        {page === "review" && <DailyReview />}
+        {page === "review" && <DailyReview onNavigate={setPage} />}
         {page === "weekly" && <WeeklyReview />}
         {page === "streaks" && <Streaks />}
         {page === "privacy" && <PrivacySettings />}

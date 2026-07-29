@@ -52,7 +52,7 @@ const KIND_OPTIONS: { value: string; label: string; hint: string }[] = [
   { value: "category", label: "Minutes in a category", hint: "met after N tracked minutes" },
   { value: "goal", label: "Main goal completed", hint: "met when the top goal is ticked" },
   { value: "block", label: "Unbroken focus block", hint: "met after one N-minute productive block" },
-  { value: "distraction", label: "No major distraction", hint: "met when no distraction block exceeds N minutes" },
+  { value: "distraction", label: "No major distraction", hint: "a day counts only when no single continuous distraction lasts N minutes; it does not require zero distractions" },
 ];
 
 function fmtDay(iso: string): string {
@@ -185,8 +185,7 @@ export default function Streaks() {
         <div className="card card-pad">
           <h2 className="card-title">Manage streaks</h2>
           <p className="card-hint">
-            Create streaks for the habits you're building, tune thresholds, or delete the ones that no longer
-            matter.
+            Create only the streaks that support your current goals. Tempo does not add generic studying, coding, or distraction streaks.
           </p>
 
           <div className="streak-add-row">
@@ -253,7 +252,7 @@ export default function Streaks() {
             <p className="muted-num" style={{ marginBottom: 0 }}>
               No streaks yet — add one above, or{" "}
               <button className="link-inline" onClick={() => run(seedDefaultStreaks)}>
-                start from the suggested set
+                add suggestions from your goals and used check-ins
               </button>
               .
             </p>
@@ -262,10 +261,18 @@ export default function Streaks() {
               {defs.map((d) => (
                 <li key={d.id} className="streak-manage-row">
                   <span className="folder-icon">{iconFor(d.id, d.kind, d.metric)}</span>
-                  <span className="streak-manage-name">
-                    {d.name}
-                    {d.daysPerWeek > 0 && <span className="streak-cadence"> {d.daysPerWeek}×/wk</span>}
-                  </span>
+                  <span className="streak-manage-name">{d.name}</span>
+                  <select
+                    className="pf-select streak-cadence-select"
+                    value={d.daysPerWeek}
+                    title="How often this streak must be met"
+                    onChange={(e) => run(() => updateStreakDefinition(d.id, { daysPerWeek: Number(e.target.value) }))}
+                  >
+                    <option value={0}>Every day</option>
+                    {[1, 2, 3, 4, 5, 6, 7].map((n) => (
+                      <option key={n} value={n}>{n}×/week</option>
+                    ))}
+                  </select>
                   {THRESHOLD_KINDS.has(d.kind) && (
                     <label className="folder-num">
                       <input
@@ -310,13 +317,13 @@ export default function Streaks() {
           <div className="empty">
             <div className="empty-glyph">🗓️</div>
             <h3>No streaks yet</h3>
-            <p>Create streaks for the habits you want to keep, or start from a suggested set.</p>
+            <p>Create a streak for a habit you deliberately want to repeat. Suggestions use only your main goal and check-ins you created or already used.</p>
             <div className="empty-actions">
               <button className="btn btn-primary" onClick={() => setManage(true)}>
                 Create a streak
               </button>
               <button className="btn" onClick={() => run(seedDefaultStreaks)}>
-                Add suggested streaks
+                Add relevant suggestions
               </button>
             </div>
           </div>

@@ -18,6 +18,8 @@ pub const COUNT_MEDIA_ACTIVE: &str = "count_media_as_active";
 pub const LLM_ENABLED: &str = "llm_enabled";
 pub const OLLAMA_URL: &str = "ollama_url";
 pub const OLLAMA_MODEL: &str = "ollama_model";
+/// One-time release initialization; the OS remains the source of truth afterwards.
+pub const LAUNCH_AT_LOGIN_INITIALIZED: &str = "launch_at_login_initialized";
 
 // Accountability.
 pub const DISTRACTION_WARN_ENABLED: &str = "distraction_warn_enabled";

@@ -5,6 +5,7 @@ import {
   getPrivacySettings,
   getTodaySummary,
   getTrackedApps,
+  getTrackedDomains,
   getWatchedFolders,
   isRemote,
   isTauri,
@@ -18,6 +19,8 @@ type SetupSnapshot = {
   goals: number;
   appsSeen: number;
   appsCategorized: number;
+  websitesSeen: number;
+  websitesCategorized: number;
   browserSamples: number;
   watchedFolders: number;
   settings: PrivacySettings | null;
@@ -27,6 +30,8 @@ const EMPTY_SNAPSHOT: SetupSnapshot = {
   goals: 0,
   appsSeen: 0,
   appsCategorized: 0,
+  websitesSeen: 0,
+  websitesCategorized: 0,
   browserSamples: 0,
   watchedFolders: 0,
   settings: null,
@@ -42,20 +47,24 @@ export default function SetupGuide({ onNavigate }: { onNavigate: (page: Page) =>
 
   const refresh = useCallback(async () => {
     setLoading(true);
-    const [goals, apps, summary, browser, folders, settings] = await Promise.all([
+    const [goals, apps, domains, summary, browser, folders, settings] = await Promise.all([
       getGoals().catch(() => []),
       getTrackedApps().catch(() => []),
+      getTrackedDomains().catch(() => []),
       getTodaySummary().catch(() => null),
       getBrowserActivity().catch(() => null),
       getWatchedFolders().catch(() => []),
       getPrivacySettings().catch(() => null),
     ]);
     const observedApps = hubDashboard && summary ? summary.perApp : apps;
+    const observedWebsites = hubDashboard && summary ? summary.perWebsite : domains;
 
     setSnapshot({
       goals: goals.length,
       appsSeen: observedApps.length,
       appsCategorized: observedApps.filter((app) => app.category !== null).length,
+      websitesSeen: observedWebsites.length,
+      websitesCategorized: observedWebsites.filter((site) => site.category !== null).length,
       browserSamples: hubDashboard && summary
         ? summary.perWebsite.length
         : browser
@@ -106,7 +115,7 @@ export default function SetupGuide({ onNavigate }: { onNavigate: (page: Page) =>
       title: "Choose today's main mission",
       detail: snapshot.goals > 0
         ? `${snapshot.goals} goal${snapshot.goals === 1 ? "" : "s"} ready for today.`
-        : "Add one clear outcome so the daily review has useful context.",
+        : "Add one clear outcome. Optionally give it a time target or an output/count target such as 1 video.",
       done: snapshot.goals > 0,
       action: "Set a goal",
       onAction: () => onNavigate("goals"),
@@ -114,19 +123,19 @@ export default function SetupGuide({ onNavigate }: { onNavigate: (page: Page) =>
     {
       title: "Let Tempo observe one minute of work",
       detail: snapshot.appsSeen > 0
-        ? `${snapshot.appsSeen} app${snapshot.appsSeen === 1 ? "" : "s"} detected.`
+        ? `${snapshot.appsSeen} app${snapshot.appsSeen === 1 ? "" : "s"}${snapshot.websitesSeen > 0 ? ` and ${snapshot.websitesSeen} website${snapshot.websitesSeen === 1 ? "" : "s"}` : ""} detected.`
         : "Use your computer normally, then refresh this check.",
       done: snapshot.appsSeen > 0,
       action: "View activity",
       onAction: () => onNavigate("timeline"),
     },
     {
-      title: "Classify the apps that matter",
-      detail: snapshot.appsCategorized > 0
-        ? `${snapshot.appsCategorized} app${snapshot.appsCategorized === 1 ? "" : "s"} classified. Tempo will reuse these rules.`
-        : "Mark your main apps as productive, neutral, distracting, or excluded.",
-      done: snapshot.appsCategorized > 0,
-      action: "Classify apps",
+      title: "Classify the apps and websites that matter",
+      detail: snapshot.appsCategorized + snapshot.websitesCategorized > 0
+        ? `${snapshot.appsCategorized} app${snapshot.appsCategorized === 1 ? "" : "s"} and ${snapshot.websitesCategorized} website${snapshot.websitesCategorized === 1 ? "" : "s"} classified. Tempo will reuse these rules.`
+        : "Use the All view to mark goal-supporting activity productive, off-task activity distracting, and necessary or ambiguous time neutral (no warning).",
+      done: snapshot.appsCategorized + snapshot.websitesCategorized > 0,
+      action: "Classify activity",
       onAction: () => onNavigate("categories"),
     },
   ];
@@ -320,13 +329,13 @@ export default function SetupGuide({ onNavigate }: { onNavigate: (page: Page) =>
           </article>
           <article>
             <span>2</span>
-            <div><b>Work</b><small>Leave Tempo running. Use Focus Mode only when you need it.</small></div>
+            <div><b>Work</b><small>Close the window when you want—Tempo keeps tracking in the tray and sends Windows nudges.</small></div>
             <button className="link-btn" onClick={() => onNavigate("focus")}>Start focus</button>
           </article>
           <article>
             <span>3</span>
-            <div><b>Correct</b><small>Fix misclassified apps once; future activity reuses the rule.</small></div>
-            <button className="link-btn" onClick={() => onNavigate("activity")}>Activity log</button>
+            <div><b>Correct</b><small>Fix misclassified apps or websites once; future activity reuses the rule.</small></div>
+            <button className="link-btn" onClick={() => onNavigate("activity")}>Classifications</button>
           </article>
           <article>
             <span>4</span>
@@ -343,7 +352,7 @@ export default function SetupGuide({ onNavigate }: { onNavigate: (page: Page) =>
         </div>
         <div>
           <h3>What still needs your input</h3>
-          <p>Offline work, your intentions, and whether an activity was genuinely useful.</p>
+          <p>Offline work, your intentions, and whether an activity was genuinely useful. A Quick Check-in logs that something happened today; it does not add tracked minutes or complete a goal.</p>
         </div>
         <button className="btn" onClick={() => openSettings("data")}>Privacy &amp; data controls</button>
       </section>

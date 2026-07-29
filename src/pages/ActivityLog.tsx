@@ -26,7 +26,7 @@ function SrcChip({ classifier }: { classifier: ActivityLogEntry["classifier"] })
 export default function ActivityLog() {
   const [entries, setEntries] = useState<ActivityLogEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [openId, setOpenId] = useState<number | null>(null);
+  const [openKey, setOpenKey] = useState<string | null>(null);
   const [filter, setFilter] = useState<Filter>("all");
   const [correctingKey, setCorrectingKey] = useState<string | null>(null);
   const [categories, setCategories] = useState<CategoryDefinition[]>([]);
@@ -62,14 +62,18 @@ export default function ActivityLog() {
     () => (entries ?? []).filter((e) => filter === "all" || e.source === filter),
     [entries, filter]
   );
+  const openActivity = useMemo(
+    () => (entries ?? []).find((entry) => entry.blockKey === openKey) ?? null,
+    [entries, openKey]
+  );
 
   return (
     <>
       <div className="page-head">
         <div>
-          <h1 className="page-title">Activity Log</h1>
+          <h1 className="page-title">Classifications</h1>
           <div className="page-subtitle">
-            Hybrid classification: rules first, local LLM only when unsure — and you can correct any block.
+            One row per captured activity pattern. Click any app or website to see why it matched and correct it; use Timeline for chronology.
           </div>
         </div>
         <div className="head-actions">
@@ -94,19 +98,18 @@ export default function ActivityLog() {
             <p>Use your computer for a bit and activity will appear here.</p>
           </div>
         ) : (
-          <table className="app-table">
+          <table className="app-table activity-table">
             <thead>
               <tr>
                 <th>Activity</th>
-                <th style={{ width: 200 }}>Project</th>
-                <th style={{ width: 190 }}>Category &amp; source</th>
-                <th className="right" style={{ width: 70 }}>Time</th>
-                <th style={{ width: 44 }}></th>
+                <th className="activity-project-col">Project</th>
+                <th className="activity-category-col">Category &amp; source</th>
+                <th className="right activity-time-col">Time</th>
+                <th className="activity-action-col"></th>
               </tr>
             </thead>
             <tbody>
               {visible.map((e) => {
-                const clickable = e.detailId != null;
                 const projConf =
                   e.classifier === "llm" && e.llmConfidence != null
                     ? Math.round(e.llmConfidence * 100)
@@ -114,8 +117,15 @@ export default function ActivityLog() {
                 return (
                   <Fragment key={e.blockKey}>
                     <tr
-                      className={clickable ? "clickable" : ""}
-                      onClick={clickable ? () => setOpenId(e.detailId) : undefined}
+                      className="clickable"
+                      tabIndex={0}
+                      onClick={() => setOpenKey(e.blockKey)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          setOpenKey(e.blockKey);
+                        }
+                      }}
                     >
                       <td>
                         <div className="app-cell">
@@ -186,7 +196,12 @@ export default function ActivityLog() {
         )}
       </div>
 
-      <ActivityDetailsDrawer id={openId} onClose={() => setOpenId(null)} onCorrected={load} />
+      <ActivityDetailsDrawer
+        id={openActivity?.detailId ?? null}
+        activity={openActivity}
+        onClose={() => setOpenKey(null)}
+        onCorrected={load}
+      />
     </>
   );
 }

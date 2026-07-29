@@ -141,8 +141,8 @@ function Head() {
   return (
     <div className="page-head">
       <div>
-        <h1 className="page-title">Browser Activity</h1>
-        <div className="page-subtitle">Websites tracked by the Tempo extension — local only</div>
+        <h1 className="page-title">Websites</h1>
+        <div className="page-subtitle">Website-only time and recent pages captured by the Tempo extension</div>
       </div>
     </div>
   );

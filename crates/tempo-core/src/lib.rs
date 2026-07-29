@@ -7,6 +7,7 @@
 //! so it cross-compiles cleanly for a headless Raspberry Pi / Docker server.
 
 pub mod aggregate;
+pub mod accountability_export;
 pub mod classify;
 pub mod db;
 pub mod events;

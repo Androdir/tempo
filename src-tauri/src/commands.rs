@@ -14,6 +14,53 @@ use crate::rules;
 use crate::scoring;
 use crate::settings;
 
+#[tauri::command]
+pub fn show_native_notification(
+    app: tauri::AppHandle,
+    title: String,
+    body: String,
+) -> Result<(), String> {
+    let title = title.trim();
+    let body = body.trim();
+    if title.is_empty() || body.is_empty() {
+        return Err("notification title and body are required".into());
+    }
+    crate::accountability::send_native_notification(&app, title, body)
+}
+
+#[tauri::command]
+pub fn get_launch_at_login(app: tauri::AppHandle) -> Result<bool, String> {
+    #[cfg(desktop)]
+    {
+        use tauri_plugin_autostart::ManagerExt;
+        return app.autolaunch().is_enabled().map_err(|e| e.to_string());
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = app;
+        Err("Launch at login is only available in the desktop app".to_string())
+    }
+}
+
+#[tauri::command]
+pub fn set_launch_at_login(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    #[cfg(desktop)]
+    {
+        use tauri_plugin_autostart::ManagerExt;
+        let manager = app.autolaunch();
+        return if enabled {
+            manager.enable().map_err(|e| e.to_string())
+        } else {
+            manager.disable().map_err(|e| e.to_string())
+        };
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = (app, enabled);
+        Err("Launch at login is only available in the desktop app".to_string())
+    }
+}
+
 /// Today's aggregated activity — desktop apps merged with browser websites.
 #[tauri::command]
 pub fn get_today_summary(db: State<'_, Db>) -> Result<TodaySummary, String> {
@@ -220,9 +267,19 @@ pub fn get_browser_activity(db: State<'_, Db>) -> Result<BrowserActivityView, St
         let extra = browser_extra(summary.as_deref(), &keywords);
         let (category, _reason, pm) =
             projects::resolve(&projects, &domain, &title, &extra, &base.category, &base.reason);
-        let project_name = pm.as_ref().map(|m| m.project_name.clone());
-        let project_confidence = pm.as_ref().map(|m| m.confidence).unwrap_or(0);
-        let project_signals = pm.map(|m| m.signals).unwrap_or_default();
+        let project_name = pm
+            .as_ref()
+            .filter(|m| m.confidence >= projects::OVERRIDE_THRESHOLD)
+            .map(|m| m.project_name.clone());
+        let project_confidence = project_name
+            .as_ref()
+            .and_then(|_| pm.as_ref().map(|m| m.confidence))
+            .unwrap_or(0);
+        let project_signals = if project_name.is_some() {
+            pm.map(|m| m.signals).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         recent_pages.push(BrowserPage {
             id,
             timestamp: ts,
@@ -308,9 +365,12 @@ pub fn get_activity_details(db: State<'_, Db>, id: i64) -> Result<ActivityDetail
         &keywords,
     );
     let key = block_key(&today(), "web", &domain, &title);
-    let rule_project = v.project.clone();
-    let project_confidence = v.project_confidence;
-    let project_signals = v.project_signals.clone();
+    let rule_project = v
+        .project
+        .clone()
+        .filter(|_| v.project_confidence >= projects::OVERRIDE_THRESHOLD);
+    let project_confidence = if rule_project.is_some() { v.project_confidence } else { 0 };
+    let project_signals = if rule_project.is_some() { v.project_signals.clone() } else { Vec::new() };
 
     // Priority: manual correction > LLM (if rules wanted review) > rules.
     let (category, classification_reason, project_name, classifier, llm_confidence) =
@@ -319,7 +379,7 @@ pub fn get_activity_details(db: State<'_, Db>, id: i64) -> Result<ActivityDetail
         } else if v.needs_llm {
             match llm_cache.get(&key) {
                 Some(c) => {
-                    let proj = c.project.clone().or(rule_project);
+                    let proj = rule_project;
                     let r = if c.reason.is_empty() {
                         format!("LLM → {}", c.category)
                     } else {
@@ -493,6 +553,121 @@ pub fn prune_old_data(db: State<'_, Db>) -> Result<i64, String> {
     crate::db::prune(&conn, days).map(|n| n as i64).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub fn list_database_backups(db: State<'_, Db>) -> Result<Vec<crate::db::BackupInfo>, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    crate::db::list_backups(&conn)
+}
+
+#[tauri::command]
+pub fn create_database_backup(db: State<'_, Db>) -> Result<crate::db::BackupInfo, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    crate::db::create_backup(&conn, false)
+}
+
+#[tauri::command]
+pub fn restore_database_backup(db: State<'_, Db>, name: String) -> Result<(), String> {
+    let mut conn = db.lock().map_err(|e| e.to_string())?;
+    crate::db::restore_backup(&mut conn, &name)?;
+    settings::ensure_defaults(&conn).map_err(|e| e.to_string())?;
+    crate::models::ensure_category_defaults(&conn).map_err(|e| e.to_string())?;
+    crate::models::ensure_checkin_defaults(&conn).map_err(|e| e.to_string())?;
+    scoring::ensure_rule_defaults(&conn).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn age_seconds(timestamp: Option<&str>) -> Option<i64> {
+    timestamp
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| (Utc::now() - value.with_timezone(&Utc)).num_seconds().max(0))
+}
+
+#[tauri::command]
+pub fn generate_accountability_export(
+    db: State<'_, Db>,
+    options: crate::accountability_export::AccountabilityExportOptions,
+) -> Result<crate::accountability_export::AccountabilityExport, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    crate::accountability_export::generate(&conn, &options)
+}
+
+#[tauri::command]
+pub fn save_accountability_export(
+    db: State<'_, Db>,
+    options: crate::accountability_export::AccountabilityExportOptions,
+) -> Result<String, String> {
+    let export = {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        crate::accountability_export::generate(&conn, &options)?
+    };
+    let directory = dirs::download_dir()
+        .or_else(dirs::document_dir)
+        .ok_or_else(|| "Could not locate your Downloads or Documents folder".to_string())?;
+    let path = crate::accountability_export::save_verified(&directory, &export)?;
+    Ok(path.to_string_lossy().to_string())
+}
+#[tauri::command]
+pub fn get_tracking_health(db: State<'_, Db>) -> Result<TrackingHealth, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    let last_desktop_at: Option<String> = conn
+        .query_row("SELECT MAX(timestamp) FROM activity_log", [], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    let last_browser_at: Option<String> = conn
+        .query_row("SELECT MAX(timestamp) FROM browser_activity", [], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    let last_screen_at: Option<String> = conn
+        .query_row("SELECT MAX(timestamp) FROM smart_activity", [], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    let latest_app: Option<String> = conn
+        .query_row(
+            "SELECT app_name FROM activity_log ORDER BY timestamp DESC, id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let browser_active = latest_app.as_deref().is_some_and(|app| {
+        let app = app.to_ascii_lowercase();
+        app.contains("chrome") || app.contains("firefox") || app.contains("edge") || app.contains("brave")
+    });
+    let browser_connected = age_seconds(last_browser_at.as_deref()).is_some_and(|age| age <= 900);
+    let smart_enabled = settings::get_bool(&conn, settings::SMART_TRACKING_ENABLED, false);
+    let pending_sync_events: i64 = conn
+        .query_row("SELECT COUNT(*) FROM sync_queue WHERE status = 'pending'", [], |row| row.get(0))
+        .unwrap_or(0);
+    let backups = crate::db::list_backups(&conn).unwrap_or_default();
+    let last_backup_at = backups.first().map(|backup| backup.created_at.clone());
+    let integrity = crate::db::integrity_check(&conn).unwrap_or_else(|e| e);
+    let database_ok = integrity == "ok";
+    let mut issues = Vec::new();
+    if !database_ok {
+        issues.push(format!("Database integrity check failed: {integrity}"));
+    }
+    match age_seconds(last_desktop_at.as_deref()) {
+        None => issues.push("Desktop tracking has not recorded a sample yet.".into()),
+        Some(age) if age > 60 => issues.push(format!("Desktop tracking is stale (last sample {} minutes ago).", (age / 60).max(1))),
+        _ => {}
+    }
+    if browser_active && !browser_connected {
+        issues.push("A browser is active, but the extension has not reported recently. Check its connection.".into());
+    }
+    if pending_sync_events > 250 {
+        issues.push(format!("{pending_sync_events} Hub events are waiting to sync."));
+    }
+    Ok(TrackingHealth {
+        status: if issues.is_empty() { "healthy".into() } else { "warning".into() },
+        checked_at: Utc::now().to_rfc3339(),
+        database_ok,
+        last_desktop_at,
+        last_browser_at,
+        last_screen_at,
+        browser_connected,
+        smart_enabled,
+        pending_sync_events,
+        last_backup_at,
+        issues,
+    })
+}
 /// Reset all user/application data while preserving the schema.
 #[tauri::command]
 pub fn reset_database(db: State<'_, Db>) -> Result<i64, String> {
@@ -514,6 +689,7 @@ pub fn reset_database(db: State<'_, Db>) -> Result<i64, String> {
         "DELETE FROM checkin_values",
         "DELETE FROM checkin_definitions",
         "DELETE FROM score_rules",
+        "DELETE FROM correction_history",
         "DELETE FROM manual_corrections",
         "DELETE FROM projects",
         "DELETE FROM smart_activity",
@@ -632,6 +808,16 @@ fn validate_project(conn: &Connection, p: &Project) -> Result<(), String> {
     if !crate::models::category_exists(conn, &p.category) {
         return Err(format!("Unknown category: {}", p.category));
     }
+    let duplicates: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM projects WHERE LOWER(name) = LOWER(?1) AND id != ?2",
+            params![p.name.trim(), p.id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if duplicates > 0 {
+        return Err("Project names must be unique so match corrections are unambiguous".into());
+    }
     Ok(())
 }
 
@@ -664,6 +850,51 @@ pub fn delete_project(db: State<'_, Db>, id: i64) -> Result<(), String> {
     projects::delete_project(&conn, id).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub fn test_project_match(
+    db: State<'_, Db>,
+    project: Project,
+    identifier: String,
+    title: String,
+    extra: String,
+) -> Result<projects::ProjectMatchTest, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    validate_project(&conn, &project)?;
+    Ok(projects::test_project_match(&project, &identifier, &title, &extra))
+}
+
+#[tauri::command]
+pub fn exclude_activity_from_project(
+    db: State<'_, Db>,
+    project_name: String,
+    source: String,
+    label: String,
+) -> Result<(), String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    let mut matches: Vec<Project> = load_projects(&conn)?
+        .into_iter()
+        .filter(|project| project.name.eq_ignore_ascii_case(project_name.trim()))
+        .collect();
+    if matches.len() != 1 {
+        return Err("Could not find one unique project to exclude this activity from".into());
+    }
+    let mut project = matches.remove(0);
+    let exclusions = if source == "web" {
+        &mut project.excluded_domains
+    } else {
+        &mut project.excluded_apps
+    };
+    let label = label.trim();
+    if label.is_empty() {
+        return Err("Activity label is required".into());
+    }
+    if !exclusions.iter().any(|item| item.eq_ignore_ascii_case(label)) {
+        exclusions.push(label.to_string());
+        projects::update_project(&conn, &project).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// Unified recent activity. Prefers the cached LLM verdict, else rule-based.
 #[tauri::command]
 pub fn get_recent_activity(db: State<'_, Db>) -> Result<Vec<ActivityLogEntry>, String> {
@@ -677,20 +908,27 @@ pub fn get_recent_activity(db: State<'_, Db>) -> Result<Vec<ActivityLogEntry>, S
     let entries = blocks
         .into_iter()
         .map(|b| {
+            let project_is_confident =
+                b.rule_project_confidence >= projects::OVERRIDE_THRESHOLD;
+            let visible_project = if project_is_confident { b.rule_project.clone() } else { None };
+            let visible_project_confidence =
+                if project_is_confident { b.rule_project_confidence } else { 0 };
+            let visible_project_signals =
+                if project_is_confident { b.rule_signals.clone() } else { Vec::new() };
             // Priority: manual correction > LLM (only if rules wanted review) > rules.
             let (category, reason, project_name, classifier, llm_confidence) =
                 if let Some(cat) = manual.get(&b.block_key) {
                     (
                         cat.clone(),
                         "manual correction".to_string(),
-                        b.rule_project.clone(),
+                        visible_project.clone(),
                         "manual".to_string(),
                         None,
                     )
                 } else if b.needs_llm {
                     match llm_cache.get(&b.block_key) {
                         Some(c) => {
-                            let proj = c.project.clone().or_else(|| b.rule_project.clone());
+                            let proj = visible_project.clone();
                             let reason = if c.reason.is_empty() {
                                 format!("LLM → {}", c.category)
                             } else {
@@ -701,7 +939,7 @@ pub fn get_recent_activity(db: State<'_, Db>) -> Result<Vec<ActivityLogEntry>, S
                         None => (
                             b.rule_category.clone(),
                             b.rule_reason.clone(),
-                            b.rule_project.clone(),
+                            visible_project.clone(),
                             "rule".to_string(),
                             None,
                         ),
@@ -710,7 +948,7 @@ pub fn get_recent_activity(db: State<'_, Db>) -> Result<Vec<ActivityLogEntry>, S
                     (
                         b.rule_category.clone(),
                         b.rule_reason.clone(),
-                        b.rule_project.clone(),
+                        visible_project.clone(),
                         "rule".to_string(),
                         None,
                     )
@@ -728,8 +966,8 @@ pub fn get_recent_activity(db: State<'_, Db>) -> Result<Vec<ActivityLogEntry>, S
                 detail_id: b.detail_id,
                 summary: b.summary,
                 project_name,
-                project_confidence: b.rule_project_confidence,
-                project_signals: b.rule_signals,
+                project_confidence: visible_project_confidence,
+                project_signals: visible_project_signals,
                 classifier,
                 llm_confidence,
                 confidence: b.confidence,
@@ -758,6 +996,27 @@ pub fn correct_activity(
     }
     let now = Utc::now().to_rfc3339();
     let day = today();
+    let previous_manual_category: Option<String> = conn
+        .query_row(
+            "SELECT category FROM manual_corrections WHERE block_key = ?1",
+            [&block_key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let previous_rule_category: Option<String> = if source == "web" {
+        conn.query_row(
+            "SELECT category FROM domain_rules WHERE domain = ?1",
+            [label.trim().to_ascii_lowercase()],
+            |row| row.get(0),
+        ).optional().map_err(|e| e.to_string())?.flatten()
+    } else {
+        conn.query_row(
+            "SELECT category FROM category_rules WHERE app_name = ?1",
+            [&label],
+            |row| row.get(0),
+        ).optional().map_err(|e| e.to_string())?
+    };
 
     conn.execute(
         "INSERT INTO manual_corrections (block_key, day, source, label, title, category, created_at)
@@ -792,6 +1051,25 @@ pub fn correct_activity(
         }
     }
 
+    conn.execute(
+        "INSERT INTO correction_history
+            (block_key, day, source, label, title, previous_manual_category,
+             previous_rule_category, new_category, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            block_key,
+            day,
+            source,
+            label,
+            title,
+            previous_manual_category,
+            previous_rule_category,
+            category,
+            now,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+
     // The manual verdict wins, so drop any cached LLM verdict for this block.
     let _ = conn.execute(
         "DELETE FROM llm_classification WHERE block_key = ?1",
@@ -801,6 +1079,94 @@ pub fn correct_activity(
     Ok(())
 }
 
+#[tauri::command]
+pub fn get_correction_history(
+    db: State<'_, Db>,
+    block_key: String,
+) -> Result<Vec<CorrectionHistoryEntry>, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(
+        "SELECT id, block_key, source, label, title, previous_manual_category,
+                previous_rule_category, new_category, created_at, undone_at
+         FROM correction_history WHERE block_key = ?1 ORDER BY id DESC LIMIT 10",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([block_key], |row| Ok(CorrectionHistoryEntry {
+        id: row.get(0)?,
+        block_key: row.get(1)?,
+        source: row.get(2)?,
+        label: row.get(3)?,
+        title: row.get(4)?,
+        previous_manual_category: row.get(5)?,
+        previous_rule_category: row.get(6)?,
+        new_category: row.get(7)?,
+        created_at: row.get(8)?,
+        undone_at: row.get(9)?,
+    })).map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn undo_correction(db: State<'_, Db>, id: i64) -> Result<(), String> {
+    let mut conn = db.lock().map_err(|e| e.to_string())?;
+    let entry = conn.query_row(
+        "SELECT block_key, day, source, label, title, previous_manual_category,
+                previous_rule_category, undone_at
+         FROM correction_history WHERE id = ?1",
+        [id],
+        |row| Ok((
+            row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<String>>(6)?, row.get::<_, Option<String>>(7)?,
+        )),
+    ).optional().map_err(|e| e.to_string())?
+        .ok_or_else(|| "correction history entry was not found".to_string())?;
+    if entry.7.is_some() {
+        return Err("this correction has already been undone".into());
+    }
+    let latest: i64 = conn.query_row(
+        "SELECT MAX(id) FROM correction_history WHERE block_key = ?1 AND undone_at IS NULL",
+        [&entry.0],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if latest != id {
+        return Err("undo the newest correction first".into());
+    }
+    let now = Utc::now().to_rfc3339();
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    if let Some(previous) = &entry.5 {
+        tx.execute(
+            "INSERT INTO manual_corrections (block_key, day, source, label, title, category, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(block_key) DO UPDATE SET category = excluded.category, created_at = excluded.created_at",
+            params![entry.0, entry.1, entry.2, entry.3, entry.4, previous, now],
+        ).map_err(|e| e.to_string())?;
+    } else {
+        tx.execute("DELETE FROM manual_corrections WHERE block_key = ?1", [&entry.0])
+            .map_err(|e| e.to_string())?;
+    }
+    if entry.2 == "web" {
+        tx.execute(
+            "UPDATE domain_rules SET category = ?2, updated_at = ?3 WHERE domain = ?1",
+            params![entry.3.trim().to_ascii_lowercase(), entry.6, now],
+        ).map_err(|e| e.to_string())?;
+    } else if let Some(previous) = &entry.6 {
+        tx.execute(
+            "INSERT INTO category_rules (app_name, category, ai_review, updated_at)
+             VALUES (?1, ?2, 0, ?3)
+             ON CONFLICT(app_name) DO UPDATE SET category = excluded.category, updated_at = excluded.updated_at",
+            params![entry.3, previous, now],
+        ).map_err(|e| e.to_string())?;
+    } else {
+        tx.execute("DELETE FROM category_rules WHERE app_name = ?1", [&entry.3])
+            .map_err(|e| e.to_string())?;
+    }
+    tx.execute("UPDATE correction_history SET undone_at = ?2 WHERE id = ?1", params![id, now])
+        .map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM llm_classification WHERE block_key = ?1", [&entry.0])
+        .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
 // --------------------------------------------------- proof-of-work timeline
 
 /// The proof-of-work timeline for a day: raw samples merged into continuous,
@@ -977,6 +1343,7 @@ pub fn update_streak_definition(
     enabled: Option<bool>,
     threshold: Option<i64>,
     name: Option<String>,
+    days_per_week: Option<i64>,
 ) -> Result<(), String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
     let now = Utc::now().to_rfc3339();
@@ -998,6 +1365,13 @@ pub fn update_streak_definition(
         conn.execute(
             "UPDATE streak_definitions SET name = ?1, updated_at = ?2 WHERE id = ?3",
             params![n.trim(), now, id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    if let Some(days) = days_per_week {
+        conn.execute(
+            "UPDATE streak_definitions SET days_per_week = ?1, updated_at = ?2 WHERE id = ?3",
+            params![days.clamp(0, 7), now, id],
         )
         .map_err(|e| e.to_string())?;
     }
@@ -1147,53 +1521,51 @@ fn normalize_priority(p: &str) -> String {
 
 fn row_to_goal(r: &rusqlite::Row) -> rusqlite::Result<Goal> {
     Ok(Goal {
-        id: r.get(0)?,
-        title: r.get(1)?,
-        project: r.get(2)?,
-        target_minutes: r.get(3)?,
-        priority: r.get(4)?,
-        completed: r.get::<_, i64>(5)? != 0,
-        recurring: r.get::<_, i64>(6)? != 0,
+        id: r.get(0)?, title: r.get(1)?, project: r.get(2)?, target_minutes: r.get(3)?,
+        target_count: r.get(4)?, target_unit: r.get(5)?, priority: r.get(6)?,
+        completed: r.get::<_, i64>(7)? != 0, recurring: r.get::<_, i64>(8)? != 0,
     })
 }
 
-/// Once per day, copy recurring goals from the most recent prior day into today
-/// (skipping titles already present), so daily habits reappear automatically.
-fn ensure_recurring_goals(conn: &Connection, day: &str) {
-    if settings::get_setting(conn, settings::RECURRING_MATERIALIZED_DAY).as_deref() == Some(day) {
-        return;
+fn normalize_goal_targets(goal: &Goal) -> Result<(Option<i64>, Option<i64>, Option<String>), String> {
+    let minutes = goal.target_minutes.filter(|m| *m > 0);
+    let count = goal.target_count.filter(|n| *n > 0);
+    let unit = goal.target_unit.as_deref().map(str::trim).filter(|u| !u.is_empty())
+        .map(|u| u.chars().take(32).collect::<String>());
+    if minutes.is_some() && count.is_some() {
+        return Err("Choose either a time target or an output/count target".into());
     }
-    let src: Option<String> = conn
-        .query_row("SELECT MAX(day) FROM goals WHERE recurring = 1 AND day < ?1", [day], |r| {
-            r.get::<_, Option<String>>(0)
-        })
-        .ok()
-        .flatten();
+    if count.is_some() && unit.is_none() {
+        return Err("Enter what the count represents, such as video or post".into());
+    }
+    Ok((minutes, count, if count.is_some() { unit } else { None }))
+}
+
+/// Once per day, copy recurring goals from the most recent prior day into today.
+fn ensure_recurring_goals(conn: &Connection, day: &str) {
+    if settings::get_setting(conn, settings::RECURRING_MATERIALIZED_DAY).as_deref() == Some(day) { return; }
+    let src: Option<String> = conn.query_row(
+        "SELECT MAX(day) FROM goals WHERE recurring = 1 AND day < ?1", [day],
+        |r| r.get::<_, Option<String>>(0),
+    ).ok().flatten();
     if let Some(src_day) = src {
-        let mut templates: Vec<(String, Option<String>, Option<i64>, String)> = Vec::new();
+        let mut templates: Vec<(String, Option<String>, Option<i64>, Option<i64>, Option<String>, String)> = Vec::new();
         if let Ok(mut stmt) = conn.prepare(
-            "SELECT title, project, target_minutes, priority FROM goals WHERE day = ?1 AND recurring = 1",
+            "SELECT title, project, target_minutes, target_count, target_unit, priority
+             FROM goals WHERE day = ?1 AND recurring = 1",
         ) {
             if let Ok(rows) = stmt.query_map([&src_day], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, Option<String>>(1)?,
-                    r.get::<_, Option<i64>>(2)?,
-                    r.get::<_, String>(3)?,
-                ))
-            }) {
-                templates = rows.filter_map(Result::ok).collect();
-            }
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+            }) { templates = rows.filter_map(Result::ok).collect(); }
         }
         let mut order = next_sort_order(conn, day);
-        for (title, project, target, priority) in templates {
-            if goal_exists(conn, day, &title) {
-                continue;
-            }
+        for (title, project, target_minutes, target_count, target_unit, priority) in templates {
+            if goal_exists(conn, day, &title) { continue; }
             let _ = conn.execute(
-                "INSERT INTO goals (day, title, project, target_minutes, priority, completed, sort_order, recurring, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, 1, ?7)",
-                params![day, title, project, target, priority, order, Utc::now().to_rfc3339()],
+                "INSERT INTO goals
+                   (day, title, project, target_minutes, target_count, target_unit, priority, completed, sort_order, recurring, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, 1, ?9)",
+                params![day, title, project, target_minutes, target_count, target_unit, priority, order, Utc::now().to_rfc3339()],
             );
             order += 1;
         }
@@ -1206,70 +1578,56 @@ pub fn get_goals(db: State<'_, Db>) -> Result<Vec<Goal>, String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
     let day = today();
     ensure_recurring_goals(&conn, &day);
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, title, project, target_minutes, priority, completed, recurring
-             FROM goals WHERE day = ?1
-             ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
-                      sort_order, id",
-        )
-        .map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(
+        "SELECT id, title, project, target_minutes, target_count, target_unit, priority, completed, recurring
+         FROM goals WHERE day = ?1
+         ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, sort_order, id",
+    ).map_err(|e| e.to_string())?;
     let rows = stmt.query_map([&day], row_to_goal).map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    for g in rows {
-        out.push(g.map_err(|e| e.to_string())?);
-    }
-    Ok(out)
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn add_goal(db: State<'_, Db>, goal: Goal) -> Result<i64, String> {
     let title = goal.title.trim();
-    if title.is_empty() {
-        return Err("Goal title is required".into());
-    }
+    if title.is_empty() { return Err("Goal title is required".into()); }
     let priority = normalize_priority(&goal.priority);
-    let project = goal.project.filter(|p| !p.trim().is_empty());
-    let target = goal.target_minutes.filter(|m| *m > 0);
+    let project = goal.project.as_deref().map(str::trim).filter(|p| !p.is_empty());
+    let (target_minutes, target_count, target_unit) = normalize_goal_targets(&goal)?;
     let conn = db.lock().map_err(|e| e.to_string())?;
     let day = today();
     let order = next_sort_order(&conn, &day);
     conn.execute(
-        "INSERT INTO goals (day, title, project, target_minutes, priority, completed, sort_order, recurring, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8)",
-        params![day, title, project, target, priority, order, goal.recurring as i64, Utc::now().to_rfc3339()],
-    )
-    .map_err(|e| e.to_string())?;
+        "INSERT INTO goals
+           (day, title, project, target_minutes, target_count, target_unit, priority, completed, sort_order, recurring, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, ?10)",
+        params![day, title, project, target_minutes, target_count, target_unit, priority, order, goal.recurring as i64, Utc::now().to_rfc3339()],
+    ).map_err(|e| e.to_string())?;
     Ok(conn.last_insert_rowid())
 }
 
 #[tauri::command]
 pub fn update_goal(db: State<'_, Db>, goal: Goal) -> Result<(), String> {
-    if goal.id <= 0 {
-        return Err("missing goal id".into());
-    }
+    if goal.id <= 0 { return Err("missing goal id".into()); }
     let title = goal.title.trim();
-    if title.is_empty() {
-        return Err("Goal title is required".into());
-    }
+    if title.is_empty() { return Err("Goal title is required".into()); }
     let priority = normalize_priority(&goal.priority);
-    let project = goal.project.filter(|p| !p.trim().is_empty());
-    let target = goal.target_minutes.filter(|m| *m > 0);
+    let project = goal.project.as_deref().map(str::trim).filter(|p| !p.is_empty());
+    let (target_minutes, target_count, target_unit) = normalize_goal_targets(&goal)?;
     let conn = db.lock().map_err(|e| e.to_string())?;
     conn.execute(
-        "UPDATE goals SET title = ?1, project = ?2, target_minutes = ?3, priority = ?4,
-                          completed = ?5, recurring = ?6 WHERE id = ?7",
-        params![title, project, target, priority, goal.completed as i64, goal.recurring as i64, goal.id],
-    )
-    .map_err(|e| e.to_string())?;
+        "UPDATE goals SET title = ?1, project = ?2, target_minutes = ?3,
+                          target_count = ?4, target_unit = ?5, priority = ?6,
+                          completed = ?7, recurring = ?8 WHERE id = ?9",
+        params![title, project, target_minutes, target_count, target_unit, priority, goal.completed as i64, goal.recurring as i64, goal.id],
+    ).map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
 pub fn toggle_goal(db: State<'_, Db>, id: i64, completed: bool) -> Result<(), String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
-    conn.execute("UPDATE goals SET completed = ?1 WHERE id = ?2", params![completed as i64, id])
-        .map_err(|e| e.to_string())?;
+    conn.execute("UPDATE goals SET completed = ?1 WHERE id = ?2", params![completed as i64, id]).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1283,68 +1641,42 @@ pub fn delete_goal(db: State<'_, Db>, id: i64) -> Result<(), String> {
 #[tauri::command]
 pub fn set_goal_recurring(db: State<'_, Db>, id: i64, recurring: bool) -> Result<(), String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
-    conn.execute("UPDATE goals SET recurring = ?1 WHERE id = ?2", params![recurring as i64, id])
-        .map_err(|e| e.to_string())?;
+    conn.execute("UPDATE goals SET recurring = ?1 WHERE id = ?2", params![recurring as i64, id]).map_err(|e| e.to_string())?;
     Ok(())
 }
 
-/// Copy the most recent prior day's goals into today (uncompleted), skipping
-/// titles already present. Returns how many were copied.
 #[tauri::command]
 pub fn copy_previous_goals(db: State<'_, Db>) -> Result<i64, String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
     let day = today();
-    let src: Option<String> = conn
-        .query_row("SELECT MAX(day) FROM goals WHERE day < ?1", [&day], |r| {
-            r.get::<_, Option<String>>(0)
-        })
-        .map_err(|e| e.to_string())?;
-    let Some(src_day) = src else {
-        return Ok(0);
-    };
-
-    let mut templates: Vec<(String, Option<String>, Option<i64>, String, i64)> = Vec::new();
+    let src: Option<String> = conn.query_row("SELECT MAX(day) FROM goals WHERE day < ?1", [&day],
+        |r| r.get::<_, Option<String>>(0)).map_err(|e| e.to_string())?;
+    let Some(src_day) = src else { return Ok(0); };
+    let mut templates: Vec<(String, Option<String>, Option<i64>, Option<i64>, Option<String>, String, i64)> = Vec::new();
     {
-        let mut stmt = conn
-            .prepare(
-                "SELECT title, project, target_minutes, priority, recurring FROM goals
-                 WHERE day = ?1 ORDER BY sort_order, id",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([&src_day], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, Option<String>>(1)?,
-                    r.get::<_, Option<i64>>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, i64>(4)?,
-                ))
-            })
-            .map_err(|e| e.to_string())?;
-        for row in rows {
-            templates.push(row.map_err(|e| e.to_string())?);
-        }
+        let mut stmt = conn.prepare(
+            "SELECT title, project, target_minutes, target_count, target_unit, priority, recurring
+             FROM goals WHERE day = ?1 ORDER BY sort_order, id",
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([&src_day], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+        }).map_err(|e| e.to_string())?;
+        for row in rows { templates.push(row.map_err(|e| e.to_string())?); }
     }
-
     let mut order = next_sort_order(&conn, &day);
     let mut count = 0i64;
-    for (title, project, target, priority, recurring) in templates {
-        if goal_exists(&conn, &day, &title) {
-            continue;
-        }
+    for (title, project, target_minutes, target_count, target_unit, priority, recurring) in templates {
+        if goal_exists(&conn, &day, &title) { continue; }
         conn.execute(
-            "INSERT INTO goals (day, title, project, target_minutes, priority, completed, sort_order, recurring, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8)",
-            params![day, title, project, target, priority, order, recurring, Utc::now().to_rfc3339()],
-        )
-        .map_err(|e| e.to_string())?;
-        order += 1;
-        count += 1;
+            "INSERT INTO goals
+               (day, title, project, target_minutes, target_count, target_unit, priority, completed, sort_order, recurring, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, ?10)",
+            params![day, title, project, target_minutes, target_count, target_unit, priority, order, recurring, Utc::now().to_rfc3339()],
+        ).map_err(|e| e.to_string())?;
+        order += 1; count += 1;
     }
     Ok(count)
 }
-
 #[tauri::command]
 pub fn set_scoring_weight(db: State<'_, Db>, id: String, weight: i64) -> Result<(), String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
@@ -1390,9 +1722,28 @@ pub fn get_daily_review(db: State<'_, Db>) -> Result<DailyAiReview, String> {
 }
 
 #[tauri::command]
-pub fn generate_daily_review(db: State<'_, Db>) -> Result<DailyAiReview, String> {
-    let conn = db.lock().map_err(|e| e.to_string())?;
-    generate_review(&conn)
+pub async fn generate_daily_review(db: State<'_, Db>) -> Result<DailyAiReview, String> {
+    // Ollama may take close to a minute. Run it off the command thread and use a
+    // separate SQLite connection so tracking and the rest of the UI stay usable.
+    let db = db.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = {
+            let conn = db.lock().map_err(|e| e.to_string())?;
+            conn.query_row(
+                "SELECT file FROM pragma_database_list WHERE name = 'main'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .map_err(|e| e.to_string())?
+        };
+        if path.trim().is_empty() {
+            return Err("Daily AI review needs a file-backed Tempo database".to_string());
+        }
+        let conn = Connection::open(path).map_err(|e| e.to_string())?;
+        generate_review(&conn)
+    })
+    .await
+    .map_err(|e| format!("daily review worker failed: {e}"))?
 }
 
 #[tauri::command]
@@ -1651,6 +2002,12 @@ mod tests {
     fn compute_stats_buckets_categories() {
         let conn = db::test_conn();
         crate::settings::ensure_defaults(&conn).unwrap();
+        for (id, metric) in [("instagram_test", "instagram"), ("youtube_test", "youtube")] {
+            crate::scoring::upsert_rule(&conn, &crate::scoring::ScoreRule {
+                id: id.into(), label: id.into(), kind: "target".into(), metric: metric.into(),
+                weight: -10, threshold: Some(1), built_in: false,
+            }).unwrap();
+        }
         set_app_rule(&conn, "code", "productive");
         ins_app(&conn, "2026-01-01", "code", "main.rs", 600, false);
         ins_web(&conn, "2026-01-01", "instagram.com", "Feed", 300);
@@ -1676,7 +2033,11 @@ mod tests {
         assert_eq!(c.values.get("wrestled").copied().unwrap_or(0), 1);
         assert_eq!(c.values.get("videos_posted").copied().unwrap_or(0), 2);
 
-        // The seeded gym rule reads gym_logged OR wrestled, so wrestling triggers it.
+        // Personal score rules are explicit; Tempo no longer assumes a fitness goal.
+        crate::scoring::upsert_rule(&conn, &crate::scoring::ScoreRule {
+            id: "gym".into(), label: "Gym / wrestling".into(), kind: "checkin".into(),
+            metric: "gym_logged,wrestled".into(), weight: 10, threshold: Some(1), built_in: false,
+        }).unwrap();
         let report = score_report_for_day(&conn, day).unwrap();
         let gym = report.lines.iter().find(|l| l.id == "gym").unwrap();
         assert!(gym.triggered);
@@ -1861,6 +2222,12 @@ mod tests {
     fn weekly_review_aggregates_and_ranks() {
         let conn = db::test_conn();
         crate::settings::ensure_defaults(&conn).unwrap();
+        for (id, metric) in [("instagram_test", "instagram"), ("youtube_test", "youtube")] {
+            crate::scoring::upsert_rule(&conn, &crate::scoring::ScoreRule {
+                id: id.into(), label: id.into(), kind: "target".into(), metric: metric.into(),
+                weight: -10, threshold: Some(1), built_in: false,
+            }).unwrap();
+        }
         set_app_rule(&conn, "code", "productive");
         ins_app(&conn, &local_day(0), "code", "x", 3600, false); // today: productive
         ins_web(&conn, &local_day(1), "instagram.com", "feed", 1800); // yesterday: distraction
@@ -2010,13 +2377,13 @@ mod tests {
     #[test]
     fn streaks_compute_consecutive_checkins() {
         let conn = db::test_conn();
-        crate::streaks::ensure_defaults(&conn).unwrap();
         crate::models::ensure_checkin_defaults(&conn).unwrap();
         for off in [0i64, 1, 2] {
             crate::models::set_checkin_value(&conn, &local_day(off), "studied", 1).unwrap();
         }
+        crate::streaks::seed_suggested(&conn).unwrap();
         let streaks = compute_streaks(&conn).unwrap();
-        let studied = streaks.iter().find(|s| s.id == "studied").unwrap();
+        let studied = streaks.iter().find(|s| s.id == "checkin_studied").unwrap();
         assert_eq!(studied.current, 3);
         assert!(studied.best >= 3);
         assert_eq!(studied.calendar.len(), STREAK_WINDOW_DAYS as usize);
@@ -2025,26 +2392,28 @@ mod tests {
     #[test]
     fn streaks_missed_day_breaks_run() {
         let conn = db::test_conn();
-        crate::streaks::ensure_defaults(&conn).unwrap();
         crate::models::ensure_checkin_defaults(&conn).unwrap();
         // studied today and 2 days ago, but NOT yesterday → current run is just today.
         for off in [0i64, 2] {
             crate::models::set_checkin_value(&conn, &local_day(off), "studied", 1).unwrap();
         }
+        crate::streaks::seed_suggested(&conn).unwrap();
         let streaks = compute_streaks(&conn).unwrap();
-        let studied = streaks.iter().find(|s| s.id == "studied").unwrap();
+        let studied = streaks.iter().find(|s| s.id == "checkin_studied").unwrap();
         assert_eq!(studied.current, 1);
     }
 
     #[test]
     fn streaks_excludes_disabled() {
         let conn = db::test_conn();
-        crate::streaks::ensure_defaults(&conn).unwrap();
+        crate::models::ensure_checkin_defaults(&conn).unwrap();
+        crate::models::set_checkin_value(&conn, &local_day(0), "gym_logged", 1).unwrap();
+        crate::streaks::seed_suggested(&conn).unwrap();
         let before = compute_streaks(&conn).unwrap().len();
-        conn.execute("UPDATE streak_definitions SET enabled = 0 WHERE id = 'gym'", []).unwrap();
+        conn.execute("UPDATE streak_definitions SET enabled = 0 WHERE id = 'checkin_gym_logged'", []).unwrap();
         let after = compute_streaks(&conn).unwrap();
         assert_eq!(after.len(), before - 1);
-        assert!(after.iter().all(|s| s.id != "gym"));
+        assert!(after.iter().all(|s| s.id != "checkin_gym_logged"));
     }
 
     #[test]

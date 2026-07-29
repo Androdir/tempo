@@ -6,13 +6,8 @@ import { formatDuration } from "../format";
 import type { CategoryDefinition, OutputEvent, TimelineBlock, TimelineDay } from "../types";
 import { outputMeta } from "./OutputEvents";
 
-const GAP_OPTIONS = [
-  { v: 60, label: "Merge gaps ≤ 1m" },
-  { v: 120, label: "Merge gaps ≤ 2m" },
-  { v: 300, label: "Merge gaps ≤ 5m" },
-  { v: 600, label: "Merge gaps ≤ 10m" },
-];
 
+type ViewMode = "overview" | "exact";
 type CatFilter = "all" | "productive" | "distraction" | "study" | "business";
 const CAT_FILTERS: { id: CatFilter; label: string }[] = [
   { id: "all", label: "All" },
@@ -42,7 +37,7 @@ function timeOf(iso: string): string {
     : d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 }
 
-/** The block's classifier, as a small chip (matches the Activity Log). */
+/** The block's classifier, as a small chip (matches the Classifications). */
 function SrcChip({ classifier }: { classifier: TimelineBlock["classifier"] }) {
   if (classifier === "llm")
     return <span className="src-chip llm" title="Classified by the local LLM">🤖 LLM</span>;
@@ -65,7 +60,8 @@ function Badges({ b }: { b: TimelineBlock }) {
 
 export default function Timeline() {
   const [day, setDay] = useState<string>(todayIso());
-  const [gap, setGap] = useState<number>(120);
+
+  const [viewMode, setViewMode] = useState<ViewMode>("overview");
   const [data, setData] = useState<TimelineDay | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [catF, setCatF] = useState<CatFilter>("all");
@@ -80,7 +76,7 @@ export default function Timeline() {
   const load = useCallback(async () => {
     try {
       const [tl, ev, cats] = await Promise.all([
-        getTimelineForDay(day, gap),
+        getTimelineForDay(day, 20),
         getOutputEvents(day),
         getCategoryDefinitions(),
       ]);
@@ -91,13 +87,13 @@ export default function Timeline() {
     } catch (e) {
       setError(String(e));
     }
-  }, [day, gap]);
+  }, [day]);
 
   useEffect(() => {
     load();
   }, [load]);
 
-  const blocks = data?.blocks ?? [];
+  const blocks = (viewMode === "overview" ? data?.overviewBlocks : data?.blocks) ?? [];
 
   const projects = useMemo(
     () => Array.from(new Set(blocks.map((b) => b.project).filter((p): p is string => !!p))).sort(),
@@ -199,10 +195,11 @@ export default function Timeline() {
   const renderBlock = (b: TimelineBlock) => {
     const meta = categoryMeta(b.category);
     const barPct = Math.max(5, Math.round((b.durationSeconds / maxDur) * 100));
-    const conf =
-      b.classifier === "llm" || b.classifier === "manual"
-        ? Math.round(b.confidence * 100)
-        : b.projectConfidence;
+    const isOverview = viewMode === "overview";
+    const displayTitle = b.idle ? "Idle / away" : isOverview ? b.project || b.label : b.title || b.label;
+    // Category confidence and project confidence are different signals. The
+    // project chip must show only the deterministic project-match confidence.
+    const conf = b.projectConfidence;
     return (
       <Fragment key={b.blockKey + b.start}>
         <div className={`tl-row ${b.idle ? "idle" : ""}`}>
@@ -224,31 +221,41 @@ export default function Timeline() {
             <div className="tl-main">
               <AppGlyph name={b.label} />
               <div className="tl-info">
-                <div className="tl-title ellip">{b.idle ? "Idle / away" : b.title || b.label}</div>
+                <div className="tl-title ellip">{displayTitle}</div>
                 <div className="tl-sub muted-num ellip">
-                  <span className="src-tag">{SOURCE_LABEL[b.source] ?? b.source}</span>
+                  {!isOverview && <span className="src-tag">{SOURCE_LABEL[b.source] ?? b.source}</span>}
                   {b.label} · {timeOf(b.start)}–{timeOf(b.end)}
-                  {b.sampleCount > 1 ? ` · ${b.sampleCount} samples` : ""}
+                  {!isOverview && b.sampleCount > 1 ? ` · ${b.sampleCount} samples` : ""}
                 </div>
-                {b.summary && <div className="tl-summary ellip">{b.summary}</div>}
+                {!isOverview && b.summary && <div className="tl-summary ellip">{b.summary}</div>}
                 <div className="tl-badges">
                   <Badges b={b} />
+                  {isOverview && b.absorbedCount > 0 && (
+                    <span
+                      className="tl-badge smooth"
+                      title={`${b.absorbedCount} brief switch${b.absorbedCount === 1 ? "" : "es"} (${formatDuration(b.absorbedSeconds)}) kept in Exact view`}
+                    >
+                      ↪ {formatDuration(b.absorbedSeconds)} brief switch ignored
+                    </span>
+                  )}
                 </div>
               </div>
               <div className="tl-right">
-                {b.project && <ProjectTag name={b.project} confidence={conf} />}
+                {!isOverview && b.project && <ProjectTag name={b.project} confidence={conf} />}
                 <CategoryBadge category={b.category} />
-                <SrcChip classifier={b.classifier} />
-                <button
-                  className="icon-btn"
-                  title="Correct classification"
-                  onClick={() => setCorrectingKey(correctingKey === b.blockKey ? null : b.blockKey)}
-                >
-                  ✎
-                </button>
+                {!isOverview && <SrcChip classifier={b.classifier} />}
+                {!isOverview && (
+                  <button
+                    className="icon-btn"
+                    title="Correct classification"
+                    onClick={() => setCorrectingKey(correctingKey === b.blockKey ? null : b.blockKey)}
+                  >
+                    ✎
+                  </button>
+                )}
               </div>
             </div>
-            {correctingKey === b.blockKey && (
+            {!isOverview && correctingKey === b.blockKey && (
               <div className="correct-bar tl-correct">
                 <span className="correct-label">Mark as</span>
                 {categories.map((c) => (
@@ -272,12 +279,25 @@ export default function Timeline() {
     <>
       <div className="page-head">
         <div>
-          <h1 className="page-title">Proof-of-Work Timeline</h1>
+          <h1 className="page-title">Activity</h1>
           <div className="page-subtitle">
-            The real flow of your day — continuous blocks, so you can tell genuine work from just feeling busy.
+            {viewMode === "overview"
+              ? "Meaningful runs of work, without a one-sample accidental switch breaking your flow."
+              : "Every captured app and website switch, with full classification details."}
           </div>
         </div>
         <div className="head-actions tl-controls">
+          <div className="segmented" aria-label="Activity detail level">
+            <button
+              className={viewMode === "overview" ? "on" : ""}
+              onClick={() => { setViewMode("overview"); setCorrectingKey(null); }}
+            >
+              Overview{data ? ` (${data.overviewBlocks.length})` : ""}
+            </button>
+            <button className={viewMode === "exact" ? "on" : ""} onClick={() => setViewMode("exact")}>
+              Exact{data ? ` (${data.blocks.length})` : ""}
+            </button>
+          </div>
           <input
             type="date"
             className="tl-date"
@@ -285,11 +305,7 @@ export default function Timeline() {
             max={todayIso()}
             onChange={(e) => setDay(e.target.value || todayIso())}
           />
-          <select className="pf-select" value={gap} onChange={(e) => setGap(Number(e.target.value))}>
-            {GAP_OPTIONS.map((g) => (
-              <option key={g.v} value={g.v}>{g.label}</option>
-            ))}
-          </select>
+
         </div>
       </div>
 
@@ -299,7 +315,18 @@ export default function Timeline() {
         <div className="card"><div className="loading">Loading timeline…</div></div>
       ) : (
         <>
-          <div className="stat-row">
+          {viewMode === "overview" && (
+            <div className="tl-mode-note" role="note">
+              Showing {data.overviewBlocks.length} meaningful runs from {data.blocks.length} exact runs. Overview ignores only an accidental detour of 20 seconds or less when the same activity resumes immediately. Exact data and totals are unchanged.
+            </div>
+          )}
+          {viewMode === "exact" && (
+            <div className="tl-mode-note" role="note">
+              Exact groups consecutive 10-second samples of the same activity into a run, but does not join them across a longer gap. Use Classifications to audit or correct a category.
+            </div>
+          )}
+
+          <div className="stat-grid">
             <StatCard
               label="Active time"
               value={formatDuration(data.activeSeconds)}
@@ -324,7 +351,7 @@ export default function Timeline() {
 
           {hasOutputs ? (
             <div className="card card-pad tl-outputs">
-              <span className="tl-outputs-title">📤 Outputs today</span>
+              <span className="tl-outputs-title">✓ Logged today</span>
               {data.outputs.map((c) => (
                 <span key={c.id} className="tl-out-chip on">
                   {c.icon} {c.kind === "counter" && c.value > 1 ? `${c.label} ×${c.value}` : c.label}

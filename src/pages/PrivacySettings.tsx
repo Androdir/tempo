@@ -1,37 +1,58 @@
 import { useCallback, useEffect, useState } from "react";
 import {
+  createDatabaseBackup,
+  generateAccountabilityExport,
   deleteAllCapturedContent,
   deleteDomainRule,
   getAccountabilitySettings,
   getCategoryDefinitions,
+  getTrackingHealth,
+  listDatabaseBackups,
   getDomainRules,
   getLlmSettings,
   getPrivacySettings,
+  getLaunchAtLogin,
   isTauri,
   pruneOldData,
   purgeRawContent,
   resetDatabase,
+  restoreDatabaseBackup,
+  saveAccountabilityExport,
   setAccountabilitySetting,
   setDomainRule,
   setLlmSetting,
   setPrivacySetting,
+  setLaunchAtLogin,
   testOllamaConnection,
 } from "../api";
 import { previewToast } from "../components/AccountabilityLayer";
 import SyncSettings from "../components/SyncSettings";
 import { CAPTURE_MODE_META, captureModeMeta } from "../categories";
 import type {
+  AccountabilityExportOptions,
   AccountabilitySettings,
   CaptureMode,
   Category,
   CategoryDefinition,
+  DatabaseBackup,
   DomainRule,
   LlmSettings,
   OllamaTestResult,
   PrivacySettings as Settings,
+  TrackingHealth,
 } from "../types";
 
 const CAPTURE_MODES: CaptureMode[] = ["text", "meta", "never"];
+function localIsoDate(date = new Date()): string {
+  const shifted = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return shifted.toISOString().slice(0, 10);
+}
+
+function rangeStart(days: number): string {
+  const date = new Date();
+  date.setDate(date.getDate() - Math.max(0, days - 1));
+  return localIsoDate(date);
+}
 
 type SettingsSection = "tracking" | "content" | "connections" | "data";
 
@@ -49,7 +70,19 @@ export default function PrivacySettings() {
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [resetting, setResetting] = useState(false);
+  const [backups, setBackups] = useState<DatabaseBackup[]>([]);
+  const [health, setHealth] = useState<TrackingHealth | null>(null);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [launchAtLogin, setLaunchAtLoginState] = useState<boolean | null>(null);
   const [section, setSection] = useState<SettingsSection>(initialSettingsSection);
+  const [exportStart, setExportStart] = useState(() => rangeStart(7));
+  const [exportEnd, setExportEnd] = useState(() => localIsoDate());
+  const [exportNames, setExportNames] = useState(true);
+  const [exportTitles, setExportTitles] = useState(false);
+  const [exportNotes, setExportNotes] = useState(false);
+  const [exportRaw, setExportRaw] = useState(false);
+  const [exportBusy, setExportBusy] = useState<"copy" | "save" | null>(null);
+  const [exportResult, setExportResult] = useState<string | null>(null);
 
   useEffect(() => {
     window.sessionStorage.removeItem("tempo_settings_section");
@@ -75,12 +108,15 @@ export default function PrivacySettings() {
 
   const load = useCallback(async () => {
     try {
-      const [s, r, l, a, c] = await Promise.all([
+      const [s, r, l, a, c, startup, backupRows, healthStatus] = await Promise.all([
         getPrivacySettings(),
         getDomainRules(),
         getLlmSettings(),
         getAccountabilitySettings(),
         getCategoryDefinitions(),
+        getLaunchAtLogin(),
+        listDatabaseBackups(),
+        getTrackingHealth(),
       ]);
       setSettings(s);
       setMaxLen(String(s.maxTextLength));
@@ -89,6 +125,9 @@ export default function PrivacySettings() {
       setIdleThreshold(String(s.idleThresholdSeconds));
       setRules(r);
       setCategories(c);
+      setLaunchAtLoginState(startup);
+      setBackups(backupRows);
+      setHealth(healthStatus);
       setLlm(l);
       setLlmUrl(l.url);
       setLlmModel(l.model);
@@ -109,6 +148,16 @@ export default function PrivacySettings() {
     setStatus(m);
     window.setTimeout(() => setStatus(null), 2500);
   };
+
+  async function toggleLaunchAtLogin(value: boolean) {
+    try {
+      await setLaunchAtLogin(value);
+      setLaunchAtLoginState(await getLaunchAtLogin());
+      flash(value ? "Tempo will launch at login" : "Launch at login disabled");
+    } catch (e) {
+      setError(String(e));
+    }
+  }
 
   async function toggle(key: string, value: boolean) {
     try {
@@ -266,6 +315,32 @@ export default function PrivacySettings() {
     flash(`Cleared content from ${n} row(s)`);
   }
 
+  async function makeBackup() {
+    setBackupBusy(true);
+    try {
+      const backup = await createDatabaseBackup();
+      await load();
+      flash(`Backup created: ${backup.name}`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBackupBusy(false);
+    }
+  }
+
+  async function restoreBackup(backup: DatabaseBackup) {
+    if (!confirm(`Restore “${backup.name}”? Tempo will first preserve the current database as a new manual backup, then replace current data.`)) return;
+    setBackupBusy(true);
+    try {
+      await restoreDatabaseBackup(backup.name);
+      await load();
+      flash("Backup restored. Reloading current data…");
+      window.setTimeout(() => window.location.reload(), 700);
+    } catch (e) {
+      setError(String(e));
+      setBackupBusy(false);
+    }
+  }
   async function onResetDatabase() {
     if (!isTauri()) {
       flash("Database reset is available in the desktop app");
@@ -289,6 +364,45 @@ export default function PrivacySettings() {
     navigator.clipboard?.writeText(text).then(() => flash(`${label} copied`)).catch(() => {});
   }
 
+  function exportOptions(): AccountabilityExportOptions {
+    return { startDate: exportStart, endDate: exportEnd, includeActivityNames: exportNames,
+      includeTitles: exportTitles, includeNotes: exportNotes, includeRawText: exportRaw };
+  }
+
+  function setExportPreset(days: number) {
+    setExportStart(rangeStart(days));
+    setExportEnd(localIsoDate());
+    setExportResult(null);
+  }
+
+  async function copyAccountabilityReport() {
+    setExportBusy("copy"); setExportResult(null);
+    try {
+      const report = await generateAccountabilityExport(exportOptions());
+      await navigator.clipboard.writeText(report.markdown);
+      setExportResult(`Copied ${report.dayCount}-day report. Paste it into ChatGPT.`);
+      flash("Accountability report copied");
+    } catch (e) { setError(String(e)); } finally { setExportBusy(null); }
+  }
+
+  async function saveAccountabilityReport() {
+    setExportBusy("save"); setExportResult(null);
+    try {
+      const options = exportOptions();
+      const nativePath = await saveAccountabilityExport(options);
+      if (nativePath) {
+        setExportResult(`Saved and verified: ${nativePath}`);
+        flash("Accountability report saved");
+      } else {
+        const report = await generateAccountabilityExport(options);
+        const url = URL.createObjectURL(new Blob([report.markdown], { type: "text/markdown;charset=utf-8" }));
+        const link = document.createElement("a");
+        link.href = url; link.download = report.filename; document.body.appendChild(link); link.click(); link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+        setExportResult(`Downloaded ${report.filename}`); flash("Accountability report downloaded");
+      }
+    } catch (e) { setError(String(e)); } finally { setExportBusy(null); }
+  }
   function selectSection(next: SettingsSection) {
     setSection(next);
     window.requestAnimationFrame(() => {
@@ -340,13 +454,30 @@ export default function PrivacySettings() {
         <SyncSettings />
       </div>
 
+      {launchAtLogin !== null && (
+        <div className="card card-pad" hidden={section !== "tracking"}>
+          <h2 className="card-title">Startup & background</h2>
+          <p className="card-hint">
+            Keep tracking automatic without putting a window in your way. Closing Tempo still sends
+            it to the system tray; use the tray menu when you want to quit completely.
+          </p>
+          <SettingRow
+            label="Launch at Windows login"
+            hint="Starts hidden in the system tray so tracking begins automatically after you sign in."
+          >
+            <Switch checked={launchAtLogin} onChange={toggleLaunchAtLogin} />
+          </SettingRow>
+        </div>
+      )}
+
       {/* Accountability */}
       {acct && (
         <div className="card card-pad" hidden={section !== "tracking"}>
           <h2 className="card-title">Accountability</h2>
           <p className="card-hint">
-            Local nudges only — distraction warnings and the end-of-day popup fire as desktop
-            notifications from this device. Nothing is uploaded.
+            Local nudges only — distraction warnings and the end-of-day review appear as Windows
+            notifications even while Tempo is in the tray. The in-app banner keeps quick actions
+            available when Tempo is open. Nothing is uploaded.
           </p>
           <SettingRow
             label="Distraction warnings"
@@ -400,7 +531,7 @@ export default function PrivacySettings() {
               </button>
             </span>
           </SettingRow>
-          <SettingRow label="Preview" hint="See what a distraction nudge looks like.">
+          <SettingRow label="Preview" hint="Send a Windows notification and show its in-app actions.">
             <button
               className="btn"
               onClick={() =>
@@ -532,13 +663,22 @@ export default function PrivacySettings() {
       {/* Storage */}
       <div className="card card-pad section-gap" hidden={section !== "content"}>
         <h2 className="card-title">What gets stored</h2>
-        <p className="card-hint">Summaries &amp; keywords are kept; raw text is optional.</p>
-        <SettingRow label="Store raw text excerpt" hint="Keep the raw extracted text (off = summary + keywords only).">
+        <p className="card-hint">
+          Normal tracking only needs the page title, summary and keywords. Leave raw text off unless you are debugging why a page was classified a certain way.
+        </p>
+        <SettingRow
+          label="Keep page-text excerpt (debugging only)"
+          hint={
+            settings.deleteRawAfterClassification
+              ? "Raw text is currently discarded after classification, so no excerpt will remain."
+              : "Shows the exact captured visible-text excerpt in Activity details so you can audit a bad classification."
+          }
+        >
           <Switch checked={settings.storeRawText} onChange={(v) => toggle("store_raw_text", v)} />
         </SettingRow>
         <SettingRow
           label="Delete raw text after classification"
-          hint="Discard raw text once keywords/summary are derived."
+          hint="Recommended. Use page text temporarily to derive a summary and keywords, then discard the original excerpt."
         >
           <Switch
             checked={settings.deleteRawAfterClassification}
@@ -705,6 +845,68 @@ export default function PrivacySettings() {
         </SettingRow>
       </div>
 
+      <div className="card card-pad section-gap accountability-export" hidden={section !== "data"}>
+        <div className="settings-card-head">
+          <div>
+            <h2 className="card-title">Accountability export</h2>
+            <p className="card-hint">Create a compact, ChatGPT-ready report that exposes time leaks, fragmented work, missed goals and output patterns. Nothing is uploaded by Tempo.</p>
+          </div>
+          <span className="health-pill">Local report</span>
+        </div>
+        <div className="export-presets" aria-label="Quick date ranges">
+          {[7, 14, 30, 90].map((days) => <button className="btn" key={days} onClick={() => setExportPreset(days)}>Last {days} days</button>)}
+        </div>
+        <div className="export-date-grid">
+          <label><span>From</span><input className="search" type="date" value={exportStart} max={exportEnd} onChange={(e) => { setExportStart(e.target.value); setExportResult(null); }} /></label>
+          <label><span>To</span><input className="search" type="date" value={exportEnd} min={exportStart} max={localIsoDate()} onChange={(e) => { setExportEnd(e.target.value); setExportResult(null); }} /></label>
+        </div>
+        <div className="export-privacy-grid">
+          <label><input type="checkbox" checked={exportNames} onChange={(e) => setExportNames(e.target.checked)} /> Include app and website names</label>
+          <label><input type="checkbox" checked={exportTitles} onChange={(e) => setExportTitles(e.target.checked)} /> Include window/page title samples</label>
+          <label><input type="checkbox" checked={exportNotes} onChange={(e) => setExportNotes(e.target.checked)} /> Include private daily notes</label>
+          <label className={exportRaw ? "sensitive-option selected" : "sensitive-option"}><input type="checkbox" checked={exportRaw} onChange={(e) => setExportRaw(e.target.checked)} /> Include raw captured text samples</label>
+        </div>
+        <p className="export-privacy-note">Titles, notes and raw text are excluded by default because they can contain private chats or client information. URLs, file paths, tokens and secrets are never included. Review the file before sharing it.</p>
+        {exportRaw && <div className="health-issue">Raw text is high-sensitivity. Only enable it when you genuinely need classification context.</div>}
+        <div className="export-actions">
+          <button className="btn btn-primary" onClick={saveAccountabilityReport} disabled={exportBusy !== null || !exportStart || !exportEnd}>{exportBusy === "save" ? "Building report…" : isTauri() ? "Save .md to Downloads" : "Download .md report"}</button>
+          <button className="btn" onClick={copyAccountabilityReport} disabled={exportBusy !== null || !exportStart || !exportEnd}>{exportBusy === "copy" ? "Copying…" : "Copy for ChatGPT"}</button>
+        </div>
+        {exportResult && <div className="export-result" role="status">{exportResult}</div>}
+        <p className="card-hint export-hint">The report includes a suggested “brutally honest accountability coach” prompt, but tells the AI not to invent conclusions from missing or uncertain tracking.</p>
+      </div>
+      <div className="card card-pad section-gap" hidden={section !== "data"}>
+        <div className="settings-card-head">
+          <div>
+            <h2 className="card-title">Database safety</h2>
+            <p className="card-hint">Tempo verifies SQLite integrity and keeps up to seven automatic daily backups before startup migrations.</p>
+          </div>
+          <span className={`health-pill ${health?.status ?? "warning"}`}>
+            {!isTauri() ? "Desktop app only" : health?.databaseOk ? "Database healthy" : "Check required"}
+          </span>
+        </div>
+        {health?.issues.map((issue) => <div className="health-issue" key={issue}>{issue}</div>)}
+        <div className="backup-actions">
+          <button className="btn btn-primary" onClick={makeBackup} disabled={!isTauri() || backupBusy}>
+            {backupBusy ? "Working…" : "Back up now"}
+          </button>
+          {health?.lastBackupAt && <span className="muted-num">Latest: {new Date(health.lastBackupAt).toLocaleString()}</span>}
+          {!isTauri() && <span className="muted-num">Open the desktop app to create or restore a manual backup. Automatic startup backups also run on the Hub.</span>}
+        </div>
+        {backups.length > 0 && (
+          <div className="backup-list">
+            {backups.map((backup) => (
+              <div className="backup-row" key={backup.name}>
+                <div>
+                  <strong>{backup.automatic ? "Automatic" : "Manual"}</strong>
+                  <span>{new Date(backup.createdAt).toLocaleString()} · {(backup.bytes / 1024 / 1024).toFixed(1)} MB</span>
+                </div>
+                <button className="btn" onClick={() => restoreBackup(backup)} disabled={backupBusy}>Restore</button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
       {/* Data retention */}
       <div className="card card-pad section-gap" hidden={section !== "data"}>
         <h2 className="card-title">Data retention</h2>

@@ -190,6 +190,56 @@ export interface ScoreRule {
   builtIn: boolean;
 }
 
+export interface CorrectionHistoryEntry {
+  id: number;
+  blockKey: string;
+  source: string;
+  label: string;
+  title: string;
+  previousManualCategory: string | null;
+  previousRuleCategory: string | null;
+  newCategory: string;
+  createdAt: string;
+  undoneAt: string | null;
+}
+export interface AccountabilityExportOptions {
+  startDate: string;
+  endDate: string;
+  includeActivityNames: boolean;
+  includeTitles: boolean;
+  includeRawText: boolean;
+  includeNotes: boolean;
+}
+
+export interface AccountabilityExport {
+  filename: string;
+  markdown: string;
+  startDate: string;
+  endDate: string;
+  dayCount: number;
+  trackedDays: number;
+  activeSeconds: number;
+}
+export interface DatabaseBackup {
+  name: string;
+  createdAt: string;
+  bytes: number;
+  automatic: boolean;
+}
+
+export interface TrackingHealth {
+  status: "healthy" | "warning";
+  checkedAt: string;
+  databaseOk: boolean;
+  lastDesktopAt: string | null;
+  lastBrowserAt: string | null;
+  lastScreenAt: string | null;
+  browserConnected: boolean;
+  smartEnabled: boolean;
+  pendingSyncEvents: number;
+  lastBackupAt: string | null;
+  issues: string[];
+}
 export interface Project {
   id: number;
   name: string;
@@ -197,7 +247,17 @@ export interface Project {
   keywords: string[];
   apps: string[];
   domains: string[];
+  excludedApps: string[];
+  excludedDomains: string[];
+  excludedKeywords: string[];
   priority: number;
+}
+
+export interface ProjectMatchTest {
+  status: "assigned" | "candidate" | "no_match" | "excluded";
+  confidence: number;
+  signals: string[];
+  explanation: string;
 }
 
 export type Priority = "low" | "medium" | "high";
@@ -208,6 +268,8 @@ export interface Goal {
   title: string;
   project: string | null;
   targetMinutes: number | null;
+  targetCount: number | null;
+  targetUnit: string | null;
   priority: Priority;
   completed: boolean;
   recurring: boolean;
@@ -218,6 +280,8 @@ export interface GoalDraft {
   title: string;
   project: string | null;
   targetMinutes: number | null;
+  targetCount: number | null;
+  targetUnit: string | null;
   priority: Priority;
   recurring: boolean;
 }
@@ -447,6 +511,9 @@ export interface TimelineBlock {
   blockKey: string;
   isWeb: boolean;
   sampleCount: number;
+  /** Brief intervening activity hidden inside this block in Overview mode. */
+  absorbedSeconds: number;
+  absorbedCount: number;
   longestProductive: boolean;
   biggestDistraction: boolean;
   firstProductive: boolean;
@@ -457,7 +524,10 @@ export interface TimelineBlock {
 export interface TimelineDay {
   day: string;
   maxGapSeconds: number;
+  /** Exact activity blocks, preserving every captured switch. */
   blocks: TimelineBlock[];
+  /** Low-noise blocks with brief A → B → A switches absorbed into A. */
+  overviewBlocks: TimelineBlock[];
   /** Self-reported check-ins logged for the day (value > 0). */
   outputs: CheckinValue[];
   activeSeconds: number;

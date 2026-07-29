@@ -8,7 +8,7 @@ description = "GUI-free shared logic for Tempo (DB, models, scoring, aggregation
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 chrono = { version = "0.4", features = ["clock"] }
 # Local-only HTTP client for Ollama (cross-platform, ARM-friendly).
 ureq = { version = "2", features = ["json"] }

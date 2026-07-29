@@ -12,12 +12,28 @@ use rusqlite::Connection;
 use serde::Serialize;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
+use tauri_plugin_notification::NotificationExt;
 
 const TICK: Duration = Duration::from_secs(10);
 /// A sample older than this means we don't know the current foreground → reset.
 const FRESH_SECS: i64 = 30;
 /// Minimum gap between focus-violation nudges, so they don't spam.
 const FOCUS_WARN_COOLDOWN_SECS: i64 = 60;
+
+/// Send a real OS notification. The caller still emits an in-app event so the
+/// open window can offer richer actions such as Snooze and "It's intentional".
+pub fn send_native_notification(
+    app: &AppHandle,
+    title: &str,
+    body: &str,
+) -> Result<(), String> {
+    app.notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show()
+        .map_err(|e| e.to_string())
+}
 
 // --------------------------------------------------------------- event payloads
 
@@ -381,6 +397,11 @@ pub fn start(db: Db, app: AppHandle) {
                     Alert::Distraction { label, key, minutes } => {
                         let message =
                             format!("You've been on {label} for {minutes} minutes. Still intentional?");
+                        let _ = send_native_notification(
+                            &app,
+                            "Tempo · Distraction check",
+                            &message,
+                        );
                         let _ = app.emit(
                             "distraction-warning",
                             DistractionPayload { label, key, minutes, message },
@@ -389,6 +410,8 @@ pub fn start(db: Db, app: AppHandle) {
                     Alert::FocusViolation { label } => {
                         let message =
                             format!("{label} isn't part of your focus session. Back to it?");
+                        let _ =
+                            send_native_notification(&app, "Tempo · Focus mode", &message);
                         let _ = app.emit(
                             "focus-violation",
                             FocusViolationPayload { label, goal: focus_goal.clone(), message },
@@ -397,6 +420,11 @@ pub fn start(db: Db, app: AppHandle) {
                 }
             }
             if eod_due {
+                let _ = send_native_notification(
+                    &app,
+                    "Tempo · End-of-day review",
+                    "Your daily review is ready. Open Tempo to see it.",
+                );
                 let _ = app.emit("daily-review-due", ());
             }
         }

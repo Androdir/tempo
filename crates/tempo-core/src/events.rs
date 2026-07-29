@@ -254,6 +254,8 @@ fn apply_to_domain(conn: &Connection, e: &SyncEvent) -> rusqlite::Result<()> {
                 let completed = e.m_bool("completed") as i64;
                 let priority = e.m_str("priority").unwrap_or_else(|| "medium".into());
                 let target = e.m_i64("targetMinutes");
+                let target_count = e.m_i64("targetCount");
+                let target_unit = e.m_str("targetUnit");
                 // Upsert by (day, title) so completion/edits from another device sync,
                 // not just first-time creation.
                 let existing: Option<i64> = conn
@@ -265,8 +267,9 @@ fn apply_to_domain(conn: &Connection, e: &SyncEvent) -> rusqlite::Result<()> {
                     .ok();
                 if let Some(id) = existing {
                     conn.execute(
-                        "UPDATE goals SET completed = ?1, priority = ?2, target_minutes = ?3 WHERE id = ?4",
-                        params![completed, priority, target, id],
+                        "UPDATE goals SET completed = ?1, priority = ?2, target_minutes = ?3,
+                                          target_count = ?4, target_unit = ?5, project = ?6 WHERE id = ?7",
+                        params![completed, priority, target, target_count, target_unit, e.project, id],
                     )?;
                 } else {
                     let order: i64 = conn
@@ -277,9 +280,10 @@ fn apply_to_domain(conn: &Connection, e: &SyncEvent) -> rusqlite::Result<()> {
                         )
                         .unwrap_or(0);
                     conn.execute(
-                        "INSERT INTO goals (day, title, project, target_minutes, priority, completed, sort_order, recurring, created_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8)",
-                        params![e.day, title, e.project, target, priority, completed, order, e.timestamp],
+                        "INSERT INTO goals
+                           (day, title, project, target_minutes, target_count, target_unit, priority, completed, sort_order, recurring, created_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10)",
+                        params![e.day, title, e.project, target, target_count, target_unit, priority, completed, order, e.timestamp],
                     )?;
                 }
             }

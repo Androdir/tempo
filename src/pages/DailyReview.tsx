@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { generateDailyReview, getDailyReview, setDailyNote } from "../api";
 import { LockinPlanCard } from "../components/LockinPlan";
+import type { Page } from "../components/Sidebar";
 import { formatLongDate } from "../format";
 import type { DailyAiReview } from "../types";
 
-export default function DailyReview() {
+export default function DailyReview({ onNavigate }: { onNavigate: (page: Page) => void }) {
   const [review, setReview] = useState<DailyAiReview | null>(null);
   const [notes, setNotes] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -73,9 +74,12 @@ export default function DailyReview() {
           <span className={`src-chip ${r.source === "llm" ? "llm" : "rule"}`}>
             {r.source === "llm" ? `🤖 Local LLM${r.model ? ` · ${r.model}` : ""}` : "rule-based"}
           </span>
-          <button className="btn btn-primary" onClick={generate} disabled={generating}>
-            {generating ? "Thinking…" : r.generatedAt ? "Regenerate" : "Generate with AI"}
-          </button>
+          <div className="review-generate-action">
+            <button className="btn btn-primary" onClick={generate} disabled={generating}>
+              {generating ? "Generating locally…" : r.generatedAt ? "Regenerate" : "Generate with AI"}
+            </button>
+            {generating && <span className="muted-num" role="status">Tempo stays usable; Ollama can take up to a minute.</span>}
+          </div>
         </div>
         <p className="review-verdict">{r.verdict}</p>
         {r.roast && <p className="review-roast">🔥 {r.roast}</p>}
@@ -103,12 +107,17 @@ export default function DailyReview() {
               </li>
             ))}
           </ul>
+          <div className="review-actions">
+            <button className="btn" onClick={() => onNavigate("activity")}>Review activity matches</button>
+            <button className="btn" onClick={() => onNavigate("categories")}>Adjust rules</button>
+          </div>
         </div>
       </div>
 
       <div className="card card-pad section-gap tomorrow-card">
         <h2 className="card-title">🎯 One goal for tomorrow</h2>
         <p className="tomorrow-text">{r.tomorrow}</p>
+        <button className="btn btn-primary" onClick={() => onNavigate("goals")}>Turn this into a mission</button>
       </div>
 
       <div className="card card-pad section-gap">
@@ -120,7 +129,7 @@ export default function DailyReview() {
           value={notes}
           onChange={(e) => setNotes(e.target.value)}
           onBlur={saveNote}
-          placeholder="e.g. slow after lunch, gym at 6, shipped the editor feature, slept badly"
+          placeholder="e.g. slow after lunch, gym at 6, exported the first cut, slept badly"
         />
       </div>
 

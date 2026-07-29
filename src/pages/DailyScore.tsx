@@ -4,6 +4,7 @@ import {
   getCategoryDefinitions,
   getCheckinDefinitions,
   getDailyScore,
+  getScoreRules,
   resetScoringWeights,
   setScoringThreshold,
   setScoringWeight,
@@ -35,10 +36,11 @@ const VERDICT_LABEL: Record<string, string> = {
   cooked: "Fresh start tomorrow",
 };
 
-const RULE_KIND_OPTIONS: { value: ScoreRuleKind; label: string; needsMetric: "checkin" | "category" | "text" | "none"; hasThreshold: boolean }[] = [
+const RULE_KIND_OPTIONS: { value: ScoreRuleKind; label: string; needsMetric: "checkin" | "category" | "text" | "output" | "none"; hasThreshold: boolean }[] = [
   { value: "checkin", label: "Check-in logged", needsMetric: "checkin", hasThreshold: true },
   { value: "category", label: "Minutes in a category", needsMetric: "category", hasThreshold: true },
   { value: "target", label: "Minutes on an app/site", needsMetric: "text", hasThreshold: true },
+  { value: "output", label: "Detected output files", needsMetric: "output", hasThreshold: true },
   { value: "goal", label: "Main goal completed", needsMetric: "none", hasThreshold: false },
   { value: "no_goal", label: "Main goal NOT completed", needsMetric: "none", hasThreshold: false },
   { value: "late_start", label: "First productive block after N o'clock", needsMetric: "none", hasThreshold: true },
@@ -50,6 +52,7 @@ export default function DailyScore() {
   const [showWeights, setShowWeights] = useState(false);
   const [checkinDefs, setCheckinDefs] = useState<CheckinDefinition[]>([]);
   const [categories, setCategories] = useState<CategoryDefinition[]>([]);
+  const [rules, setRules] = useState<ScoreRule[]>([]);
 
   const [newLabel, setNewLabel] = useState("");
   const [newKind, setNewKind] = useState<ScoreRuleKind>("checkin");
@@ -59,14 +62,16 @@ export default function DailyScore() {
 
   const load = useCallback(async () => {
     try {
-      const [r, c, cats] = await Promise.all([
+      const [r, c, cats, scoreRules] = await Promise.all([
         getDailyScore(),
         getCheckinDefinitions(),
         getCategoryDefinitions(),
+        getScoreRules(),
       ]);
       setReport(r);
       setCheckinDefs(c);
       setCategories(cats);
+      setRules(scoreRules);
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -100,6 +105,8 @@ export default function DailyScore() {
           ? "Pick which check-in this rule reads"
           : kindMeta?.needsMetric === "category"
             ? "Pick a category"
+            : kindMeta?.needsMetric === "output"
+            ? "Pick the detected output type"
             : "Enter the app/site name to watch",
       );
       return;
@@ -160,7 +167,8 @@ export default function DailyScore() {
     r.categoryMinutes.length > 0 ||
     r.topWins.length > 0 ||
     r.biggestLeaks.length > 0;
-  const showBreakdown = showWeights || hasScoreInputs;
+  const showBreakdown = true;
+  const starterCount = rules.filter((rule) => rule.builtIn).length;
 
   return (
     <>
@@ -239,7 +247,9 @@ export default function DailyScore() {
         <div className="card-pad score-breakdown-head">
           <div>
             <h2 className="card-title">Full breakdown</h2>
-            <p className="card-hint" style={{ margin: 0 }}>Every rule and its contribution today.</p>
+            <p className="card-hint" style={{ margin: 0 }}>
+              Tempo adds only two universal starter rules. Every rule is editable or removable; add rules for your own check-ins, categories, apps/sites, and detected outputs.
+            </p>
           </div>
           <button className="btn" onClick={() => setShowWeights((v) => !v)}>
             {showWeights ? "Done editing" : "Edit rules"}
@@ -263,6 +273,12 @@ export default function DailyScore() {
                     {l.triggered ? (l.positive ? "✓" : "✕") : "·"}
                   </span>
                   {l.label}
+                  {rules.find((rule) => rule.id === l.id)?.builtIn && (
+                    <>
+                      {" "}
+                      <span className="src-chip rule" title="Added by Tempo as an editable starter rule">Tempo starter</span>
+                    </>
+                  )}
                 </td>
                 <td className="muted-num">{l.value}</td>
                 {showWeights && (
@@ -361,6 +377,14 @@ export default function DailyScore() {
                   ))}
                 </select>
               )}
+              {RULE_KIND_OPTIONS.find((k) => k.value === newKind)?.needsMetric === "output" && (
+                <select className="select" value={newMetric} onChange={(e) => setNewMetric(e.target.value)}>
+                  <option value="">Pick output…</option>
+                  <option value="video_export">Video export</option>
+                  <option value="code_change">Code change</option>
+                  <option value="study_material">Document / study material</option>
+                </select>
+              )}
               {RULE_KIND_OPTIONS.find((k) => k.value === newKind)?.needsMetric === "text" && (
                 <input
                   className="search"
@@ -396,9 +420,29 @@ export default function DailyScore() {
                 Add rule
               </button>
             </div>
-            <button className="btn btn-danger" onClick={() => run(resetScoringWeights)}>
-              Reset rules to defaults
-            </button>
+            <div className="score-rule-actions">
+              {starterCount > 0 && (
+                <button
+                  className="btn"
+                  onClick={async () => {
+                    if (!confirm(`Remove ${starterCount} Tempo starter rule${starterCount === 1 ? "" : "s"}? Your custom rules will stay.`)) return;
+                    await run(() => Promise.all(rules.filter((rule) => rule.builtIn).map((rule) => deleteScoreRule(rule.id))));
+                  }}
+                >
+                  Remove Tempo starters
+                </button>
+              )}
+              <button
+                className="btn btn-danger"
+                onClick={() => {
+                  if (confirm("Replace every score rule, including custom rules, with Tempo’s two starter goal rules?")) {
+                    run(resetScoringWeights);
+                  }
+                }}
+              >
+                Replace all with starters
+              </button>
+            </div>
           </div>
         )}
       </div>}

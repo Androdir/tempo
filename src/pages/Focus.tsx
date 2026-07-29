@@ -161,7 +161,7 @@ export default function Focus() {
               <span>Goal</span>
               <input
                 className="pf-input"
-                placeholder="e.g. Finish the editor feature"
+                placeholder="e.g. Finish the first cut"
                 value={goal}
                 onChange={(e) => setGoal(e.target.value)}
               />
@@ -209,7 +209,7 @@ export default function Focus() {
               </span>
               <input
                 className="pf-input"
-                placeholder="code.exe, github.com, localhost"
+                placeholder="DaVinci Resolve, File Explorer, frame.io"
                 value={allowed}
                 onChange={(e) => setAllowed(e.target.value)}
               />

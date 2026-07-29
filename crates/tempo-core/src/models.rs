@@ -45,7 +45,7 @@ const DEFAULT_CATEGORY_DEFS: &[(&str, &str, &str, &str, &str)] = &[
     ("productive", "Productive", "#16a34a", "productive", "Deep, focused work"),
     ("study", "Study", "#2563eb", "productive", "Learning & research"),
     ("business", "Business", "#0d9488", "productive", "Admin, email, ops"),
-    ("neutral", "Neutral", "#64748b", "neutral", "Necessary but neutral"),
+    ("neutral", "Neutral", "#64748b", "neutral", "Necessary or ambiguous; no automatic penalty"),
     ("distraction", "Distraction", "#dc2626", "distracting", "Off-task time"),
     ("recovery", "Recovery", "#9333ea", "neutral", "Intentional rest"),
 ];
@@ -275,6 +275,10 @@ pub struct Goal {
     pub project: Option<String>,
     #[serde(default)]
     pub target_minutes: Option<i64>,
+    #[serde(default)]
+    pub target_count: Option<i64>,
+    #[serde(default)]
+    pub target_unit: Option<String>,
     #[serde(default = "default_priority")]
     pub priority: String, // low | medium | high
     #[serde(default)]
@@ -941,6 +945,35 @@ pub struct PrivacySettings {
     pub count_media_as_active: bool,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CorrectionHistoryEntry {
+    pub id: i64,
+    pub block_key: String,
+    pub source: String,
+    pub label: String,
+    pub title: String,
+    pub previous_manual_category: Option<String>,
+    pub previous_rule_category: Option<String>,
+    pub new_category: String,
+    pub created_at: String,
+    pub undone_at: Option<String>,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackingHealth {
+    pub status: String,
+    pub checked_at: String,
+    pub database_ok: bool,
+    pub last_desktop_at: Option<String>,
+    pub last_browser_at: Option<String>,
+    pub last_screen_at: Option<String>,
+    pub browser_connected: bool,
+    pub smart_enabled: bool,
+    pub pending_sync_events: i64,
+    pub last_backup_at: Option<String>,
+    pub issues: Vec<String>,
+}
 // --------------------------------------------------- proof-of-output detection
 
 fn default_true() -> bool {
@@ -1073,6 +1106,10 @@ pub struct TimelineBlock {
     pub block_key: String,
     pub is_web: bool,
     pub sample_count: i64,
+    /// Seconds of tiny intervening switches absorbed into this block in overview mode.
+    pub absorbed_seconds: i64,
+    /// Number of intervening blocks absorbed in overview mode.
+    pub absorbed_count: i64,
     // Highlight flags (computed across the day).
     pub longest_productive: bool,
     pub biggest_distraction: bool,
@@ -1086,7 +1123,10 @@ pub struct TimelineBlock {
 pub struct TimelineDay {
     pub day: String,
     pub max_gap_seconds: i64,
+    /// Exact merged samples, preserving every app/site switch.
     pub blocks: Vec<TimelineBlock>,
+    /// Meaningful runs with brief A → B → A switches absorbed into A.
+    pub overview_blocks: Vec<TimelineBlock>,
     /// Self-reported check-ins for the day (shown as a strip; no per-event times).
     pub outputs: Vec<CheckinValue>,
     pub active_seconds: i64,

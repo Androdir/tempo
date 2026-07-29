@@ -1,6 +1,8 @@
-use rusqlite::Connection;
-use std::path::Path;
+use rusqlite::{backup::Backup, Connection};
+use serde::Serialize;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// Shared handle to the single SQLite connection.
 pub type Db = Arc<Mutex<Connection>>;
@@ -121,14 +123,17 @@ CREATE INDEX IF NOT EXISTS idx_smart_day ON smart_activity(day);
 
 -- User-defined projects/goals used to classify activity by intent.
 CREATE TABLE IF NOT EXISTS projects (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    name       TEXT    NOT NULL,
-    category   TEXT    NOT NULL,
-    keywords   TEXT    NOT NULL DEFAULT '[]',  -- JSON array
-    apps       TEXT    NOT NULL DEFAULT '[]',  -- JSON array
-    domains    TEXT    NOT NULL DEFAULT '[]',  -- JSON array
-    priority   INTEGER NOT NULL DEFAULT 50,
-    updated_at TEXT    NOT NULL
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    name              TEXT    NOT NULL,
+    category          TEXT    NOT NULL,
+    keywords          TEXT    NOT NULL DEFAULT '[]',  -- JSON array
+    apps              TEXT    NOT NULL DEFAULT '[]',  -- JSON array
+    domains           TEXT    NOT NULL DEFAULT '[]',  -- JSON array
+    excluded_apps     TEXT    NOT NULL DEFAULT '[]',  -- hard project exclusions
+    excluded_domains  TEXT    NOT NULL DEFAULT '[]',
+    excluded_keywords TEXT    NOT NULL DEFAULT '[]',
+    priority          INTEGER NOT NULL DEFAULT 50,
+    updated_at        TEXT    NOT NULL
 );
 
 -- Manual user corrections per activity block (highest-priority classifier).
@@ -144,6 +149,22 @@ CREATE TABLE IF NOT EXISTS manual_corrections (
 );
 CREATE INDEX IF NOT EXISTS idx_manual_day ON manual_corrections(day);
 
+-- Audit trail for user classification changes. This makes every correction
+-- explainable and reversible without silently erasing the previous rule.
+CREATE TABLE IF NOT EXISTS correction_history (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    block_key                TEXT NOT NULL,
+    day                      TEXT NOT NULL,
+    source                   TEXT NOT NULL,
+    label                    TEXT NOT NULL,
+    title                    TEXT NOT NULL,
+    previous_manual_category TEXT,
+    previous_rule_category   TEXT,
+    new_category             TEXT NOT NULL,
+    created_at               TEXT NOT NULL,
+    undone_at                TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_correction_block ON correction_history(block_key, id DESC);
 -- Daily self-reported check-ins for the productivity score (events that can't be
 -- inferred from activity: main goal done, videos posted, gym logged).
 -- The individual check-in fields are legacy columns; new values live in
@@ -371,9 +392,152 @@ CREATE TABLE IF NOT EXISTS sync_errors (
 );
 "#;
 
-pub fn init(path: &Path) -> rusqlite::Result<Db> {
-    let conn = Connection::open(path)?;
-    conn.execute_batch(SCHEMA)?;
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupInfo {
+    pub name: String,
+    pub created_at: String,
+    pub bytes: u64,
+    pub automatic: bool,
+}
+
+fn backup_directory(path: &Path) -> Result<PathBuf, String> {
+    let parent = path.parent().ok_or_else(|| "database has no parent folder".to_string())?;
+    Ok(parent.join("backups"))
+}
+
+pub fn database_path(conn: &Connection) -> Result<PathBuf, String> {
+    let path: String = conn
+        .query_row("PRAGMA database_list", [], |row| row.get(2))
+        .map_err(|e| e.to_string())?;
+    if path.is_empty() {
+        return Err("backups are unavailable for an in-memory database".into());
+    }
+    Ok(PathBuf::from(path))
+}
+
+fn backup_to(conn: &Connection, destination: &Path) -> Result<(), String> {
+    let mut target = Connection::open(destination).map_err(|e| e.to_string())?;
+    let backup = Backup::new(conn, &mut target).map_err(|e| e.to_string())?;
+    backup
+        .run_to_completion(8, Duration::from_millis(25), None)
+        .map_err(|e| e.to_string())?;
+    drop(backup);
+    let check: String = target
+        .query_row("PRAGMA quick_check", [], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    if check != "ok" {
+        let _ = std::fs::remove_file(destination);
+        return Err(format!("backup integrity check failed: {check}"));
+    }
+    Ok(())
+}
+
+pub fn create_backup(conn: &Connection, automatic: bool) -> Result<BackupInfo, String> {
+    let db_path = database_path(conn)?;
+    let dir = backup_directory(&db_path)?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let stamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S%.6f");
+    let prefix = if automatic { "tempo-auto" } else { "tempo-manual" };
+    let path = dir.join(format!("{prefix}-{stamp}.db"));
+    backup_to(conn, &path)?;
+    rotate_automatic_backups(&dir, 7)?;
+    backup_info(&path)
+}
+
+fn create_daily_startup_backup(conn: &Connection, db_path: &Path) -> Result<(), String> {
+    let dir = backup_directory(db_path)?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let prefix = format!("tempo-auto-{}", chrono::Local::now().format("%Y-%m-%d"));
+    let exists = std::fs::read_dir(&dir)
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .any(|entry| entry.file_name().to_string_lossy().starts_with(&prefix));
+    if !exists {
+        let _ = create_backup(conn, true)?;
+    }
+    Ok(())
+}
+
+fn rotate_automatic_backups(dir: &Path, keep: usize) -> Result<(), String> {
+    let mut files = std::fs::read_dir(dir)
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.file_name().is_some_and(|name| name.to_string_lossy().starts_with("tempo-auto-")))
+        .collect::<Vec<_>>();
+    files.sort();
+    let remove_count = files.len().saturating_sub(keep);
+    for path in files.into_iter().take(remove_count) {
+        std::fs::remove_file(path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn backup_info(path: &Path) -> Result<BackupInfo, String> {
+    let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    let modified = metadata.modified().map_err(|e| e.to_string())?;
+    let created_at: chrono::DateTime<chrono::Local> = modified.into();
+    let name = path.file_name().ok_or_else(|| "invalid backup filename".to_string())?
+        .to_string_lossy().to_string();
+    Ok(BackupInfo {
+        automatic: name.starts_with("tempo-auto-"),
+        name,
+        created_at: created_at.to_rfc3339(),
+        bytes: metadata.len(),
+    })
+}
+
+pub fn list_backups(conn: &Connection) -> Result<Vec<BackupInfo>, String> {
+    let dir = backup_directory(&database_path(conn)?)?;
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut backups = std::fs::read_dir(&dir)
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "db"))
+        .filter_map(|path| backup_info(&path).ok())
+        .collect::<Vec<_>>();
+    backups.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(backups)
+}
+
+pub fn restore_backup(conn: &mut Connection, name: &str) -> Result<(), String> {
+    if Path::new(name).file_name().and_then(|v| v.to_str()) != Some(name)
+        || !name.starts_with("tempo-") || !name.ends_with(".db")
+    {
+        return Err("invalid backup name".into());
+    }
+    let db_path = database_path(conn)?;
+    let source_path = backup_directory(&db_path)?.join(name);
+    if !source_path.is_file() {
+        return Err("backup was not found".into());
+    }
+    // Always preserve the current database before replacing it.
+    let _ = create_backup(conn, false)?;
+    let source = Connection::open(&source_path).map_err(|e| e.to_string())?;
+    let check: String = source.query_row("PRAGMA quick_check", [], |row| row.get(0)).map_err(|e| e.to_string())?;
+    if check != "ok" {
+        return Err(format!("selected backup failed integrity check: {check}"));
+    }
+    let backup = Backup::new(&source, conn).map_err(|e| e.to_string())?;
+    backup.run_to_completion(8, Duration::from_millis(25), None).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn integrity_check(conn: &Connection) -> Result<String, String> {
+    conn.query_row("PRAGMA quick_check", [], |row| row.get(0)).map_err(|e| e.to_string())
+}
+
+pub fn init(path: &Path) -> Result<Db, String> {
+    let existed = path.exists() && std::fs::metadata(path).map(|m| m.len() > 0).unwrap_or(false);
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+    if existed {
+        create_daily_startup_backup(&conn, path)?;
+    }
+    conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
     migrate(&conn);
     Ok(Arc::new(Mutex::new(conn)))
 }
@@ -409,7 +573,12 @@ fn migrate(conn: &Connection) {
         )",
         [],
     );
+    let _ = conn.execute("ALTER TABLE projects ADD COLUMN excluded_apps TEXT NOT NULL DEFAULT '[]'", []);
+    let _ = conn.execute("ALTER TABLE projects ADD COLUMN excluded_domains TEXT NOT NULL DEFAULT '[]'", []);
+    let _ = conn.execute("ALTER TABLE projects ADD COLUMN excluded_keywords TEXT NOT NULL DEFAULT '[]'", []);
     let _ = conn.execute("ALTER TABLE goals ADD COLUMN recurring INTEGER NOT NULL DEFAULT 0", []);
+    let _ = conn.execute("ALTER TABLE goals ADD COLUMN target_count INTEGER", []);
+    let _ = conn.execute("ALTER TABLE goals ADD COLUMN target_unit TEXT", []);
     let _ = conn.execute(
         "CREATE TABLE IF NOT EXISTS checkin_definitions (
             id         TEXT PRIMARY KEY,
@@ -460,6 +629,33 @@ fn migrate(conn: &Connection) {
         [],
     );
     migrate_legacy_checkins(conn);
+    invalidate_unsafe_llm_cache(conn);
+}
+
+/// Cached LLM rows are derived data. Refresh today's pre-guardrail verdicts once
+/// and remove model-authored project labels; historical categories, raw activity,
+/// and manual fixes are kept.
+fn invalidate_unsafe_llm_cache(conn: &Connection) {
+    const FLAG: &str = "llm_evidence_guardrails_v1";
+    let done = conn
+        .query_row("SELECT value FROM app_settings WHERE key = ?1", [FLAG], |r| {
+            r.get::<_, String>(0)
+        })
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    if done {
+        return;
+    }
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let _ = conn.execute("DELETE FROM llm_classification WHERE day = ?1", [&today]);
+    // Project labels are now always resolved from deterministic app/domain/keyword
+    // evidence at read time, so old model-authored values are unnecessary.
+    let _ = conn.execute("UPDATE llm_classification SET project = NULL", []);
+    let _ = conn.execute(
+        "INSERT INTO app_settings (key, value) VALUES (?1, '1')
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [FLAG],
+    );
 }
 
 /// One-time copy of the legacy fixed daily_checkin columns into the flexible
@@ -505,7 +701,7 @@ pub fn prune(conn: &Connection, days: i64) -> rusqlite::Result<usize> {
         .format("%Y-%m-%d")
         .to_string();
     let mut removed = 0;
-    for table in ["activity_log", "browser_activity", "smart_activity", "llm_classification", "manual_corrections"] {
+    for table in ["activity_log", "browser_activity", "smart_activity", "llm_classification", "manual_corrections", "correction_history"] {
         removed += conn.execute(&format!("DELETE FROM {table} WHERE day < ?1"), [&cutoff])?;
     }
     Ok(removed)
@@ -514,6 +710,38 @@ pub fn prune(conn: &Connection, days: i64) -> rusqlite::Result<usize> {
 /// In-memory database with the full schema applied. Used by tests in this crate
 /// and in the desktop/hub crates (where this crate's `#[cfg(test)]` is inactive,
 /// so the helper must always be compiled).
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verified_backup_can_restore_previous_database_state() {
+        let dir = std::env::temp_dir().join(format!(
+            "tempo-backup-test-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("productivity.db");
+        let db = init(&path).unwrap();
+        let mut conn = db.lock().unwrap();
+        conn.execute("INSERT INTO app_settings (key, value) VALUES ('proof', 'before')", []).unwrap();
+        let backup = create_backup(&conn, false).unwrap();
+        conn.execute("UPDATE app_settings SET value = 'after' WHERE key = 'proof'", []).unwrap();
+        restore_backup(&mut conn, &backup.name).unwrap();
+        let value: String = conn.query_row(
+            "SELECT value FROM app_settings WHERE key = 'proof'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(value, "before");
+        assert_eq!(integrity_check(&conn).unwrap(), "ok");
+        drop(conn);
+        drop(db);
+        assert!(dir.starts_with(std::env::temp_dir()));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
 #[doc(hidden)]
 pub fn test_conn() -> Connection {
     let conn = Connection::open_in_memory().unwrap();

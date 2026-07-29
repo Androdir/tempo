@@ -1,7 +1,7 @@
 // GUI-free logic now lives in the shared `tempo-core` crate. Re-export it at the
 // crate root so existing `crate::db` / `crate::models` / … paths keep resolving.
 pub use tempo_core::{
-    aggregate, classify, db, llm, lockin, models, projects, rules, scoring, settings, streaks,
+    accountability_export, aggregate, classify, db, llm, lockin, models, projects, rules, scoring, settings, streaks,
 };
 
 mod accountability;
@@ -15,11 +15,103 @@ mod sync;
 mod tracker;
 
 use tauri::Manager;
+#[cfg(desktop)]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(desktop)]
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    AppHandle, WindowEvent,
+};
+
+#[cfg(desktop)]
+static TRAY_HINT_SHOWN: AtomicBool = AtomicBool::new(false);
+
+#[cfg(desktop)]
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+#[cfg(desktop)]
+fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
+    let open = MenuItem::with_id(app, "open", "Open Tempo", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit Tempo", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open, &quit])?;
+
+    let mut tray = TrayIconBuilder::with_id("tempo-tray")
+        .tooltip("Tempo — tracking in the background")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "open" => show_main_window(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if matches!(
+                event,
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                }
+                | TrayIconEvent::DoubleClick {
+                    button: MouseButton::Left,
+                    ..
+                }
+            ) {
+                show_main_window(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
+    Ok(())
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Must be registered first: reopening Tempo focuses the existing tray
+    // process instead of starting a second tracker and duplicating samples.
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        show_main_window(app);
+    }));
+    let builder = builder.plugin(tauri_plugin_notification::init());
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_autostart::init(
+        tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+        Some(vec!["--background"]),
+    ));
+    #[cfg(desktop)]
+    let builder = builder.on_window_event(|window, event| {
+        if window.label() != "main" {
+            return;
+        }
+        if let WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            let _ = window.hide();
+            if !TRAY_HINT_SHOWN.swap(true, Ordering::Relaxed) {
+                let _ = accountability::send_native_notification(
+                    window.app_handle(),
+                    "Tempo is still running",
+                    "Tracking continues in the system tray. Use the tray icon to reopen or quit Tempo.",
+                );
+            }
+        }
+    });
+
+    builder
         .setup(|app| {
+            #[cfg(desktop)]
+            setup_tray(app)?;
+
             // The SQLite file lives in the OS app-data dir — entirely local.
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir).ok();
@@ -39,6 +131,18 @@ pub fn run() {
                     .map_err(|e| format!("failed to seed check-ins: {e}"))?;
                 scoring::ensure_rule_defaults(&conn)
                     .map_err(|e| format!("failed to seed score rules: {e}"))?;
+                // The installed release opts in once, as requested. Later user changes
+                // are read from the OS and are never overwritten on restart.
+                #[cfg(all(desktop, not(debug_assertions)))]
+                if settings::get_setting(&conn, settings::LAUNCH_AT_LOGIN_INITIALIZED).is_none() {
+                    use tauri_plugin_autostart::ManagerExt;
+                    let _ = app.autolaunch().enable();
+                    let _ = settings::set_setting(
+                        &conn,
+                        settings::LAUNCH_AT_LOGIN_INITIALIZED,
+                        "1",
+                    );
+                }
                 // Enforce data retention once at startup.
                 let retention =
                     settings::get_int(&conn, settings::RETENTION_DAYS, settings::DEFAULT_RETENTION_DAYS);
@@ -63,10 +167,21 @@ pub fn run() {
             // Optional background local-LLM classifier (gated by llm_enabled).
             llm::start(database);
 
+            // Windows-login launches stay out of the way while tracking begins.
+            #[cfg(desktop)]
+            if std::env::args_os().any(|arg| arg.to_string_lossy() == "--background") {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_today_summary,
+            commands::show_native_notification,
+            commands::get_launch_at_login,
+            commands::set_launch_at_login,
             commands::get_tracked_apps,
             commands::get_category_rules,
             commands::get_category_definitions,
@@ -89,8 +204,12 @@ pub fn run() {
             commands::create_project,
             commands::update_project,
             commands::delete_project,
+            commands::test_project_match,
+            commands::exclude_activity_from_project,
             commands::get_recent_activity,
             commands::correct_activity,
+            commands::get_correction_history,
+            commands::undo_correction,
             commands::get_timeline_for_day,
             commands::get_output_events,
             commands::get_watched_folders,
@@ -151,6 +270,12 @@ pub fn run() {
             commands::set_distraction_intentional,
             commands::get_weekly_review,
             commands::prune_old_data,
+            commands::list_database_backups,
+            commands::create_database_backup,
+            commands::restore_database_backup,
+            commands::generate_accountability_export,
+            commands::save_accountability_export,
+            commands::get_tracking_health,
             commands::reset_database,
         ])
         .run(tauri::generate_context!())

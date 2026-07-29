@@ -538,33 +538,25 @@ pub fn scan_and_enqueue(conn: &Connection) -> i64 {
         }
 
         // --- goals for today (re-send all of today's goals on any change) ---
-        let mut goals: Vec<(String, Option<String>, Option<i64>, String, i64)> = Vec::new();
+        let mut goals: Vec<(String, Option<String>, Option<i64>, Option<i64>, Option<String>, String, i64)> = Vec::new();
         if let Ok(mut stmt) = conn.prepare(
-            "SELECT title, project, target_minutes, priority, completed FROM goals
+            "SELECT title, project, target_minutes, target_count, target_unit, priority, completed FROM goals
              WHERE day = ?1 ORDER BY sort_order, id",
         ) {
             if let Ok(rows) = stmt.query_map([&day], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, Option<String>>(1)?,
-                    r.get::<_, Option<i64>>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, i64>(4)?,
-                ))
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
             }) {
                 goals = rows.filter_map(Result::ok).collect();
             }
         }
         let goal_snap = format!(
             "{day}|{}",
-            goals
-                .iter()
-                .map(|g| format!("{}={}={}={}", g.0, g.4, g.3, g.2.unwrap_or(-1)))
-                .collect::<Vec<_>>()
-                .join(";;"),
+            goals.iter().map(|g| {
+                format!("{}={}={}={}={}={}", g.0, g.6, g.5, g.2.unwrap_or(-1), g.3.unwrap_or(-1), g.4.as_deref().unwrap_or(""))
+            }).collect::<Vec<_>>().join(";;"),
         );
         if settings::get_setting(conn, "sync_snap_goals").as_deref() != Some(goal_snap.as_str()) {
-            for (title, project, target, priority, completed) in &goals {
+            for (title, project, target, target_count, target_unit, priority, completed) in &goals {
                 enqueue(conn, &SyncEvent {
                     event_id: format!("goal:{day}:{title}:{now_ms}"),
                     event_type: "goal".into(),
@@ -581,12 +573,13 @@ pub fn scan_and_enqueue(conn: &Connection) -> i64 {
                         "completed": *completed != 0,
                         "priority": priority,
                         "targetMinutes": target,
+                        "targetCount": target_count,
+                        "targetUnit": target_unit,
                     })),
                 });
                 n += 1;
             }
-            let _ = settings::set_setting(conn, "sync_snap_goals", &goal_snap);
-        }
+            let _ = settings::set_setting(conn, "sync_snap_goals", &goal_snap);        }
     }
 
     n

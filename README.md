@@ -28,9 +28,9 @@ A local-first desktop productivity tracker. It samples your **active window** ev
 ### Dashboard & reporting
 - **Today dashboard** — total tracked time, idle time, time per app, time per category, and a
   productive / neutral / distracting split.
-- **Proof-of-Work Timeline** — the real flow of your day as continuous, merged activity blocks
-  (start/end/duration, category, project, classifier), with highlights (longest focus, biggest
-  leak, first work) and inline corrections — so you can tell genuine work from feeling busy.
+- **Activity Overview + Exact Timeline** — Overview shows meaningful runs and absorbs only a
+  brief (≤20s) A → B → A switch when the same activity resumes immediately; Exact preserves every
+  captured switch, classifier detail, and inline correction. Exact data and totals are always kept.
 - **Proof-of-Output detection** — a local folder watcher records actual outputs (video exports,
   code changes, documents, downloads), links them to the activity around them, and feeds your
   score, timeline and streaks. Metadata only — file contents are never read.
@@ -39,14 +39,12 @@ A local-first desktop productivity tracker. It samples your **active window** ev
   rule-based fallback; editable, and one click sends it to tomorrow's goals.
 - **Streaks** — consistency on the behaviours *you* choose: create your own streaks (check-in
   logged, minutes in a category, main goal, unbroken focus block, no-major-distraction day),
-  or start from a suggested set; current/best runs and a 4-week heatmap. Each streak is daily
+  or add suggestions derived only from your main goal and check-ins you created or already used; current/best runs and a 4-week heatmap. Each streak is daily
   **or weekly** ("gym 4×/week") — weekly streaks count consecutive qualifying weeks, so rest
   days never break them.
-- **Activity Log** — all desktop/web/screen samples with final classification, project match,
-  confidence score, and ability to manually correct any entry.
-- **Browser Activity** — per-website time breakdown; click a site to see recent pages with
-  summaries, keywords, and captured excerpts (if enabled).
-- **Daily Score** — a 0–100 score from a fully editable rule set: re-weight, re-threshold,
+- **Classifications** — captured desktop/web/screen activity patterns with final classification and project match. Click any app, website, or screen row to open a details drawer showing exactly why its category and project were chosen, confidence, match evidence, and a reusable correction. Corrections keep a short audit trail and the newest change can be undone.
+- **Websites** — per-website time and recent pages. Open a page for the same evidence drawer, plus summaries, detected signals, and captured excerpts when enabled.
+- **Daily Score** — a 0–100 score from a fully editable rule set. Tempo adds only two universal goal-completion starters; re-weight, re-threshold,
   delete, or add your own rules (check-in logged, minutes in a category, minutes on a specific
   app/site, goal completed/missed, late start, proof-of-output), with verdict, top wins,
   biggest leaks, and suggested fixes.
@@ -59,16 +57,17 @@ A local-first desktop productivity tracker. It samples your **active window** ev
 ### Categorization & projects
 - **Manual categories** — tag each app/site as `productive`, `study`, `business`, `neutral`,
   `distraction`, or `recovery`. Rules are saved locally and reused.
-- **Hybrid classifier** — rule-based → LLM (if confidence < 0.75) → manual correction override.
-  Classifier source shown with badge: 🏷️ rule, 🤖 LLM, ✏️ manual.
-- **Projects & Goals** — define projects (name, category, keywords, related apps/domains),
-  activity is matched by app/keyword signals and assigned a confidence score (0–100).
-- **Daily Goals** — set daily missions with priority, optional duration, completion checkbox.
+- **Evidence-guarded hybrid classifier** — deterministic app/domain/project rules run first; the
+  optional LLM reviews only ambiguous blocks, cannot invent a project without a matching
+  app/domain/keyword signal, and manual corrections always win. Classifier source is shown with
+  a badge: 🏷️ rule, 🤖 LLM, ✏️ manual.
+- **Projects & Goals** — define projects (name, category, keywords, related apps/domains), explicit app/domain/phrase exclusions, and preview a real example in the built-in matcher tester before saving. Activity is assigned only when evidence reaches the shown confidence threshold.
+- **Daily Goals** — set daily missions with priority and either an optional time target or an output/count target (for example, 1 video or 3 clips), plus a completion checkbox. Matching watched-folder output can suggest that a count goal may be done, but Tempo still asks you to confirm it.
   Mark as recurring (↻) to repeat daily; **Copy yesterday** to bulk-add.
-- **Quick check-ins** — one-tap buttons for untracked activities. Fully editable: add, rename,
-  or delete check-ins (done/not-done toggles or ×N counters); the defaults (video posted, gym,
-  wrestling, studied…) are just seeded rows you can remove. Check-ins feed the score, streaks,
-  timeline, weekly review, and AI review, and sync across devices.
+- **Quick check-ins** — one-tap “this happened today” records for untimed or offline activities.
+  They do not add tracked minutes or complete a Daily Goal. Fully editable: add, rename, or delete
+  toggles and ×N counters; they appear under Activity → Logged today and feed a score/streak only
+  when a matching rule uses them, plus weekly/AI reviews and cross-device sync.
 - **Auto check-ins** — a check-in can tick itself from real evidence instead of a tap:
   *app/site time* (e.g. "Read Bible" once you've spent 30+ active minutes on the Bible app —
   idle/AFK time never counts) or *detected file output* via the proof-of-output watcher (e.g.
@@ -77,6 +76,11 @@ A local-first desktop productivity tracker. It samples your **active window** ev
   a false positive never sticks. The hub recomputes auto check-ins across **all** devices.
 
 ### Accountability (soft enforcement)
+- **Native desktop notifications** — distraction, Focus Mode, and end-of-day alerts use the OS
+  notification center; the in-app toast keeps Snooze and *"It's intentional"* actions available.
+- **System tray + login startup** — closing the main window keeps Tempo tracking in the tray.
+  Tempo can launch hidden when you sign into Windows; reopening the shortcut focuses the existing
+  process rather than starting a duplicate tracker. Use the tray menu to open or fully quit.
 - **Distraction warnings** — when spending >X continuous minutes on a distracting app/site,
   get a desktop notification + in-app toast asking *"Still intentional?"*. Re-warns at multiples
   (40m, 60m…). Actions: *Snooze 30m* or *It's intentional* (mutes that app for 1h).
@@ -90,8 +94,9 @@ A local-first desktop productivity tracker. It samples your **active window** ev
 - **Capture policy** — toggle page-text capture per-domain (off by default), with auto-blocklist
   for banking/payment/health/email. Content script reads only visible text, never form fields.
 - **Smart tracking warning** — prominently warns before enabling screenshot OCR.
-- **Data retention** — keep raw samples for N days (default 90; 0 = forever). Prune on startup
-  or on demand. Goals, scores, reviews, rules always kept.
+- **Data retention** — keep raw samples for N days (default 90; 0 = forever). Prune on startup or on demand. Goals, scores, reviews, rules always kept.
+- **Verified backups** — before startup migrations, Tempo keeps a rotating set of seven daily SQLite backups on desktop and Hub. The desktop Data & privacy screen also creates manual backups and restores only after verifying the selected backup and preserving the current database.
+- **Accountability export** — choose the last 7/14/30/90 days or a custom range and create a compact Markdown report for ChatGPT. It includes time leaks, productive work, daily trends, context switching, goals, check-ins, detected outputs, project allocation, automatic warning flags, and a ready-made brutally-honest coaching prompt. App/site names can be anonymised; titles, notes, and raw text are separate opt-ins that default off. Tempo never includes URL paths, file paths, tokens, or secrets. Desktop saves and verifies the report in Downloads; Hub/browser downloads it locally.
 - **Local OCR** — Windows built-in engine, no network, screenshots never touch disk.
 
 ### Multi-device (optional Tempo Hub)
@@ -307,7 +312,7 @@ Ollama server. Completely optional; the app works fine with rule-based only.
      - **Model** (type the model name, e.g., `llama3.1:8b`)
    - Click **Test connection** — it should verify the model is available.
    - Once connected, the LLM background worker starts; new/ambiguous samples get refined
-     classifications (shown with 🤖 badge in the Activity Log).
+     classifications (shown with 🤖 badge in the Classifications).
 
 ### 4. (Optional) Enable smart screen OCR (Windows only)
 
@@ -353,7 +358,7 @@ If the Firefox/Chromium extension is loaded and configured:
 - Page content is optional (capture policy); by default only domain/URL/title are tracked.
 
 ### Hybrid classification (`rules.rs`, `llm.rs`, `commands.rs`)
-When you view an activity sample (Activity Log, Activity Details, dashboard), the app classifies
+When you view an activity sample (Classifications, Activity Details, dashboard), the app classifies
 it using a three-tier system:
 
 1. **Rule-based** (`classify.rs`): app/domain rules, title keywords, project matching.
@@ -361,13 +366,14 @@ it using a three-tier system:
    - Confidence ≥ 0.8 → use this, skip LLM.
    - Confidence < 0.75 or ambiguous (e.g., OCR conflict) → continue to tier 2.
 
-2. **LLM** (if enabled, `llm.rs`): a background worker classifies blocks with context
-   (neighbors, projects as goals) and caches the verdict in `llm_classification`.
-   - On cache hit → use cached LLM result (shown with 🤖 badge).
+2. **LLM** (if enabled, `llm.rs`): a background worker reviews ambiguous blocks and caches the
+   verdict in `llm_classification`. Goals and neighboring blocks are context, not evidence: an LLM
+   project is accepted only when deterministic app/domain/keyword matching found that same project.
+   Sparse app/title-only guesses are confidence-capped, and known self/system contexts stay neutral.
+   - On cache hit → use the guarded LLM category (shown with 🤖 badge).
    - On cache miss or Ollama down → fall back to rule-based, no crash.
 
-3. **Manual correction**: In the Activity Details drawer, you can click the classifier badge
-   (🏷️ / 🤖 / ✏️) to manually override any category. Stored in `manual_corrections` table.
+3. **Manual correction**: In the Activity Details drawer, choose a category under **Correct this activity** to override it and save a reusable app or website rule. The correction is stored in `manual_corrections`.
    - Next read uses the manual category (shown with ✏️ badge).
 
 ### Aggregation & scoring
@@ -393,18 +399,21 @@ All events are received by the frontend's `AccountabilityLayer`, which shows toa
 Snooze/mute state is persisted in `app_settings`, checked by the watcher on each tick.
 
 ### Proof-of-Work Timeline (`get_timeline_for_day`)
-Where the Activity Log aggregates the day by app, the Timeline shows its **flow**: raw samples
-(desktop + browser + screen-OCR) classified with the same hybrid system, then merged into
-**continuous blocks**. A new block starts on a change of app/domain, category, project, or idle
-status, or when the gap between samples exceeds the configurable threshold (default **2 min**).
+Where Classifications rolls up captured activity patterns for auditing, the Timeline shows the day's
+**flow**. It returns both an **Exact** set of continuous blocks and a default low-noise **Overview**.
+Overview absorbs an intervening block only for the narrow A → B → A case where B lasts at most 20
+seconds and the same source/label/category/project resumes immediately. Exact groups consecutive
+10-second samples of the same activity, starts a new run after a gap over 20 seconds, and is never
+changed by the Overview smoothing. Both buttons show their block count so the distinction is visible.
 Each lane is merged independently and a desktop "Chrome" run is dropped when the browser lane
 already covers that time (so you see the tab, not the shell). The backend flags the day's
 highlights — **longest productive block, biggest distraction, first productive block,
 goal-related** (project matches a goal) and **output-linked** (content-business work) — and the
 page lets you filter (category / source / project / app) and **correct any block inline** (the
-correction reuses the same `manual_corrections` + rule system as the Activity Log). Self-reported
-outputs (videos posted, etc.) have no timestamps, so they're shown as a summary strip rather than
-positioned blocks. Unit tests cover run-merging, category splits, and the browser/desktop dedupe.
+correction reuses the same `manual_corrections` + rule system as the Classifications). Self-reported
+check-ins have no per-tap timestamps, so they are shown under **Logged today** rather than as
+positioned blocks. Unit tests cover run-merging, brief-interruption smoothing, category splits, and
+the browser/desktop dedupe.
 
 ### Proof-of-output detection (`output.rs`)
 A polling folder watcher (chosen over an OS file-watch dependency for robustness and testability)
@@ -421,9 +430,10 @@ min-size/debounce/disabled rules, history-skipping, and activity linking.
 
 ### Streaks (`streaks.rs`)
 Streaks are **user-created**: you define each one from a kind + metric + threshold (a check-in
-logged, N minutes in a category, main goal completed, an unbroken N-minute focus block, a
-no-major-distraction day), and there's a one-click **suggested set** (posted video, studied,
-gym, 60+ min focus block…) to start from. For each of the last 28 days a `DayMetrics` is built
+logged, N minutes in a category, main goal completed, an unbroken N-minute focus block, or a day
+where no single continuous distraction reaches N minutes). One-click suggestions add only the
+universal main-goal streak plus check-ins the user created or has actually used; Tempo never invents
+generic study, coding, gym, or distraction streaks. For each of the last 28 days a `DayMetrics` is built
 from check-ins + category minutes + block maxima + output counts, and each streak's condition is
 evaluated. The **current run** counts consecutive met days ending today (or yesterday, if
 today's still in progress); **best** is the longest run, persisted so it survives the window.
@@ -932,11 +942,12 @@ doesn't have; the storage layer is seamed so it could be swapped later if that e
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| Idle threshold | `60s` | Seconds of no input before a sample is marked idle (and excluded). Range 20–1800. |
+| Launch at Windows login | on after installing this release | Starts Tempo hidden in the system tray. The Settings toggle changes the real OS startup state. |
+| Idle threshold | 60s | Seconds of no input before a sample is marked idle (and excluded). Range 20–1800. |
 | Count media as active | `on` | Keep time active when a video/music/lecture is playing, even with no input (Windows). |
 | Data retention | `90 days` | How long raw samples are kept (`0` = forever). Goals/scores/reviews/rules always kept. |
 | Capture page content | `off` | Let the extension read visible page text on allowed domains. |
-| Store raw text | `off` | Keep the raw extracted text (vs. summary + keywords only). |
+| Store raw text | `off` | Debugging only: keep the exact visible-text excerpt so a bad classification can be audited. Normal tracking needs only title, summary, and keywords. |
 | Smart tracking (OCR) | `off` | Periodic local screenshot + OCR (Windows only). |
 | Smart interval | `60s` | Seconds between OCR captures when enabled. |
 | Local LLM (Ollama) | `off` | Use Ollama for classification + AI review/plan; set the URL (`localhost:11434`) + model (`llama3.1:8b`). |

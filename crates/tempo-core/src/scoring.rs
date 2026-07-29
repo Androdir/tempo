@@ -68,9 +68,16 @@ pub struct ScoreRule {
     pub built_in: bool,
 }
 
-/// The default rule set, expressed in the generic vocabulary.
+/// Tempo starts with only universal goal rules. Everything more personal should
+/// come from the user's own projects, check-ins, apps/sites, or output watchers.
 const DEFAULT_RULES: &[(&str, &str, &str, &str, i64, Option<i64>)] = &[
     ("main_goal", "Completed main daily goal", "goal", "", 30, None),
+    ("no_main_goal", "No main goal completed", "no_goal", "", -25, None),
+];
+
+/// Generic rules shipped by older versions. The v2 migration removes a row only
+/// when it is still an untouched built-in; edited rules and all custom rules stay.
+const LEGACY_PERSONAL_DEFAULTS: &[(&str, &str, &str, &str, i64, Option<i64>)] = &[
     ("posted_video", "Posted 1+ videos", "checkin", "videos_posted", 25, Some(1)),
     ("business_min", "90+ min editing / business work", "category", "business", 20, Some(90)),
     ("study_min", "60+ min studying", "category", "study", 15, Some(60)),
@@ -79,14 +86,39 @@ const DEFAULT_RULES: &[(&str, &str, &str, &str, i64, Option<i64>)] = &[
     ("instagram", "Instagram distraction over 30 min", "target", "instagram", -15, Some(30)),
     ("youtube", "YouTube distraction over 45 min", "target", "youtube", -10, Some(45)),
     ("recovery", "Music / pacing / recovery over 60 min", "category", "recovery", -15, Some(60)),
-    ("no_main_goal", "No main goal completed", "no_goal", "", -25, None),
     ("late_start", "First productive block after 14:00", "late_start", "", -10, Some(14)),
     ("shipped_video", "Exported a video (proof of output)", "output", "video_export", 15, Some(1)),
     ("shipped_code", "Shipped code changes", "output", "code_change", 10, Some(1)),
     ("study_output", "Created/opened study material", "output", "study_material", 5, Some(1)),
 ];
 
+fn migrate_starter_rules_v2(conn: &Connection) -> rusqlite::Result<()> {
+    const FLAG: &str = "score_starter_rules_v2";
+    let done = conn
+        .query_row("SELECT value FROM app_settings WHERE key = ?1", [FLAG], |r| r.get::<_, String>(0))
+        .ok()
+        .is_some_and(|v| v == "1");
+    if done {
+        return Ok(());
+    }
+    for (id, label, kind, metric, weight, threshold) in LEGACY_PERSONAL_DEFAULTS {
+        conn.execute(
+            "DELETE FROM score_rules
+             WHERE id = ?1 AND label = ?2 AND kind = ?3 AND metric = ?4
+               AND weight = ?5 AND threshold IS ?6 AND built_in = 1",
+            params![id, label, kind, metric, weight, threshold],
+        )?;
+    }
+    conn.execute(
+        "INSERT INTO app_settings (key, value) VALUES (?1, '1')
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [FLAG],
+    )?;
+    Ok(())
+}
+
 pub fn ensure_rule_defaults(conn: &Connection) -> rusqlite::Result<()> {
+    migrate_starter_rules_v2(conn)?;
     let already = conn
         .query_row("SELECT value FROM app_settings WHERE key = ?1", [RULES_SEEDED], |r| {
             r.get::<_, String>(0)
@@ -104,7 +136,6 @@ pub fn ensure_rule_defaults(conn: &Connection) -> rusqlite::Result<()> {
     )?;
     Ok(())
 }
-
 fn seed_defaults(conn: &Connection) -> rusqlite::Result<()> {
     let now = chrono::Utc::now().to_rfc3339();
     for (i, (id, label, kind, metric, weight, threshold)) in DEFAULT_RULES.iter().enumerate() {
@@ -497,7 +528,7 @@ mod tests {
         let conn = db::test_conn();
         let n = list_rules(&conn).len();
         assert_eq!(n, DEFAULT_RULES.len());
-        delete_rule(&conn, "instagram").unwrap();
+        delete_rule(&conn, "main_goal").unwrap();
         assert_eq!(list_rules(&conn).len(), n - 1); // stays deleted
         reset(&conn).unwrap();
         assert_eq!(list_rules(&conn).len(), n); // reset restores defaults
@@ -547,6 +578,11 @@ mod tests {
     #[test]
     fn any_of_checkin_metric_matches_either() {
         let conn = db::test_conn();
+        crate::models::ensure_checkin_defaults(&conn).unwrap();
+        upsert_rule(&conn, &ScoreRule {
+            id: "gym".into(), label: "Gym / wrestling".into(), kind: "checkin".into(),
+            metric: "gym_logged,wrestled".into(), weight: 10, threshold: Some(1), built_in: false,
+        }).unwrap();
         let stats = Stats::default();
         let outputs = OutputSignals::default();
         let mut values = HashMap::new();
@@ -560,6 +596,10 @@ mod tests {
     #[test]
     fn target_rule_reads_target_seconds() {
         let conn = db::test_conn();
+        upsert_rule(&conn, &ScoreRule {
+            id: "instagram".into(), label: "Instagram over 30 min".into(), kind: "target".into(),
+            metric: "instagram".into(), weight: -15, threshold: Some(30), built_in: false,
+        }).unwrap();
         let mut stats = Stats::default();
         stats.target_seconds.insert("instagram".into(), 40 * 60);
         let checkins = Checkins { main_goal_completed: false, values: HashMap::new() };
