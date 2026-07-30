@@ -47,18 +47,60 @@ pub struct StreakDef {
 
 /// (id, name, kind, metric, threshold) for the seeded defaults.
 pub const DEFAULTS: &[(&str, &str, &str, &str, i64)] = &[
-    ("posted_video", "Posted a video", "output", "video_export", 0),
+    (
+        "posted_video",
+        "Posted a video",
+        "output",
+        "video_export",
+        0,
+    ),
     ("main_goal", "Completed main goal", "goal", "main_goal", 0),
-    ("coding_60", "60+ min coding / building", "category", "productive", 60),
-    ("business_90", "90+ min business work", "category", "business", 90),
+    (
+        "coding_60",
+        "60+ min coding / building",
+        "category",
+        "productive",
+        60,
+    ),
+    (
+        "business_90",
+        "90+ min business work",
+        "category",
+        "business",
+        90,
+    ),
     ("study_60", "60+ min studying", "category", "study", 60),
     ("studied", "Studied", "checkin", "studied", 0),
-    ("edited_video", "Edited a video", "checkin", "edited_video", 0),
-    ("analysed_content", "Analysed content", "checkin", "analysed_content", 0),
+    (
+        "edited_video",
+        "Edited a video",
+        "checkin",
+        "edited_video",
+        0,
+    ),
+    (
+        "analysed_content",
+        "Analysed content",
+        "checkin",
+        "analysed_content",
+        0,
+    ),
     ("gym", "Gym", "checkin", "gym_logged", 0),
     ("wrestling", "Wrestling", "checkin", "wrestled", 0),
-    ("productive_block_60", "60+ min focus block", "block", "productive", 60),
-    ("no_major_distraction", "No major distraction", "distraction", "max_block", 30),
+    (
+        "productive_block_60",
+        "60+ min focus block",
+        "block",
+        "productive",
+        60,
+    ),
+    (
+        "no_major_distraction",
+        "No major distraction",
+        "distraction",
+        "max_block",
+        30,
+    ),
 ];
 
 /// Whether a streak's condition was met on a day with the given metrics.
@@ -71,10 +113,7 @@ pub fn streak_met(def: &StreakDef, m: &DayMetrics) -> bool {
         "posted_video" => m.checkin("videos_posted") > 0 || m.video_exports > 0,
         "edited_video" => m.checkin("edited_video") > 0 || m.editing_changes > 0,
         _ => match def.kind.as_str() {
-            "checkin" => def
-                .metric
-                .split(',')
-                .any(|id| m.checkin(id.trim()) >= thr),
+            "checkin" => def.metric.split(',').any(|id| m.checkin(id.trim()) >= thr),
             "goal" => m.main_goal_completed,
             "category" => m.cat_min(&def.metric) >= thr,
             "output" => match def.metric.as_str() {
@@ -211,7 +250,11 @@ pub fn weekly_runs(status: &[bool], today_weekday0: usize, per_week: i64) -> (i6
 fn migrate_irrelevant_suggestions(conn: &Connection) -> rusqlite::Result<()> {
     const FLAG: &str = "streak_suggestions_v2";
     let done = conn
-        .query_row("SELECT value FROM app_settings WHERE key = ?1", [FLAG], |r| r.get::<_, String>(0))
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            [FLAG],
+            |r| r.get::<_, String>(0),
+        )
         .ok()
         .is_some_and(|v| v == "1");
     if done {
@@ -278,7 +321,14 @@ pub fn seed_suggested(conn: &Connection) -> rusqlite::Result<i64> {
     }
     Ok(added)
 }
-pub const STREAK_KINDS: [&str; 6] = ["checkin", "goal", "category", "output", "block", "distraction"];
+pub const STREAK_KINDS: [&str; 6] = [
+    "checkin",
+    "goal",
+    "category",
+    "output",
+    "block",
+    "distraction",
+];
 
 /// Create (or overwrite) a streak definition, validating the metric against the
 /// live check-in / category definitions.
@@ -293,7 +343,9 @@ pub fn add_definition(
 ) -> Result<(), String> {
     let id = id.trim().to_ascii_lowercase();
     if id.is_empty()
-        || !id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
     {
         return Err("Streak id must use lowercase letters, numbers, dashes or underscores".into());
     }
@@ -329,7 +381,11 @@ pub fn add_definition(
     }
     let now = chrono::Utc::now().to_rfc3339();
     let sort: i64 = conn
-        .query_row("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM streak_definitions", [], |r| r.get(0))
+        .query_row(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM streak_definitions",
+            [],
+            |r| r.get(0),
+        )
         .unwrap_or(0);
     conn.execute(
         "INSERT INTO streak_definitions

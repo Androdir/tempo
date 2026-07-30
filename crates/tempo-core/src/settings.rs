@@ -20,6 +20,8 @@ pub const OLLAMA_URL: &str = "ollama_url";
 pub const OLLAMA_MODEL: &str = "ollama_model";
 /// One-time release initialization; the OS remains the source of truth afterwards.
 pub const LAUNCH_AT_LOGIN_INITIALIZED: &str = "launch_at_login_initialized";
+pub const TRACKING_PAUSED_UNTIL: &str = "tracking_paused_until";
+pub const TITLE_EXCLUDED_APPS: &str = "title_excluded_apps";
 
 // Accountability.
 pub const DISTRACTION_WARN_ENABLED: &str = "distraction_warn_enabled";
@@ -86,6 +88,55 @@ pub fn get_int(conn: &Connection, key: &str, default: i64) -> i64 {
         .unwrap_or(default)
 }
 
+pub fn tracking_paused_until(conn: &Connection) -> Option<String> {
+    let value = get_setting(conn, TRACKING_PAUSED_UNTIL)?;
+    if value == "indefinite" {
+        return Some(value);
+    }
+    let future = chrono::DateTime::parse_from_rfc3339(&value)
+        .map(|until| until.with_timezone(&chrono::Utc) > chrono::Utc::now())
+        .unwrap_or(false);
+    if future {
+        Some(value)
+    } else {
+        let _ = conn.execute(
+            "DELETE FROM app_settings WHERE key = ?1",
+            [TRACKING_PAUSED_UNTIL],
+        );
+        None
+    }
+}
+
+pub fn set_tracking_paused_until(conn: &Connection, until: Option<&str>) -> rusqlite::Result<()> {
+    match until {
+        Some(value) => set_setting(conn, TRACKING_PAUSED_UNTIL, value),
+        None => {
+            conn.execute(
+                "DELETE FROM app_settings WHERE key = ?1",
+                [TRACKING_PAUSED_UNTIL],
+            )?;
+            Ok(())
+        }
+    }
+}
+pub fn title_excluded_apps(conn: &Connection) -> Vec<String> {
+    get_setting(conn, TITLE_EXCLUDED_APPS)
+        .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+pub fn title_capture_allowed(conn: &Connection, app_name: &str) -> bool {
+    let app = app_name.trim().to_ascii_lowercase();
+    !title_excluded_apps(conn).iter().any(|rule| {
+        let rule = rule.to_ascii_lowercase();
+        rule.len() >= 2 && (app == rule || app.contains(&rule))
+    })
+}
+
 // ------------------------------------------------------------------ defaults
 
 /// Seed defaults the first time only (won't clobber user changes on restart).
@@ -95,12 +146,17 @@ pub fn ensure_defaults(conn: &Connection) -> rusqlite::Result<()> {
     set_if_absent(conn, MAX_TEXT_LENGTH, &DEFAULT_MAX_TEXT_LENGTH.to_string())?;
     set_if_absent(conn, DELETE_RAW_AFTER, "0")?;
     set_if_absent(conn, SMART_TRACKING_ENABLED, "0")?; // OFF by default
+    set_if_absent(conn, TITLE_EXCLUDED_APPS, "[]")?;
     set_if_absent(conn, SMART_INTERVAL, &DEFAULT_SMART_INTERVAL.to_string())?;
     set_if_absent(conn, LLM_ENABLED, "0")?; // OFF by default
     set_if_absent(conn, OLLAMA_URL, DEFAULT_OLLAMA_URL)?;
     set_if_absent(conn, OLLAMA_MODEL, DEFAULT_OLLAMA_MODEL)?;
     set_if_absent(conn, DISTRACTION_WARN_ENABLED, "1")?; // ON by default
-    set_if_absent(conn, DISTRACTION_WARN_MINUTES, &DEFAULT_DISTRACTION_MINUTES.to_string())?;
+    set_if_absent(
+        conn,
+        DISTRACTION_WARN_MINUTES,
+        &DEFAULT_DISTRACTION_MINUTES.to_string(),
+    )?;
     set_if_absent(conn, EOD_POPUP_ENABLED, "0")?; // OFF by default
     set_if_absent(conn, EOD_POPUP_TIME, DEFAULT_EOD_TIME)?;
     set_if_absent(conn, RETENTION_DAYS, &DEFAULT_RETENTION_DAYS.to_string())?;
@@ -196,13 +252,22 @@ pub fn upsert_domain_rule(
              capture_mode = excluded.capture_mode,
              ai_review = excluded.ai_review,
              updated_at = excluded.updated_at",
-        params![domain, category, capture_mode, ai_review as i64, now_rfc3339()],
+        params![
+            domain,
+            category,
+            capture_mode,
+            ai_review as i64,
+            now_rfc3339()
+        ],
     )?;
     Ok(())
 }
 
 pub fn delete_domain_rule(conn: &Connection, domain: &str) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM domain_rules WHERE domain = ?1", params![domain])?;
+    conn.execute(
+        "DELETE FROM domain_rules WHERE domain = ?1",
+        params![domain],
+    )?;
     Ok(())
 }
 
@@ -216,18 +281,41 @@ pub fn is_builtin_blocked(domain: &str) -> bool {
         return true;
     }
     const NEEDLES: &[&str] = &[
-        "bank", "paypal", "stripe", "venmo", "wallet", "chase", "wellsfargo",
-        "citibank", "barclays", "hsbc", "santander", "coinbase",
-        "1password", "lastpass", "bitwarden", "dashlane", "keeper",
-        "mychart", "patient", "medicare", "medicaid", "nhs", "healthcare",
+        "bank",
+        "paypal",
+        "stripe",
+        "venmo",
+        "wallet",
+        "chase",
+        "wellsfargo",
+        "citibank",
+        "barclays",
+        "hsbc",
+        "santander",
+        "coinbase",
+        "1password",
+        "lastpass",
+        "bitwarden",
+        "dashlane",
+        "keeper",
+        "mychart",
+        "patient",
+        "medicare",
+        "medicaid",
+        "nhs",
+        "healthcare",
     ];
     if NEEDLES.iter().any(|n| d.contains(n)) {
         return true;
     }
     // Common webmail hosts.
     const MAIL: &[&str] = &[
-        "mail.google.com", "outlook.live.com", "outlook.office.com",
-        "mail.proton.me", "mail.yahoo.com", "mail.aol.com",
+        "mail.google.com",
+        "outlook.live.com",
+        "outlook.office.com",
+        "mail.proton.me",
+        "mail.yahoo.com",
+        "mail.aol.com",
     ];
     MAIL.contains(&d.as_str())
 }
@@ -290,4 +378,22 @@ fn generate_token() -> String {
     let b = h2.finish();
 
     format!("{a:016x}{b:016x}")
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sensitive_app_rule_hides_partial_app_name_match() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+            [],
+        )
+        .unwrap();
+        set_setting(&conn, TITLE_EXCLUDED_APPS, r#"["Bitwarden","1Password"]"#).unwrap();
+        assert!(!title_capture_allowed(&conn, "Bitwarden Desktop"));
+        assert!(!title_capture_allowed(&conn, "1Password"));
+        assert!(title_capture_allowed(&conn, "DaVinci Resolve"));
+    }
 }

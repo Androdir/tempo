@@ -42,7 +42,9 @@ fn main() {
     let pairing_secret = std::env::var("TEMPO_PAIRING_SECRET").unwrap_or_default();
 
     if pairing_secret.trim().is_empty() {
-        eprintln!("[tempo-hub] FATAL: set TEMPO_PAIRING_SECRET to a strong secret before starting.");
+        eprintln!(
+            "[tempo-hub] FATAL: set TEMPO_PAIRING_SECRET to a strong secret before starting."
+        );
         std::process::exit(1);
     }
     if bind == "0.0.0.0" {
@@ -60,7 +62,11 @@ fn main() {
         apply_llm_env(&conn);
     }
 
-    let cfg = Config { pairing_secret, static_dir, allowed_origins };
+    let cfg = Config {
+        pairing_secret,
+        static_dir,
+        allowed_origins,
+    };
     let addr = format!("{bind}:{port}");
     let server = match Server::http(&addr) {
         Ok(s) => s,
@@ -69,7 +75,10 @@ fn main() {
             std::process::exit(1);
         }
     };
-    eprintln!("[tempo-hub] listening on http://{addr}  (dashboard from ./{})", cfg.static_dir);
+    eprintln!(
+        "[tempo-hub] listening on http://{addr}  (dashboard from ./{})",
+        cfg.static_dir
+    );
 
     let limiter = Mutex::new(RateLimiter::default());
     for mut request in server.incoming_requests() {
@@ -103,7 +112,10 @@ fn apply_llm_env(conn: &Connection) {
         }
     }
     if let Ok(v) = std::env::var("TEMPO_LLM_ENABLED") {
-        let on = matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on");
+        let on = matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        );
         let _ = settings::set_setting(conn, settings::LLM_ENABLED, if on { "1" } else { "0" });
         if on {
             let url = settings::get_setting(conn, settings::OLLAMA_URL)
@@ -133,20 +145,29 @@ fn build_response(
     common_headers.extend(cors_headers(cfg, origin.as_deref()));
 
     if method == Method::Options {
-        return with_headers(Response::from_data(Vec::new()).with_status_code(204), &common_headers);
+        return with_headers(
+            Response::from_data(Vec::new()).with_status_code(204),
+            &common_headers,
+        );
     }
 
     if path.starts_with("/api/") {
         let (status, body) = api_route(db, cfg, limiter, &method, &path, req);
         let mut headers = common_headers;
         headers.push(content_type("application/json"));
-        return with_headers(Response::from_data(body.into_bytes()).with_status_code(status), &headers);
+        return with_headers(
+            Response::from_data(body.into_bytes()).with_status_code(status),
+            &headers,
+        );
     }
 
     let (status, bytes, ctype) = serve_static(cfg, &path);
     let mut headers = common_headers;
     headers.push(content_type(ctype));
-    with_headers(Response::from_data(bytes).with_status_code(status), &headers)
+    with_headers(
+        Response::from_data(bytes).with_status_code(status),
+        &headers,
+    )
 }
 
 fn api_route(
@@ -165,8 +186,15 @@ fn api_route(
     match (method, path) {
         // ---- pairing (admin secret + rate limit) ----
         (Method::Post, "/api/pair") => {
-            let ip = req.remote_addr().map(|a| a.ip().to_string()).unwrap_or_default();
-            if !limiter.lock().map(|mut l| l.allow(&ip, 10, Duration::from_secs(60))).unwrap_or(false) {
+            let ip = req
+                .remote_addr()
+                .map(|a| a.ip().to_string())
+                .unwrap_or_default();
+            if !limiter
+                .lock()
+                .map(|mut l| l.allow(&ip, 10, Duration::from_secs(60)))
+                .unwrap_or(false)
+            {
                 return (429, err("too many pairing attempts"));
             }
             let body = read_body(req);
@@ -174,23 +202,38 @@ fn api_route(
                 Ok(v) => v,
                 Err(e) => return (400, err(&format!("bad json: {e}"))),
             };
-            let secret = v.get("pairingSecret").and_then(|x| x.as_str()).unwrap_or("");
+            let secret = v
+                .get("pairingSecret")
+                .and_then(|x| x.as_str())
+                .unwrap_or("");
             if !auth::secret_ok(secret, &cfg.pairing_secret) {
                 return (401, err("invalid pairing secret"));
             }
             let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("device");
-            let platform = v.get("platform").and_then(|x| x.as_str()).unwrap_or("unknown");
-            let Ok(conn) = db.lock() else { return (500, err("db lock")) };
+            let platform = v
+                .get("platform")
+                .and_then(|x| x.as_str())
+                .unwrap_or("unknown");
+            let Ok(conn) = db.lock() else {
+                return (500, err("db lock"));
+            };
             match auth::pair_device(&conn, name, platform) {
-                Ok((id, token)) => (200, json!({"ok": true, "deviceId": id, "token": token}).to_string()),
+                Ok((id, token)) => (
+                    200,
+                    json!({"ok": true, "deviceId": id, "token": token}).to_string(),
+                ),
                 Err(e) => (500, err(&e)),
             }
         }
 
         // ---- event ingestion (device token) ----
         (Method::Post, "/api/events") => {
-            let Some(token) = bearer(req) else { return (401, err("missing device token")) };
-            let Ok(conn) = db.lock() else { return (500, err("db lock")) };
+            let Some(token) = bearer(req) else {
+                return (401, err("missing device token"));
+            };
+            let Ok(conn) = db.lock() else {
+                return (500, err("db lock"));
+            };
             let Some(device_id) = auth::device_for_token(&conn, &token) else {
                 return (401, err("unknown or revoked device"));
             };
@@ -213,12 +256,17 @@ fn api_route(
                     }
                 }
             }
-            (200, json!({"ok": true, "stored": stored, "duplicates": duplicates}).to_string())
+            (
+                200,
+                json!({"ok": true, "stored": stored, "duplicates": duplicates}).to_string(),
+            )
         }
 
         // ---- web dashboard transport (pairing secret as web token) ----
         (Method::Post, "/api/invoke") => {
-            let Some(token) = bearer(req) else { return (401, err("missing token")) };
+            let Some(token) = bearer(req) else {
+                return (401, err("missing token"));
+            };
             if !auth::secret_ok(&token, &cfg.pairing_secret) {
                 return (401, err("unauthorized"));
             }
@@ -229,7 +277,9 @@ fn api_route(
             };
             let cmd = v.get("cmd").and_then(|x| x.as_str()).unwrap_or("");
             let args = v.get("args").cloned().unwrap_or(Value::Null);
-            let Ok(conn) = db.lock() else { return (500, err("db lock")) };
+            let Ok(conn) = db.lock() else {
+                return (500, err("db lock"));
+            };
             match dispatch(&conn, cmd, &args) {
                 Ok(val) => (200, val.to_string()),
                 Err(e) => (400, err(&e)),
@@ -238,22 +288,30 @@ fn api_route(
 
         // ---- admin: devices list / revoke (pairing secret) ----
         (Method::Get, "/api/devices") => {
-            let Some(token) = bearer(req) else { return (401, err("unauthorized")) };
+            let Some(token) = bearer(req) else {
+                return (401, err("unauthorized"));
+            };
             if !auth::secret_ok(&token, &cfg.pairing_secret) {
                 return (401, err("unauthorized"));
             }
-            let Ok(conn) = db.lock() else { return (500, err("db lock")) };
+            let Ok(conn) = db.lock() else {
+                return (500, err("db lock"));
+            };
             (200, list_devices(&conn))
         }
         (Method::Post, "/api/devices/revoke") => {
-            let Some(token) = bearer(req) else { return (401, err("unauthorized")) };
+            let Some(token) = bearer(req) else {
+                return (401, err("unauthorized"));
+            };
             if !auth::secret_ok(&token, &cfg.pairing_secret) {
                 return (401, err("unauthorized"));
             }
             let body = read_body(req);
             let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
             let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("");
-            let Ok(conn) = db.lock() else { return (500, err("db lock")) };
+            let Ok(conn) = db.lock() else {
+                return (500, err("db lock"));
+            };
             match auth::revoke_device(&conn, id) {
                 Ok(_) => (200, json!({"ok": true}).to_string()),
                 Err(e) => (500, err(&e)),
@@ -264,10 +322,18 @@ fn api_route(
     }
 }
 
-fn validate_category_definition(category: models::CategoryDefinition) -> Result<models::CategoryDefinition, String> {
+fn validate_category_definition(
+    category: models::CategoryDefinition,
+) -> Result<models::CategoryDefinition, String> {
     let id = category.id.trim().to_ascii_lowercase();
-    if id.is_empty() || !id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-') {
-        return Err("Category id must use lowercase letters, numbers, dashes or underscores".into());
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+    {
+        return Err(
+            "Category id must use lowercase letters, numbers, dashes or underscores".into(),
+        );
     }
     if category.label.trim().is_empty() {
         return Err("Category label is required".into());
@@ -292,11 +358,13 @@ fn validate_project(conn: &Connection, p: &projects::Project) -> Result<(), Stri
     if !models::category_exists(conn, &p.category) {
         return Err(format!("Unknown category: {}", p.category));
     }
-    let duplicates: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM projects WHERE LOWER(name) = LOWER(?1) AND id != ?2",
-        params![p.name.trim(), p.id],
-        |r| r.get(0),
-    ).unwrap_or(0);
+    let duplicates: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM projects WHERE LOWER(name) = LOWER(?1) AND id != ?2",
+            params![p.name.trim(), p.id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
     if duplicates > 0 {
         return Err("Project names must be unique so match corrections are unambiguous".into());
     }
@@ -313,41 +381,81 @@ fn normalize_priority(p: &str) -> String {
 
 fn row_to_goal(r: &rusqlite::Row) -> rusqlite::Result<Goal> {
     Ok(Goal {
-        id: r.get(0)?, title: r.get(1)?, project: r.get(2)?, target_minutes: r.get(3)?,
-        target_count: r.get(4)?, target_unit: r.get(5)?, priority: r.get(6)?,
-        completed: r.get::<_, i64>(7)? != 0, recurring: r.get::<_, i64>(8)? != 0,
+        id: r.get(0)?,
+        title: r.get(1)?,
+        project: r.get(2)?,
+        target_minutes: r.get(3)?,
+        target_count: r.get(4)?,
+        target_unit: r.get(5)?,
+        priority: r.get(6)?,
+        completed: r.get::<_, i64>(7)? != 0,
+        recurring: r.get::<_, i64>(8)? != 0,
     })
 }
 
-fn normalize_goal_targets(goal: &Goal) -> Result<(Option<i64>, Option<i64>, Option<String>), String> {
+fn normalize_goal_targets(
+    goal: &Goal,
+) -> Result<(Option<i64>, Option<i64>, Option<String>), String> {
     let minutes = goal.target_minutes.filter(|m| *m > 0);
     let count = goal.target_count.filter(|n| *n > 0);
-    let unit = goal.target_unit.as_deref().map(str::trim).filter(|u| !u.is_empty())
+    let unit = goal
+        .target_unit
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
         .map(|u| u.chars().take(32).collect::<String>());
-    if minutes.is_some() && count.is_some() { return Err("Choose either a time target or an output/count target".into()); }
-    if count.is_some() && unit.is_none() { return Err("Enter what the count represents, such as video or post".into()); }
+    if minutes.is_some() && count.is_some() {
+        return Err("Choose either a time target or an output/count target".into());
+    }
+    if count.is_some() && unit.is_none() {
+        return Err("Enter what the count represents, such as video or post".into());
+    }
     Ok((minutes, count, if count.is_some() { unit } else { None }))
 }
 
 fn ensure_recurring_goals(conn: &Connection, day: &str) {
-    if settings::get_setting(conn, settings::RECURRING_MATERIALIZED_DAY).as_deref() == Some(day) { return; }
-    let src: Option<String> = conn.query_row(
-        "SELECT MAX(day) FROM goals WHERE day < ?1 AND recurring = 1", [day],
-        |r| r.get::<_, Option<String>>(0),
-    ).ok().flatten();
+    if settings::get_setting(conn, settings::RECURRING_MATERIALIZED_DAY).as_deref() == Some(day) {
+        return;
+    }
+    let src: Option<String> = conn
+        .query_row(
+            "SELECT MAX(day) FROM goals WHERE day < ?1 AND recurring = 1",
+            [day],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten();
     if let Some(src_day) = src {
-        let mut templates: Vec<(String, Option<String>, Option<i64>, Option<i64>, Option<String>, String)> = Vec::new();
+        let mut templates: Vec<(
+            String,
+            Option<String>,
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+            String,
+        )> = Vec::new();
         if let Ok(mut stmt) = conn.prepare(
             "SELECT title, project, target_minutes, target_count, target_unit, priority FROM goals
              WHERE day = ?1 AND recurring = 1 ORDER BY sort_order, id",
         ) {
             if let Ok(rows) = stmt.query_map([&src_day], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
-            }) { templates = rows.filter_map(Result::ok).collect(); }
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            }) {
+                templates = rows.filter_map(Result::ok).collect();
+            }
         }
         let mut order = aggregate::next_sort_order(conn, day);
         for (title, project, target_minutes, target_count, target_unit, priority) in templates {
-            if aggregate::goal_exists(conn, day, &title) { continue; }
+            if aggregate::goal_exists(conn, day, &title) {
+                continue;
+            }
             let _ = conn.execute(
                 "INSERT INTO goals
                    (day, title, project, target_minutes, target_count, target_unit, priority, completed, sort_order, recurring, created_at)
@@ -367,15 +475,24 @@ fn list_goals(conn: &Connection, day: &str) -> Result<Vec<Goal>, String> {
          FROM goals WHERE day = ?1
          ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, sort_order, id",
     ).map_err(|e| e.to_string())?;
-    let rows = stmt.query_map([day], row_to_goal).map_err(|e| e.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    let rows = stmt
+        .query_map([day], row_to_goal)
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
 }
 
 fn add_goal_for_day(conn: &Connection, day: &str, goal: Goal) -> Result<i64, String> {
     let title = goal.title.trim();
-    if title.is_empty() { return Err("Goal title is required".into()); }
+    if title.is_empty() {
+        return Err("Goal title is required".into());
+    }
     let priority = normalize_priority(&goal.priority);
-    let project = goal.project.as_deref().map(str::trim).filter(|p| !p.is_empty());
+    let project = goal
+        .project
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty());
     let (target_minutes, target_count, target_unit) = normalize_goal_targets(&goal)?;
     let order = aggregate::next_sort_order(conn, day);
     conn.execute(
@@ -388,47 +505,96 @@ fn add_goal_for_day(conn: &Connection, day: &str, goal: Goal) -> Result<i64, Str
 }
 
 fn update_goal_row(conn: &Connection, goal: Goal) -> Result<(), String> {
-    if goal.id <= 0 { return Err("missing goal id".into()); }
+    if goal.id <= 0 {
+        return Err("missing goal id".into());
+    }
     let title = goal.title.trim();
-    if title.is_empty() { return Err("Goal title is required".into()); }
+    if title.is_empty() {
+        return Err("Goal title is required".into());
+    }
     let priority = normalize_priority(&goal.priority);
-    let project = goal.project.as_deref().map(str::trim).filter(|p| !p.is_empty());
+    let project = goal
+        .project
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty());
     let (target_minutes, target_count, target_unit) = normalize_goal_targets(&goal)?;
     conn.execute(
         "UPDATE goals SET title = ?1, project = ?2, target_minutes = ?3,
                           target_count = ?4, target_unit = ?5, priority = ?6,
                           completed = ?7, recurring = ?8 WHERE id = ?9",
-        params![title, project, target_minutes, target_count, target_unit, priority, goal.completed as i64, goal.recurring as i64, goal.id],
-    ).map_err(|e| e.to_string())?;
+        params![
+            title,
+            project,
+            target_minutes,
+            target_count,
+            target_unit,
+            priority,
+            goal.completed as i64,
+            goal.recurring as i64,
+            goal.id
+        ],
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
 fn copy_previous_goals(conn: &Connection, day: &str) -> Result<i64, String> {
-    let src: Option<String> = conn.query_row("SELECT MAX(day) FROM goals WHERE day < ?1", [day],
-        |r| r.get::<_, Option<String>>(0)).map_err(|e| e.to_string())?;
-    let Some(src_day) = src else { return Ok(0); };
-    let mut templates: Vec<(String, Option<String>, Option<i64>, Option<i64>, Option<String>, String, i64)> = Vec::new();
+    let src: Option<String> = conn
+        .query_row("SELECT MAX(day) FROM goals WHERE day < ?1", [day], |r| {
+            r.get::<_, Option<String>>(0)
+        })
+        .map_err(|e| e.to_string())?;
+    let Some(src_day) = src else {
+        return Ok(0);
+    };
+    let mut templates: Vec<(
+        String,
+        Option<String>,
+        Option<i64>,
+        Option<i64>,
+        Option<String>,
+        String,
+        i64,
+    )> = Vec::new();
     {
         let mut stmt = conn.prepare(
             "SELECT title, project, target_minutes, target_count, target_unit, priority, recurring FROM goals
              WHERE day = ?1 ORDER BY sort_order, id",
         ).map_err(|e| e.to_string())?;
-        let rows = stmt.query_map([&src_day], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
-        }).map_err(|e| e.to_string())?;
-        for row in rows { templates.push(row.map_err(|e| e.to_string())?); }
+        let rows = stmt
+            .query_map([&src_day], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            templates.push(row.map_err(|e| e.to_string())?);
+        }
     }
     let mut order = aggregate::next_sort_order(conn, day);
     let mut count = 0i64;
-    for (title, project, target_minutes, target_count, target_unit, priority, recurring) in templates {
-        if aggregate::goal_exists(conn, day, &title) { continue; }
+    for (title, project, target_minutes, target_count, target_unit, priority, recurring) in
+        templates
+    {
+        if aggregate::goal_exists(conn, day, &title) {
+            continue;
+        }
         conn.execute(
             "INSERT INTO goals
                (day, title, project, target_minutes, target_count, target_unit, priority, completed, sort_order, recurring, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, ?10)",
             params![day, title, project, target_minutes, target_count, target_unit, priority, order, recurring, chrono::Utc::now().to_rfc3339()],
         ).map_err(|e| e.to_string())?;
-        order += 1; count += 1;
+        order += 1;
+        count += 1;
     }
     Ok(count)
 }
@@ -438,14 +604,26 @@ fn copy_previous_goals(conn: &Connection, day: &str) -> Result<i64, String> {
 /// plan writes — all reusing the exact same `tempo_core::aggregate` cores the
 /// desktop uses. The Focus summary is computed across every synced device.
 fn dispatch(conn: &Connection, cmd: &str, args: &Value) -> Result<Value, String> {
-    let day = args.get("day").and_then(|v| v.as_str()).map(String::from).unwrap_or_else(aggregate::today);
+    let day = args
+        .get("day")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_else(aggregate::today);
     match cmd {
-        "get_today_summary" => Ok(serde_json::to_value(aggregate::summary_for_day(conn, &day)?).unwrap()),
+        "get_today_summary" => {
+            Ok(serde_json::to_value(aggregate::summary_for_day(conn, &day)?).unwrap())
+        }
         "get_timeline_for_day" => {
-            let gap = args.get("maxGapSeconds").and_then(|v| v.as_i64()).unwrap_or(120).clamp(20, 3600);
+            let gap = args
+                .get("maxGapSeconds")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(120)
+                .clamp(20, 3600);
             Ok(serde_json::to_value(aggregate::timeline_for_day(conn, &day, gap)?).unwrap())
         }
-        "get_daily_score" => Ok(serde_json::to_value(aggregate::score_report_for_day(conn, &day)?).unwrap()),
+        "get_daily_score" => {
+            Ok(serde_json::to_value(aggregate::score_report_for_day(conn, &day)?).unwrap())
+        }
         "get_streaks" => Ok(serde_json::to_value(aggregate::compute_streaks(conn)?).unwrap()),
         "get_weekly_review" => Ok(serde_json::to_value(aggregate::weekly_review(conn)?).unwrap()),
         "generate_accountability_export" => {
@@ -462,13 +640,139 @@ fn dispatch(conn: &Connection, cmd: &str, args: &Value) -> Result<Value, String>
                      FROM output_events WHERE day = ?1 ORDER BY COALESCE(modified_at, timestamp) DESC",
                 )
                 .map_err(|e| e.to_string())?;
-            let rows = stmt.query_map([&day], aggregate::row_to_output).map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([&day], aggregate::row_to_output)
+                .map_err(|e| e.to_string())?;
             let out: Vec<_> = rows.filter_map(Result::ok).collect();
             Ok(serde_json::to_value(out).unwrap())
         }
-        "get_category_definitions" => {
-            Ok(serde_json::to_value(models::list_category_definitions(conn).map_err(|e| e.to_string())?).unwrap())
+        "get_tracked_apps" => {
+            let mut stmt = conn.prepare(
+                "SELECT al.app_name, COALESCE(SUM(al.duration_seconds), 0), cr.category, COALESCE(cr.ai_review, 0)
+                 FROM activity_log al LEFT JOIN category_rules cr ON cr.app_name = al.app_name
+                 GROUP BY al.app_name ORDER BY 2 DESC",
+            ).map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([], |r| Ok(json!({
+                "appName": r.get::<_, String>(0)?, "totalSeconds": r.get::<_, i64>(1)?,
+                "category": r.get::<_, Option<String>>(2)?, "aiReview": r.get::<_, i64>(3)? != 0,
+            }))).map_err(|e| e.to_string())?;
+            Ok(Value::Array(rows.filter_map(Result::ok).collect()))
         }
+        "get_category_rules" => {
+            let mut stmt = conn
+                .prepare("SELECT app_name, category FROM category_rules ORDER BY app_name")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(json!({
+                        "appName": r.get::<_, String>(0)?, "category": r.get::<_, String>(1)?,
+                    }))
+                })
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Array(rows.filter_map(Result::ok).collect()))
+        }
+        "set_category_rule" => {
+            let app = args
+                .get("appName")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            let category = args
+                .get("category")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            if app.is_empty() || !models::category_exists(conn, category) {
+                return Err("Invalid app or category".into());
+            }
+            conn.execute(
+                "INSERT INTO category_rules(app_name, category, ai_review, updated_at) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(app_name) DO UPDATE SET category=excluded.category, ai_review=excluded.ai_review, updated_at=excluded.updated_at",
+                params![app, category, args.get("aiReview").and_then(|v| v.as_bool()).unwrap_or(false) as i64, chrono::Utc::now().to_rfc3339()],
+            ).map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "delete_category_rule" => {
+            let app = args.get("appName").and_then(|v| v.as_str()).unwrap_or("");
+            conn.execute("DELETE FROM category_rules WHERE app_name = ?1", [app])
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "get_tracked_domains" => {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT ba.domain, COALESCE(SUM(ba.duration_seconds), 0), dr.category,
+                        COALESCE(dr.capture_mode, 'meta'), COALESCE(dr.ai_review, 0)
+                 FROM browser_activity ba LEFT JOIN domain_rules dr ON dr.domain = ba.domain
+                 GROUP BY ba.domain ORDER BY 2 DESC",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([], |r| Ok(json!({
+                "domain": r.get::<_, String>(0)?, "totalSeconds": r.get::<_, i64>(1)?,
+                "category": r.get::<_, Option<String>>(2)?, "captureMode": r.get::<_, String>(3)?,
+                "aiReview": r.get::<_, i64>(4)? != 0,
+            }))).map_err(|e| e.to_string())?;
+            Ok(Value::Array(rows.filter_map(Result::ok).collect()))
+        }
+        "get_domain_rules" => Ok(serde_json::to_value(
+            settings::list_domain_rules(conn).map_err(|e| e.to_string())?,
+        )
+        .unwrap()),
+        "set_domain_rule" => {
+            let domain = args
+                .get("domain")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            if domain.is_empty() {
+                return Err("Domain is required".into());
+            }
+            let category = args
+                .get("category")
+                .and_then(|v| v.as_str())
+                .filter(|c| models::category_exists(conn, c));
+            let mode = match args.get("captureMode").and_then(|v| v.as_str()) {
+                Some("text") => "text",
+                Some("never") => "never",
+                _ => "meta",
+            };
+            conn.execute(
+                "INSERT INTO domain_rules(domain, category, capture_mode, ai_review, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(domain) DO UPDATE SET category=excluded.category, capture_mode=excluded.capture_mode, ai_review=excluded.ai_review, updated_at=excluded.updated_at",
+                params![domain, category, mode, args.get("aiReview").and_then(|v| v.as_bool()).unwrap_or(false) as i64, chrono::Utc::now().to_rfc3339()],
+            ).map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "delete_domain_rule" => {
+            let domain = args.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+            conn.execute("DELETE FROM domain_rules WHERE domain = ?1", [domain])
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "get_classification_policies" => {
+            Ok(serde_json::to_value(tempo_core::semantic::load(conn)).unwrap())
+        }
+        "set_classification_policies" => {
+            let policies: Vec<tempo_core::semantic::ClassificationPolicy> =
+                serde_json::from_value(args.get("policies").cloned().ok_or("missing policies")?)
+                    .map_err(|e| e.to_string())?;
+            let policies = tempo_core::semantic::validate(policies)?;
+            for policy in &policies {
+                if !models::category_exists(conn, &policy.category) {
+                    return Err(format!(
+                        "Unknown category in policy {}: {}",
+                        policy.name, policy.category
+                    ));
+                }
+            }
+            tempo_core::semantic::save(conn, &policies)?;
+            Ok(Value::Null)
+        }
+        "get_category_definitions" => Ok(serde_json::to_value(
+            models::list_category_definitions(conn).map_err(|e| e.to_string())?,
+        )
+        .unwrap()),
         "upsert_category_definition" => {
             let category: models::CategoryDefinition =
                 serde_json::from_value(args.get("category").cloned().ok_or("missing category")?)
@@ -478,17 +782,27 @@ fn dispatch(conn: &Connection, cmd: &str, args: &Value) -> Result<Value, String>
             Ok(Value::Null)
         }
         "delete_category_definition" => {
-            let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing id")?;
-            models::delete_category_definition(conn, &id.trim().to_ascii_lowercase()).map_err(|e| e.to_string())?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing id")?;
+            models::delete_category_definition(conn, &id.trim().to_ascii_lowercase())
+                .map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
-        "get_projects" => Ok(serde_json::to_value(projects::list_projects(conn).map_err(|e| e.to_string())?).unwrap()),
+        "get_projects" => Ok(serde_json::to_value(
+            projects::list_projects(conn).map_err(|e| e.to_string())?,
+        )
+        .unwrap()),
         "create_project" => {
             let project: projects::Project =
                 serde_json::from_value(args.get("project").cloned().ok_or("missing project")?)
                     .map_err(|e| e.to_string())?;
             validate_project(conn, &project)?;
-            Ok(serde_json::to_value(projects::create_project(conn, &project).map_err(|e| e.to_string())?).unwrap())
+            Ok(serde_json::to_value(
+                projects::create_project(conn, &project).map_err(|e| e.to_string())?,
+            )
+            .unwrap())
         }
         "update_project" => {
             let project: projects::Project =
@@ -502,7 +816,10 @@ fn dispatch(conn: &Connection, cmd: &str, args: &Value) -> Result<Value, String>
             Ok(Value::Null)
         }
         "delete_project" => {
-            let id = args.get("id").and_then(|v| v.as_i64()).ok_or("missing id")?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_i64())
+                .ok_or("missing id")?;
             projects::delete_project(conn, id).map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
@@ -511,14 +828,24 @@ fn dispatch(conn: &Connection, cmd: &str, args: &Value) -> Result<Value, String>
                 serde_json::from_value(args.get("project").cloned().ok_or("missing project")?)
                     .map_err(|e| e.to_string())?;
             validate_project(conn, &project)?;
-            let identifier = args.get("identifier").and_then(|v| v.as_str()).unwrap_or_default();
-            let title = args.get("title").and_then(|v| v.as_str()).unwrap_or_default();
-            let extra = args.get("extra").and_then(|v| v.as_str()).unwrap_or_default();
-            Ok(serde_json::to_value(projects::test_project_match(&project, identifier, title, extra)).unwrap())
+            let identifier = args
+                .get("identifier")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let title = args
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let extra = args
+                .get("extra")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            Ok(serde_json::to_value(projects::test_project_match(
+                &project, identifier, title, extra,
+            ))
+            .unwrap())
         }
-        "get_goals" => {
-            Ok(serde_json::to_value(list_goals(conn, &day)?).unwrap())
-        }
+        "get_goals" => Ok(serde_json::to_value(list_goals(conn, &day)?).unwrap()),
         "add_goal" => {
             let goal: Goal =
                 serde_json::from_value(args.get("goal").cloned().ok_or("missing goal")?)
@@ -532,13 +859,21 @@ fn dispatch(conn: &Connection, cmd: &str, args: &Value) -> Result<Value, String>
             update_goal_row(conn, goal)?;
             Ok(Value::Null)
         }
-        "get_checkins" => Ok(serde_json::to_value(models::checkin_values_for_day(conn, &day)).unwrap()),
+        "get_checkins" => {
+            Ok(serde_json::to_value(models::checkin_values_for_day(conn, &day)).unwrap())
+        }
         "set_checkin" => {
-            let field = args.get("field").and_then(|v| v.as_str()).ok_or("missing field")?;
+            let field = args
+                .get("field")
+                .and_then(|v| v.as_str())
+                .ok_or("missing field")?;
             let raw = args.get("value").and_then(|v| v.as_i64()).unwrap_or(0);
             if field == "main_goal_completed" {
-                conn.execute("INSERT OR IGNORE INTO daily_checkin (day) VALUES (?1)", params![day])
-                    .map_err(|e| e.to_string())?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO daily_checkin (day) VALUES (?1)",
+                    params![day],
+                )
+                .map_err(|e| e.to_string())?;
                 conn.execute(
                     "UPDATE daily_checkin SET main_goal_completed = ?1 WHERE day = ?2",
                     params![(raw != 0) as i64, day],
@@ -550,13 +885,17 @@ fn dispatch(conn: &Connection, cmd: &str, args: &Value) -> Result<Value, String>
             Ok(Value::Null)
         }
         "clear_checkin" => {
-            let field = args.get("field").and_then(|v| v.as_str()).ok_or("missing field")?;
+            let field = args
+                .get("field")
+                .and_then(|v| v.as_str())
+                .ok_or("missing field")?;
             models::clear_checkin_value(conn, &day, field)?;
             Ok(Value::Null)
         }
-        "get_checkin_definitions" => {
-            Ok(serde_json::to_value(models::list_checkin_definitions(conn).map_err(|e| e.to_string())?).unwrap())
-        }
+        "get_checkin_definitions" => Ok(serde_json::to_value(
+            models::list_checkin_definitions(conn).map_err(|e| e.to_string())?,
+        )
+        .unwrap()),
         "upsert_checkin_definition" => {
             let checkin: models::CheckinDefinition =
                 serde_json::from_value(args.get("checkin").cloned().ok_or("missing checkin")?)
@@ -565,41 +904,78 @@ fn dispatch(conn: &Connection, cmd: &str, args: &Value) -> Result<Value, String>
             Ok(Value::Null)
         }
         "delete_checkin_definition" => {
-            let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing id")?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing id")?;
             models::delete_checkin_definition(conn, id)?;
             Ok(Value::Null)
         }
         "toggle_goal" => {
-            let id = args.get("id").and_then(|v| v.as_i64()).ok_or("missing id")?;
-            let completed = args.get("completed").and_then(|v| v.as_bool()).unwrap_or(false);
-            conn.execute("UPDATE goals SET completed = ?1 WHERE id = ?2", params![completed as i64, id])
-                .map_err(|e| e.to_string())?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_i64())
+                .ok_or("missing id")?;
+            let completed = args
+                .get("completed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            conn.execute(
+                "UPDATE goals SET completed = ?1 WHERE id = ?2",
+                params![completed as i64, id],
+            )
+            .map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
         "delete_goal" => {
-            let id = args.get("id").and_then(|v| v.as_i64()).ok_or("missing id")?;
-            conn.execute("DELETE FROM goals WHERE id = ?1", params![id]).map_err(|e| e.to_string())?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_i64())
+                .ok_or("missing id")?;
+            conn.execute("DELETE FROM goals WHERE id = ?1", params![id])
+                .map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
         "set_goal_recurring" => {
-            let id = args.get("id").and_then(|v| v.as_i64()).ok_or("missing id")?;
-            let recurring = args.get("recurring").and_then(|v| v.as_bool()).unwrap_or(false);
-            conn.execute("UPDATE goals SET recurring = ?1 WHERE id = ?2", params![recurring as i64, id])
-                .map_err(|e| e.to_string())?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_i64())
+                .ok_or("missing id")?;
+            let recurring = args
+                .get("recurring")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            conn.execute(
+                "UPDATE goals SET recurring = ?1 WHERE id = ?2",
+                params![recurring as i64, id],
+            )
+            .map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
         "copy_previous_goals" => {
             Ok(serde_json::to_value(copy_previous_goals(conn, &day)?).unwrap())
         }
         "set_scoring_weight" => {
-            let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing id")?;
-            let weight = args.get("weight").and_then(|v| v.as_i64()).ok_or("missing weight")?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing id")?;
+            let weight = args
+                .get("weight")
+                .and_then(|v| v.as_i64())
+                .ok_or("missing weight")?;
             scoring::set_weight(conn, id, weight)?;
             Ok(Value::Null)
         }
         "set_scoring_threshold" => {
-            let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing id")?;
-            let threshold = args.get("threshold").and_then(|v| v.as_i64()).ok_or("missing threshold")?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing id")?;
+            let threshold = args
+                .get("threshold")
+                .and_then(|v| v.as_i64())
+                .ok_or("missing threshold")?;
             scoring::set_threshold(conn, id, threshold)?;
             Ok(Value::Null)
         }
@@ -616,7 +992,10 @@ fn dispatch(conn: &Connection, cmd: &str, args: &Value) -> Result<Value, String>
             Ok(Value::Null)
         }
         "delete_score_rule" => {
-            let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing id")?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing id")?;
             scoring::delete_rule(conn, id)?;
             Ok(Value::Null)
         }
@@ -636,7 +1015,10 @@ fn dispatch(conn: &Connection, cmd: &str, args: &Value) -> Result<Value, String>
             Ok(serde_json::to_value(defs).unwrap())
         }
         "update_streak_definition" => {
-            let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing id")?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing id")?;
             let now = chrono::Utc::now().to_rfc3339();
             if let Some(en) = args.get("enabled").and_then(|v| v.as_bool()) {
                 conn.execute(
@@ -652,7 +1034,11 @@ fn dispatch(conn: &Connection, cmd: &str, args: &Value) -> Result<Value, String>
                 )
                 .map_err(|e| e.to_string())?;
             }
-            if let Some(name) = args.get("name").and_then(|v| v.as_str()).filter(|n| !n.trim().is_empty()) {
+            if let Some(name) = args
+                .get("name")
+                .and_then(|v| v.as_str())
+                .filter(|n| !n.trim().is_empty())
+            {
                 conn.execute(
                     "UPDATE streak_definitions SET name = ?1, updated_at = ?2 WHERE id = ?3",
                     params![name.trim(), now, id],
@@ -674,30 +1060,52 @@ fn dispatch(conn: &Connection, cmd: &str, args: &Value) -> Result<Value, String>
             let kind = args.get("kind").and_then(|v| v.as_str()).unwrap_or("");
             let metric = args.get("metric").and_then(|v| v.as_str()).unwrap_or("");
             let threshold = args.get("threshold").and_then(|v| v.as_i64()).unwrap_or(0);
-            let days_per_week = args.get("daysPerWeek").and_then(|v| v.as_i64()).unwrap_or(0);
-            tempo_core::streaks::add_definition(conn, id, name, kind, metric, threshold, days_per_week)?;
+            let days_per_week = args
+                .get("daysPerWeek")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            tempo_core::streaks::add_definition(
+                conn,
+                id,
+                name,
+                kind,
+                metric,
+                threshold,
+                days_per_week,
+            )?;
             Ok(Value::Null)
         }
         "delete_streak_definition" => {
-            let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing id")?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing id")?;
             tempo_core::streaks::delete_definition(conn, id)?;
             Ok(Value::Null)
         }
-        "seed_default_streaks" => {
-            Ok(serde_json::to_value(tempo_core::streaks::seed_suggested(conn).map_err(|e| e.to_string())?)
-                .unwrap())
-        }
+        "seed_default_streaks" => Ok(serde_json::to_value(
+            tempo_core::streaks::seed_suggested(conn).map_err(|e| e.to_string())?,
+        )
+        .unwrap()),
         "set_daily_note" => {
             let notes = args.get("notes").and_then(|v| v.as_str()).unwrap_or("");
-            conn.execute("INSERT OR IGNORE INTO daily_checkin (day) VALUES (?1)", params![day])
-                .map_err(|e| e.to_string())?;
-            conn.execute("UPDATE daily_checkin SET notes = ?1 WHERE day = ?2", params![notes, day])
-                .map_err(|e| e.to_string())?;
+            conn.execute(
+                "INSERT OR IGNORE INTO daily_checkin (day) VALUES (?1)",
+                params![day],
+            )
+            .map_err(|e| e.to_string())?;
+            conn.execute(
+                "UPDATE daily_checkin SET notes = ?1 WHERE day = ?2",
+                params![notes, day],
+            )
+            .map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
         // --- daily review (today-scoped, mirrors the desktop wrappers) ---
         "get_daily_review" => Ok(serde_json::to_value(aggregate::daily_review(conn)?).unwrap()),
-        "generate_daily_review" => Ok(serde_json::to_value(aggregate::generate_review(conn)?).unwrap()),
+        "generate_daily_review" => {
+            Ok(serde_json::to_value(aggregate::generate_review(conn)?).unwrap())
+        }
         // --- daily lock-in plan ---
         "get_lockin_plan" => Ok(serde_json::to_value(aggregate::load_plan(conn, &day)).unwrap()),
         "generate_lockin_plan" => {
@@ -721,7 +1129,10 @@ fn dispatch(conn: &Connection, cmd: &str, args: &Value) -> Result<Value, String>
             Ok(serde_json::to_value(aggregate::latest_focus_session_today(conn)).unwrap())
         }
         "get_focus_summary" => {
-            let id = args.get("id").and_then(|v| v.as_i64()).ok_or("missing id")?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_i64())
+                .ok_or("missing id")?;
             Ok(serde_json::to_value(aggregate::focus_summary(conn, id)?).unwrap())
         }
         // --- which device contributed what today (desktop vs phone) ---
@@ -800,7 +1211,10 @@ fn device_breakdown(conn: &Connection, day: &str) -> Result<Value, String> {
         })
         .collect();
     list.sort_by(|a, b| {
-        b["activeSeconds"].as_i64().unwrap_or(0).cmp(&a["activeSeconds"].as_i64().unwrap_or(0))
+        b["activeSeconds"]
+            .as_i64()
+            .unwrap_or(0)
+            .cmp(&a["activeSeconds"].as_i64().unwrap_or(0))
     });
     Ok(Value::Array(list))
 }
@@ -834,7 +1248,11 @@ fn serve_static(cfg: &Config, path: &str) -> (u16, Vec<u8>, &'static str) {
     if path.contains("..") {
         return (400, b"bad path".to_vec(), "text/plain");
     }
-    let rel = if path == "/" { "index.html" } else { path.trim_start_matches('/') };
+    let rel = if path == "/" {
+        "index.html"
+    } else {
+        path.trim_start_matches('/')
+    };
     let full: PathBuf = Path::new(&cfg.static_dir).join(rel);
     if full.is_file() {
         if let Ok(bytes) = std::fs::read(&full) {
@@ -845,7 +1263,11 @@ fn serve_static(cfg: &Config, path: &str) -> (u16, Vec<u8>, &'static str) {
     let index = Path::new(&cfg.static_dir).join("index.html");
     match std::fs::read(&index) {
         Ok(bytes) => (200, bytes, "text/html; charset=utf-8"),
-        Err(_) => (404, b"Dashboard not built. Build the React app and set TEMPO_STATIC_DIR.".to_vec(), "text/plain"),
+        Err(_) => (
+            404,
+            b"Dashboard not built. Build the React app and set TEMPO_STATIC_DIR.".to_vec(),
+            "text/plain",
+        ),
     }
 }
 
@@ -876,7 +1298,9 @@ fn header(req: &Request, name: &str) -> Option<String> {
 
 fn bearer(req: &Request) -> Option<String> {
     let v = header(req, "authorization")?;
-    v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer ")).map(|s| s.trim().to_string())
+    v.strip_prefix("Bearer ")
+        .or_else(|| v.strip_prefix("bearer "))
+        .map(|s| s.trim().to_string())
 }
 
 fn read_body(req: &mut Request) -> String {
@@ -913,16 +1337,27 @@ fn cors_headers(cfg: &Config, origin: Option<&str>) -> Vec<Header> {
         out.push(Header::from_bytes(&b"Access-Control-Allow-Origin"[..], o.as_bytes()).unwrap());
         out.push(Header::from_bytes(&b"Vary"[..], &b"Origin"[..]).unwrap());
         out.push(
-            Header::from_bytes(&b"Access-Control-Allow-Headers"[..], &b"authorization, content-type"[..]).unwrap(),
+            Header::from_bytes(
+                &b"Access-Control-Allow-Headers"[..],
+                &b"authorization, content-type"[..],
+            )
+            .unwrap(),
         );
         out.push(
-            Header::from_bytes(&b"Access-Control-Allow-Methods"[..], &b"GET, POST, OPTIONS"[..]).unwrap(),
+            Header::from_bytes(
+                &b"Access-Control-Allow-Methods"[..],
+                &b"GET, POST, OPTIONS"[..],
+            )
+            .unwrap(),
         );
     }
     out
 }
 
-fn with_headers(mut resp: Response<Cursor<Vec<u8>>>, headers: &[Header]) -> Response<Cursor<Vec<u8>>> {
+fn with_headers(
+    mut resp: Response<Cursor<Vec<u8>>>,
+    headers: &[Header],
+) -> Response<Cursor<Vec<u8>>> {
     for h in headers {
         resp.add_header(h.clone());
     }
@@ -974,18 +1409,27 @@ mod tests {
 
     #[test]
     fn cors_is_closed_by_default_and_exact_when_configured() {
-        let mut cfg = Config { pairing_secret: "secret".into(), static_dir: "web".into(), allowed_origins: vec![] };
+        let mut cfg = Config {
+            pairing_secret: "secret".into(),
+            static_dir: "web".into(),
+            allowed_origins: vec![],
+        };
         assert!(cors_headers(&cfg, Some("https://example.com")).is_empty());
         cfg.allowed_origins = vec!["https://tempo.example.ts.net".into()];
         let headers = cors_headers(&cfg, Some("https://tempo.example.ts.net"));
-        assert!(headers.iter().any(|h| h.field.as_str().as_str() == "Access-Control-Allow-Origin"));
+        assert!(headers
+            .iter()
+            .any(|h| h.field.as_str().as_str() == "Access-Control-Allow-Origin"));
         assert!(cors_headers(&cfg, Some("https://evil.example")).is_empty());
     }
     #[test]
     fn pairing_token_lifecycle_and_revoke() {
         let conn = db::test_conn();
         let (id, token) = auth::pair_device(&conn, "Desktop", "windows").unwrap();
-        assert_eq!(auth::device_for_token(&conn, &token).as_deref(), Some(id.as_str()));
+        assert_eq!(
+            auth::device_for_token(&conn, &token).as_deref(),
+            Some(id.as_str())
+        );
         assert!(auth::device_for_token(&conn, "not-a-real-token").is_none()); // invalid token
         auth::revoke_device(&conn, &id).unwrap();
         assert!(auth::device_for_token(&conn, &token).is_none()); // revoked device rejected
@@ -1002,10 +1446,16 @@ mod tests {
     fn dedup_and_multi_device_aggregation() {
         let conn = db::test_conn();
         // Same event_id from one device twice → counted once.
-        assert!(events::ingest_event(&conn, "A", &app_event("activity_log:1", "Code", 600)).unwrap());
-        assert!(!events::ingest_event(&conn, "A", &app_event("activity_log:1", "Code", 600)).unwrap());
+        assert!(
+            events::ingest_event(&conn, "A", &app_event("activity_log:1", "Code", 600)).unwrap()
+        );
+        assert!(
+            !events::ingest_event(&conn, "A", &app_event("activity_log:1", "Code", 600)).unwrap()
+        );
         // Different device, same local id → genuinely separate, both counted.
-        assert!(events::ingest_event(&conn, "B", &app_event("activity_log:1", "Code", 300)).unwrap());
+        assert!(
+            events::ingest_event(&conn, "B", &app_event("activity_log:1", "Code", 300)).unwrap()
+        );
 
         let s = aggregate::summary_for_day(&conn, "2026-01-01").unwrap();
         assert_eq!(s.total_active_seconds, 900); // 600 (A) + 300 (B), A's re-upload ignored
@@ -1018,7 +1468,12 @@ mod tests {
         let v = dispatch(&conn, "get_today_summary", &json!({"day": "2026-01-01"})).unwrap();
         assert_eq!(v["totalActiveSeconds"], 600);
 
-        dispatch(&conn, "set_checkin", &json!({"field": "videos_posted", "value": 3})).unwrap();
+        dispatch(
+            &conn,
+            "set_checkin",
+            &json!({"field": "videos_posted", "value": 3}),
+        )
+        .unwrap();
         let c = dispatch(&conn, "get_checkins", &json!({})).unwrap();
         let videos = c
             .as_array()
@@ -1032,16 +1487,39 @@ mod tests {
     #[test]
     fn dispatch_manages_checkin_definitions() {
         let conn = db::test_conn();
-        dispatch(&conn, "upsert_checkin_definition", &json!({"checkin": {
-            "id": "growth_research", "label": "Growth research", "icon": "📈",
-            "kind": "toggle", "builtIn": false
-        }})).unwrap();
-        dispatch(&conn, "set_checkin", &json!({"field": "growth_research", "value": 1})).unwrap();
+        dispatch(
+            &conn,
+            "upsert_checkin_definition",
+            &json!({"checkin": {
+                "id": "growth_research", "label": "Growth research", "icon": "📈",
+                "kind": "toggle", "builtIn": false
+            }}),
+        )
+        .unwrap();
+        dispatch(
+            &conn,
+            "set_checkin",
+            &json!({"field": "growth_research", "value": 1}),
+        )
+        .unwrap();
         let c = dispatch(&conn, "get_checkins", &json!({})).unwrap();
-        assert!(c.as_array().unwrap().iter().any(|x| x["id"] == "growth_research" && x["value"] == 1));
-        dispatch(&conn, "delete_checkin_definition", &json!({"id": "growth_research"})).unwrap();
+        assert!(c
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["id"] == "growth_research" && x["value"] == 1));
+        dispatch(
+            &conn,
+            "delete_checkin_definition",
+            &json!({"id": "growth_research"}),
+        )
+        .unwrap();
         let c = dispatch(&conn, "get_checkins", &json!({})).unwrap();
-        assert!(c.as_array().unwrap().iter().all(|x| x["id"] != "growth_research"));
+        assert!(c
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|x| x["id"] != "growth_research"));
     }
 
     #[test]
@@ -1058,7 +1536,12 @@ mod tests {
         }));
         assert!(events::ingest_event(&conn, "desktop", &e).unwrap());
         let defs = dispatch(&conn, "get_checkin_definitions", &json!({})).unwrap();
-        let d = defs.as_array().unwrap().iter().find(|d| d["id"] == "read_bible").expect("synced");
+        let d = defs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == "read_bible")
+            .expect("synced");
         assert_eq!(d["autoKind"], "target");
         assert_eq!(d["autoThreshold"], 30);
 
@@ -1070,13 +1553,22 @@ mod tests {
         )
         .unwrap();
         let c = dispatch(&conn, "get_checkins", &json!({"day": "2026-01-01"})).unwrap();
-        let bible = c.as_array().unwrap().iter().find(|x| x["id"] == "read_bible").unwrap();
+        let bible = c
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "read_bible")
+            .unwrap();
         assert_eq!(bible["value"], 1); // 40 min ≥ 30 min threshold
         assert_eq!(bible["detected"], 40);
 
         // A cleared-override event deletes any manual row.
-        dispatch(&conn, "set_checkin", &json!({"day": "2026-01-01", "field": "read_bible", "value": 0}))
-            .unwrap();
+        dispatch(
+            &conn,
+            "set_checkin",
+            &json!({"day": "2026-01-01", "field": "read_bible", "value": 0}),
+        )
+        .unwrap();
         let mut clear = app_event("checkin:2026-01-01:read_bible:clear:2", "x", 0);
         clear.event_type = "checkin".into();
         clear.app_name = None;
@@ -1085,7 +1577,12 @@ mod tests {
         clear.metadata = Some(serde_json::json!({ "field": "read_bible", "cleared": true }));
         assert!(events::ingest_event(&conn, "desktop", &clear).unwrap());
         let c = dispatch(&conn, "get_checkins", &json!({"day": "2026-01-01"})).unwrap();
-        let bible = c.as_array().unwrap().iter().find(|x| x["id"] == "read_bible").unwrap();
+        let bible = c
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "read_bible")
+            .unwrap();
         assert_eq!(bible["value"], 1); // back to auto
         assert_eq!(bible["overridden"], false);
 
@@ -1097,7 +1594,11 @@ mod tests {
         del.metadata = Some(serde_json::json!({ "id": "read_bible", "deleted": true }));
         assert!(events::ingest_event(&conn, "desktop", &del).unwrap());
         let defs = dispatch(&conn, "get_checkin_definitions", &json!({})).unwrap();
-        assert!(defs.as_array().unwrap().iter().all(|d| d["id"] != "read_bible"));
+        assert!(defs
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|d| d["id"] != "read_bible"));
     }
 
     #[test]
@@ -1112,7 +1613,12 @@ mod tests {
         }));
         assert!(events::ingest_event(&conn, "desktop", &e).unwrap());
         let c = dispatch(&conn, "get_checkins", &json!({"day": "2026-01-01"})).unwrap();
-        let drill = c.as_array().unwrap().iter().find(|x| x["id"] == "drilling").expect("registered");
+        let drill = c
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "drilling")
+            .expect("registered");
         assert_eq!(drill["value"], 1);
         assert_eq!(drill["label"], "Drilling session");
     }
@@ -1132,17 +1638,39 @@ mod tests {
             "keywords": ["retention"], "apps": ["Premiere Pro"], "domains": ["youtube.com"], "priority": 90
         }})).unwrap();
 
-        let gid = dispatch(&conn, "add_goal", &json!({"day": "2026-01-02", "goal": {
-            "title": "Ship video", "project": "Content Ops", "targetMinutes": 45,
-            "priority": "high", "recurring": true
-        }})).unwrap().as_i64().unwrap();
-        dispatch(&conn, "update_goal", &json!({"goal": {
-            "id": gid, "title": "Ship edited video", "project": "Content Ops",
-            "targetMinutes": null, "targetCount": 1, "targetUnit": "video",
-            "priority": "medium", "completed": true, "recurring": false
-        }})).unwrap();
-        dispatch(&conn, "set_goal_recurring", &json!({"id": gid, "recurring": true})).unwrap();
-        dispatch(&conn, "toggle_goal", &json!({"id": gid, "completed": false})).unwrap();
+        let gid = dispatch(
+            &conn,
+            "add_goal",
+            &json!({"day": "2026-01-02", "goal": {
+                "title": "Ship video", "project": "Content Ops", "targetMinutes": 45,
+                "priority": "high", "recurring": true
+            }}),
+        )
+        .unwrap()
+        .as_i64()
+        .unwrap();
+        dispatch(
+            &conn,
+            "update_goal",
+            &json!({"goal": {
+                "id": gid, "title": "Ship edited video", "project": "Content Ops",
+                "targetMinutes": null, "targetCount": 1, "targetUnit": "video",
+                "priority": "medium", "completed": true, "recurring": false
+            }}),
+        )
+        .unwrap();
+        dispatch(
+            &conn,
+            "set_goal_recurring",
+            &json!({"id": gid, "recurring": true}),
+        )
+        .unwrap();
+        dispatch(
+            &conn,
+            "toggle_goal",
+            &json!({"id": gid, "completed": false}),
+        )
+        .unwrap();
         let goals = dispatch(&conn, "get_goals", &json!({"day": "2026-01-02"})).unwrap();
         assert_eq!(goals[0]["title"], "Ship edited video");
         assert_eq!(goals[0]["completed"], false);
@@ -1156,45 +1684,96 @@ mod tests {
         let copied_goals = dispatch(&conn, "get_goals", &json!({"day": "2026-01-03"})).unwrap();
         assert_eq!(copied_goals[0]["targetCount"], 1);
         dispatch(&conn, "delete_goal", &json!({"id": gid})).unwrap();
-        let goals_after_delete = dispatch(&conn, "get_goals", &json!({"day": "2026-01-02"})).unwrap();
+        let goals_after_delete =
+            dispatch(&conn, "get_goals", &json!({"day": "2026-01-02"})).unwrap();
         assert!(goals_after_delete.as_array().unwrap().is_empty());
 
-        dispatch(&conn, "set_scoring_weight", &json!({"id": "main_goal", "weight": 42})).unwrap();
-        dispatch(&conn, "upsert_score_rule", &json!({"rule": {
-            "id": "business_min", "label": "Business time", "kind": "category",
-            "metric": "business", "weight": 20, "threshold": 90, "builtIn": false
-        }})).unwrap();
-        dispatch(&conn, "set_scoring_threshold", &json!({"id": "business_min", "threshold": 120})).unwrap();
+        dispatch(
+            &conn,
+            "set_scoring_weight",
+            &json!({"id": "main_goal", "weight": 42}),
+        )
+        .unwrap();
+        dispatch(
+            &conn,
+            "upsert_score_rule",
+            &json!({"rule": {
+                "id": "business_min", "label": "Business time", "kind": "category",
+                "metric": "business", "weight": 20, "threshold": 90, "builtIn": false
+            }}),
+        )
+        .unwrap();
+        dispatch(
+            &conn,
+            "set_scoring_threshold",
+            &json!({"id": "business_min", "threshold": 120}),
+        )
+        .unwrap();
         let rules = dispatch(&conn, "get_score_rules", &json!({})).unwrap();
         let rules = rules.as_array().unwrap();
-        assert!(rules.iter().any(|r| r["id"] == "main_goal" && r["weight"] == 42));
-        assert!(rules.iter().any(|r| r["id"] == "business_min" && r["threshold"] == 120));
+        assert!(rules
+            .iter()
+            .any(|r| r["id"] == "main_goal" && r["weight"] == 42));
+        assert!(rules
+            .iter()
+            .any(|r| r["id"] == "business_min" && r["threshold"] == 120));
 
         // Custom rule lifecycle: add against a custom check-in, then delete.
         dispatch(&conn, "upsert_checkin_definition", &json!({"checkin": {
             "id": "drilling", "label": "Drilling", "icon": "🤼", "kind": "toggle", "builtIn": false
         }})).unwrap();
-        dispatch(&conn, "upsert_score_rule", &json!({"rule": {
-            "id": "drilling_rule", "label": "Drilled today", "kind": "checkin",
-            "metric": "drilling", "weight": 10, "threshold": 1, "builtIn": false
-        }})).unwrap();
+        dispatch(
+            &conn,
+            "upsert_score_rule",
+            &json!({"rule": {
+                "id": "drilling_rule", "label": "Drilled today", "kind": "checkin",
+                "metric": "drilling", "weight": 10, "threshold": 1, "builtIn": false
+            }}),
+        )
+        .unwrap();
         let rules = dispatch(&conn, "get_score_rules", &json!({})).unwrap();
-        assert!(rules.as_array().unwrap().iter().any(|r| r["id"] == "drilling_rule"));
+        assert!(rules
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["id"] == "drilling_rule"));
         dispatch(&conn, "delete_score_rule", &json!({"id": "drilling_rule"})).unwrap();
         dispatch(&conn, "reset_scoring_weights", &json!({})).unwrap();
         let rules = dispatch(&conn, "get_score_rules", &json!({})).unwrap();
-        assert!(rules.as_array().unwrap().iter().any(|r| r["id"] == "main_goal" && r["weight"] == 30));
+        assert!(rules
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["id"] == "main_goal" && r["weight"] == 30));
 
         // Streak definition lifecycle over the hub transport.
-        dispatch(&conn, "add_streak_definition", &json!({
-            "id": "drilling_streak", "name": "Drilling", "kind": "checkin",
-            "metric": "drilling", "threshold": 0
-        })).unwrap();
+        dispatch(
+            &conn,
+            "add_streak_definition",
+            &json!({
+                "id": "drilling_streak", "name": "Drilling", "kind": "checkin",
+                "metric": "drilling", "threshold": 0
+            }),
+        )
+        .unwrap();
         let defs = dispatch(&conn, "get_streak_definitions", &json!({})).unwrap();
-        assert!(defs.as_array().unwrap().iter().any(|d| d["id"] == "drilling_streak"));
-        dispatch(&conn, "delete_streak_definition", &json!({"id": "drilling_streak"})).unwrap();
+        assert!(defs
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["id"] == "drilling_streak"));
+        dispatch(
+            &conn,
+            "delete_streak_definition",
+            &json!({"id": "drilling_streak"}),
+        )
+        .unwrap();
         let defs = dispatch(&conn, "get_streak_definitions", &json!({})).unwrap();
-        assert!(defs.as_array().unwrap().iter().all(|d| d["id"] != "drilling_streak"));
+        assert!(defs
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|d| d["id"] != "drilling_streak"));
 
         dispatch(&conn, "delete_project", &json!({"id": pid})).unwrap();
         let projects = dispatch(&conn, "get_projects", &json!({})).unwrap();

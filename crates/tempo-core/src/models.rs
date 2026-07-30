@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
 
 const CATEGORY_DEFAULTS_SEEDED: &str = "category_defaults_seeded";
 
@@ -42,12 +42,48 @@ pub struct CategoryDefinition {
 }
 
 const DEFAULT_CATEGORY_DEFS: &[(&str, &str, &str, &str, &str)] = &[
-    ("productive", "Productive", "#16a34a", "productive", "Deep, focused work"),
-    ("study", "Study", "#2563eb", "productive", "Learning & research"),
-    ("business", "Business", "#0d9488", "productive", "Admin, email, ops"),
-    ("neutral", "Neutral", "#64748b", "neutral", "Necessary or ambiguous; no automatic penalty"),
-    ("distraction", "Distraction", "#dc2626", "distracting", "Off-task time"),
-    ("recovery", "Recovery", "#9333ea", "neutral", "Intentional rest"),
+    (
+        "productive",
+        "Productive",
+        "#16a34a",
+        "productive",
+        "Deep, focused work",
+    ),
+    (
+        "study",
+        "Study",
+        "#2563eb",
+        "productive",
+        "Learning & research",
+    ),
+    (
+        "business",
+        "Business",
+        "#0d9488",
+        "productive",
+        "Admin, email, ops",
+    ),
+    (
+        "neutral",
+        "Neutral",
+        "#64748b",
+        "neutral",
+        "Necessary or ambiguous; no automatic penalty",
+    ),
+    (
+        "distraction",
+        "Distraction",
+        "#dc2626",
+        "distracting",
+        "Off-task time",
+    ),
+    (
+        "recovery",
+        "Recovery",
+        "#9333ea",
+        "neutral",
+        "Intentional rest",
+    ),
 ];
 
 pub fn ensure_category_defaults(conn: &Connection) -> rusqlite::Result<()> {
@@ -86,8 +122,12 @@ pub fn category_exists(conn: &Connection, id: &str) -> bool {
         return false;
     }
     let _ = ensure_category_defaults(conn);
-    conn.query_row("SELECT 1 FROM category_definitions WHERE id = ?1", [id], |_| Ok(()))
-        .is_ok()
+    conn.query_row(
+        "SELECT 1 FROM category_definitions WHERE id = ?1",
+        [id],
+        |_| Ok(()),
+    )
+    .is_ok()
 }
 
 pub fn fallback_category(conn: &Connection, excluded: Option<&str>) -> Option<String> {
@@ -132,14 +172,19 @@ pub fn list_category_definitions(conn: &Connection) -> rusqlite::Result<Vec<Cate
     rows.collect()
 }
 
-pub fn upsert_category_definition(conn: &Connection, c: &CategoryDefinition) -> rusqlite::Result<()> {
+pub fn upsert_category_definition(
+    conn: &Connection,
+    c: &CategoryDefinition,
+) -> rusqlite::Result<()> {
     let now = chrono::Utc::now().to_rfc3339();
     let built_in = is_valid_category(&c.id);
-    let sort: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM category_definitions",
-        [],
-        |r| r.get(0),
-    ).unwrap_or(0);
+    let sort: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM category_definitions",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
     conn.execute(
         "INSERT INTO category_definitions (id, label, color, bucket, blurb, built_in, sort_order, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
@@ -179,18 +224,36 @@ pub fn delete_category_definition(conn: &Connection, id: &str) -> Result<(), Str
 
     conn.execute("DELETE FROM category_definitions WHERE id = ?1", [&id])
         .map_err(|e| e.to_string())?;
-    conn.execute("UPDATE category_rules SET category = ?2 WHERE category = ?1", params![&id, &fallback])
-        .map_err(|e| e.to_string())?;
-    conn.execute("UPDATE domain_rules SET category = NULL WHERE category = ?1", [&id])
-        .map_err(|e| e.to_string())?;
-    conn.execute("UPDATE projects SET category = ?2 WHERE category = ?1", params![&id, &fallback])
-        .map_err(|e| e.to_string())?;
-    conn.execute("UPDATE manual_corrections SET category = ?2 WHERE category = ?1", params![&id, &fallback])
-        .map_err(|e| e.to_string())?;
-    conn.execute("UPDATE smart_activity SET category = ?2 WHERE category = ?1", params![&id, &fallback])
-        .map_err(|e| e.to_string())?;
-    conn.execute("UPDATE llm_classification SET category = ?2 WHERE category = ?1", params![&id, &fallback])
-        .map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE category_rules SET category = ?2 WHERE category = ?1",
+        params![&id, &fallback],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE domain_rules SET category = NULL WHERE category = ?1",
+        [&id],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE projects SET category = ?2 WHERE category = ?1",
+        params![&id, &fallback],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE manual_corrections SET category = ?2 WHERE category = ?1",
+        params![&id, &fallback],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE smart_activity SET category = ?2 WHERE category = ?1",
+        params![&id, &fallback],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE llm_classification SET category = ?2 WHERE category = ?1",
+        params![&id, &fallback],
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -401,16 +464,24 @@ pub fn checkin_exists(conn: &Connection, id: &str) -> bool {
         return false;
     }
     let _ = ensure_checkin_defaults(conn);
-    conn.query_row("SELECT 1 FROM checkin_definitions WHERE id = ?1", [id], |_| Ok(()))
-        .is_ok()
+    conn.query_row(
+        "SELECT 1 FROM checkin_definitions WHERE id = ?1",
+        [id],
+        |_| Ok(()),
+    )
+    .is_ok()
 }
 
 pub fn upsert_checkin_definition(conn: &Connection, c: &CheckinDefinition) -> Result<(), String> {
     let id = c.id.trim().to_ascii_lowercase();
     if id.is_empty()
-        || !id.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-')
+        || !id
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-')
     {
-        return Err("Check-in id must use lowercase letters, numbers, dashes or underscores".into());
+        return Err(
+            "Check-in id must use lowercase letters, numbers, dashes or underscores".into(),
+        );
     }
     if c.label.trim().is_empty() {
         return Err("Check-in label is required".into());
@@ -428,15 +499,35 @@ pub fn upsert_checkin_definition(conn: &Connection, c: &CheckinDefinition) -> Re
     // Sensible thresholds when unset: 30 active minutes for app/site time,
     // 1 detected file for outputs.
     let auto_threshold = match c.auto_kind.as_str() {
-        "target" => if c.auto_threshold > 0 { c.auto_threshold.clamp(1, 1440) } else { 30 },
-        "output" => if c.auto_threshold > 0 { c.auto_threshold.clamp(1, 999) } else { 1 },
+        "target" => {
+            if c.auto_threshold > 0 {
+                c.auto_threshold.clamp(1, 1440)
+            } else {
+                30
+            }
+        }
+        "output" => {
+            if c.auto_threshold > 0 {
+                c.auto_threshold.clamp(1, 999)
+            } else {
+                1
+            }
+        }
         _ => 0,
     };
     let _ = ensure_checkin_defaults(conn);
     let now = chrono::Utc::now().to_rfc3339();
-    let icon = if c.icon.trim().is_empty() { "✅" } else { c.icon.trim() };
+    let icon = if c.icon.trim().is_empty() {
+        "✅"
+    } else {
+        c.icon.trim()
+    };
     let sort: i64 = conn
-        .query_row("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM checkin_definitions", [], |r| r.get(0))
+        .query_row(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM checkin_definitions",
+            [],
+            |r| r.get(0),
+        )
         .unwrap_or(0);
     conn.execute(
         "INSERT INTO checkin_definitions
@@ -461,8 +552,10 @@ pub fn delete_checkin_definition(conn: &Connection, id: &str) -> Result<(), Stri
     if id.is_empty() {
         return Err("Check-in id is required".into());
     }
-    conn.execute("DELETE FROM checkin_definitions WHERE id = ?1", [&id]).map_err(|e| e.to_string())?;
-    conn.execute("DELETE FROM checkin_values WHERE checkin_id = ?1", [&id]).map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM checkin_definitions WHERE id = ?1", [&id])
+        .map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM checkin_values WHERE checkin_id = ?1", [&id])
+        .map_err(|e| e.to_string())?;
     // Streaks and score rules that referenced this check-in simply stop matching;
     // remove them so they don't linger as dead rows.
     conn.execute(
@@ -542,7 +635,11 @@ pub fn auto_detected_amount(conn: &Connection, day: &str, def: &CheckinDefinitio
 fn auto_value(def: &CheckinDefinition, amount: i64) -> i64 {
     let thr = def.auto_threshold.max(1);
     if def.kind == "counter" {
-        if def.auto_kind == "target" { amount / thr } else { amount }
+        if def.auto_kind == "target" {
+            amount / thr
+        } else {
+            amount
+        }
     } else {
         (amount >= thr) as i64
     }
@@ -583,7 +680,11 @@ pub fn checkin_values_for_day(conn: &Connection, day: &str) -> Vec<CheckinValue>
         .into_iter()
         .map(|(def, manual)| {
             let auto = !def.auto_kind.is_empty();
-            let detected = if auto { auto_detected_amount(conn, day, &def) } else { 0 };
+            let detected = if auto {
+                auto_detected_amount(conn, day, &def)
+            } else {
+                0
+            };
             let value = match manual {
                 Some(v) => v,
                 None if auto => auto_value(&def, detected),
@@ -605,7 +706,10 @@ pub fn checkin_values_for_day(conn: &Connection, day: &str) -> Vec<CheckinValue>
 
 /// Check-in values for `day` as an id → value map (only definitions that exist).
 pub fn checkin_map_for_day(conn: &Connection, day: &str) -> std::collections::HashMap<String, i64> {
-    checkin_values_for_day(conn, day).into_iter().map(|c| (c.id, c.value)).collect()
+    checkin_values_for_day(conn, day)
+        .into_iter()
+        .map(|c| (c.id, c.value))
+        .collect()
 }
 
 /// Set one check-in's value for a day. Toggles clamp to 0/1, counters to 0..999.
@@ -613,9 +717,17 @@ pub fn set_checkin_value(conn: &Connection, day: &str, id: &str, value: i64) -> 
     let _ = ensure_checkin_defaults(conn);
     let id = id.trim().to_ascii_lowercase();
     let kind: String = conn
-        .query_row("SELECT kind FROM checkin_definitions WHERE id = ?1", [&id], |r| r.get(0))
+        .query_row(
+            "SELECT kind FROM checkin_definitions WHERE id = ?1",
+            [&id],
+            |r| r.get(0),
+        )
         .map_err(|_| format!("unknown check-in: {id}"))?;
-    let v = if kind == "counter" { value.clamp(0, 999) } else { (value != 0) as i64 };
+    let v = if kind == "counter" {
+        value.clamp(0, 999)
+    } else {
+        (value != 0) as i64
+    };
     conn.execute(
         "INSERT INTO checkin_values (day, checkin_id, value, updated_at) VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(day, checkin_id) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
@@ -629,8 +741,11 @@ pub fn set_checkin_value(conn: &Connection, day: &str, id: &str, value: i64) -> 
 /// live detection (and a manual one back to 0).
 pub fn clear_checkin_value(conn: &Connection, day: &str, id: &str) -> Result<(), String> {
     let id = id.trim().to_ascii_lowercase();
-    conn.execute("DELETE FROM checkin_values WHERE day = ?1 AND checkin_id = ?2", params![day, id])
-        .map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM checkin_values WHERE day = ?1 AND checkin_id = ?2",
+        params![day, id],
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -894,6 +1009,7 @@ pub struct ActivityLogEntry {
     pub title: String,  // window or page title
     pub seconds: i64,
     pub category: String,
+    pub activity_kind: String,
     pub reason: String,
     pub content_type: Option<String>,
     pub last_seen: String,
@@ -943,6 +1059,8 @@ pub struct PrivacySettings {
     pub retention_days: i64,
     pub idle_threshold_seconds: i64,
     pub count_media_as_active: bool,
+    pub tracking_paused_until: Option<String>,
+    pub title_excluded_apps: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -1099,7 +1217,7 @@ pub struct TimelineBlock {
     pub bucket: String, // productive | neutral | distracting
     pub project: Option<String>,
     pub project_confidence: u8,
-    pub confidence: f64, // 0.0–1.0
+    pub confidence: f64,    // 0.0–1.0
     pub classifier: String, // "rule" | "llm" | "manual"
     pub idle: bool,
     pub summary: Option<String>,

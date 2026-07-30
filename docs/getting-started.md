@@ -55,6 +55,8 @@ successful. One to three goals is usually enough. A target is optional: choose *
 Goals give the score and end-of-day review useful context. They are not required
 for tracking.
 
+**Priority** controls the order of missions and which unfinished mission Tempo treats as the main one: High is primary, Medium is normal, and Low is later. It does not multiply minutes or change Daily Score weights.
+
 ### 3. Classify the apps that matter
 
 Open **Projects → Categories** after Tempo has observed some activity. The
@@ -62,6 +64,8 @@ default **All** view puts desktop apps and browser websites in one place; use th
 Apps or Websites filters only when the list gets long. Classify the activity
 that matters as productive, study, business, neutral, distracting, recovery,
 or excluded.
+
+Tempo also identifies common activity types before applying your policy. The built-in Game policy marks recognised games as distracting, including common Steam, Epic, Riot, Ubisoft, GOG, Xbox, and Battle.net installations. You can change the policy for all recognised games, chats, social feeds, creator tools, videos, or research without teaching every individual app. A specific app/site correction or strong project match still wins.
 
 You normally do this once per app or website. Tempo saves the rule and applies
 it to future activity. Websites appear after the browser extension has sent its
@@ -136,6 +140,8 @@ richer classification and reviews, but all core tracking, categories, scores,
 and rule-based reviews work without it. Tempo validates AI output against deterministic evidence:
 goals alone cannot assign a project, and an uncertain app/title-only guess cannot claim near-certainty.
 
+The **Local AI check** checkbox on an app or website rule asks Ollama to double-check even when the deterministic rule is already confident. It is optional and usually should stay off; enable it only for an app or site whose context genuinely changes its meaning.
+
 ### Tempo Hub
 
 Hub sync is for people who want one dashboard across multiple devices. It is
@@ -143,6 +149,10 @@ not required for one Windows computer. If you do want it, the
 [Raspberry Pi setup](raspberry-pi-setup.md) creates the Hub, generates its
 secret, and exposes it to your own Tailscale network through a private HTTPS
 URL. Paste that exact URL into Tempo on each device; do not open router ports.
+
+## Pause and protect private context
+
+Use **Settings → Tracking → Pause tracking** (or the tray menu) for private time. Add sensitive apps such as a password manager to the title-exclusion list when you still want accurate time totals but never want Tempo to store their window titles. Browser samples always discard query strings and fragments; configured sensitive domains retain only their origin. These controls are local to each device.
 
 ## Export for an accountability review
 

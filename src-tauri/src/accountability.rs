@@ -6,7 +6,7 @@
 //! All detection is local; nothing leaves the device.
 
 use crate::db::Db;
-use crate::{classify, models, settings};
+use crate::{aggregate, models, settings};
 use chrono::{DateTime, Local, Utc};
 use rusqlite::Connection;
 use serde::Serialize;
@@ -22,11 +22,7 @@ const FOCUS_WARN_COOLDOWN_SECS: i64 = 60;
 
 /// Send a real OS notification. The caller still emits an in-app event so the
 /// open window can offer richer actions such as Snooze and "It's intentional".
-pub fn send_native_notification(
-    app: &AppHandle,
-    title: &str,
-    body: &str,
-) -> Result<(), String> {
+pub fn send_native_notification(app: &AppHandle, title: &str, body: &str) -> Result<(), String> {
     app.notification()
         .builder()
         .title(title)
@@ -81,8 +77,14 @@ struct Watch {
 
 #[derive(Debug, PartialEq)]
 enum Alert {
-    Distraction { label: String, key: String, minutes: i64 },
-    FocusViolation { label: String },
+    Distraction {
+        label: String,
+        key: String,
+        minutes: i64,
+    },
+    FocusViolation {
+        label: String,
+    },
 }
 
 /// Pure streak / violation state machine. Returns the alerts to emit this tick.
@@ -132,7 +134,9 @@ fn observe(
     if let (Some(f), Some(o)) = (focus, obs) {
         if !o.idle && is_violation(f, o) && w.focus_cooldown == 0 {
             w.focus_cooldown = FOCUS_WARN_COOLDOWN_SECS;
-            alerts.push(Alert::FocusViolation { label: o.label.clone() });
+            alerts.push(Alert::FocusViolation {
+                label: o.label.clone(),
+            });
         }
     }
 
@@ -211,50 +215,76 @@ fn pretty_label(s: &str) -> String {
     }
 }
 
-fn lookup_category(conn: &Connection, key: &str, is_web: bool, title: &str) -> String {
-    if is_web {
-        if let Ok(Some(c)) = conn.query_row(
-            "SELECT category FROM domain_rules WHERE domain = ?1",
-            [key],
-            |r| r.get::<_, Option<String>>(0),
-        ) {
-            if models::is_valid_category(&c) {
-                return c;
-            }
-        }
-    } else if let Ok(c) = conn.query_row(
-        "SELECT category FROM category_rules WHERE app_name = ?1",
-        [key],
-        |r| r.get::<_, String>(0),
-    ) {
-        if models::is_valid_category(&c) {
-            return c;
-        }
-    }
-    classify::classify(key, title, None, None, &[], None).category
+fn lookup_category(
+    conn: &Connection,
+    key: &str,
+    is_web: bool,
+    title: &str,
+    executable_path: Option<&str>,
+    content_type: Option<&str>,
+    summary: Option<&str>,
+    keywords: &[String],
+) -> String {
+    let day = Local::now().format("%Y-%m-%d").to_string();
+    aggregate::resolve_activity(
+        conn,
+        &day,
+        if is_web { "web" } else { "app" },
+        key,
+        title,
+        executable_path,
+        is_web.then_some(key),
+        content_type,
+        summary,
+        keywords,
+    )
+    .map(|verdict| verdict.category)
+    .unwrap_or_else(|_| "uncategorized".into())
 }
 
-fn latest_browser(conn: &Connection) -> Option<(String, bool, String)> {
+fn latest_browser(
+    conn: &Connection,
+) -> Option<(
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Vec<String>,
+    bool,
+    String,
+)> {
     conn.query_row(
-        "SELECT domain, is_idle, timestamp FROM browser_activity ORDER BY id DESC LIMIT 1",
+        "SELECT domain, page_title, content_type, content_summary, detected_keywords, is_idle, timestamp
+         FROM browser_activity ORDER BY id DESC LIMIT 1",
         [],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0, r.get::<_, String>(2)?)),
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                aggregate::parse_keywords(r.get::<_, Option<String>>(4)?),
+                r.get::<_, i64>(5)? != 0,
+                r.get::<_, String>(6)?,
+            ))
+        },
     )
     .ok()
 }
 
 fn current_observation(conn: &Connection, elapsed: i64) -> Option<Observation> {
-    let (app_name, title, idle, ts) = conn
+    let (app_name, title, executable_path, idle, ts) = conn
         .query_row(
-            "SELECT app_name, window_title, is_idle, timestamp
+            "SELECT app_name, window_title, executable_path, is_idle, timestamp
              FROM activity_log ORDER BY id DESC LIMIT 1",
             [],
             |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
-                    r.get::<_, i64>(2)? != 0,
-                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, i64>(3)? != 0,
+                    r.get::<_, String>(4)?,
                 ))
             },
         )
@@ -264,9 +294,20 @@ fn current_observation(conn: &Connection, elapsed: i64) -> Option<Observation> {
     }
 
     if is_browser(&app_name) {
-        if let Some((domain, b_idle, b_ts)) = latest_browser(conn) {
+        if let Some((domain, page_title, content_type, summary, keywords, b_idle, b_ts)) =
+            latest_browser(conn)
+        {
             if is_fresh(&b_ts) {
-                let cat = lookup_category(conn, &domain, true, "");
+                let cat = lookup_category(
+                    conn,
+                    &domain,
+                    true,
+                    &page_title,
+                    None,
+                    content_type.as_deref(),
+                    summary.as_deref(),
+                    &keywords,
+                );
                 return Some(Observation {
                     key: domain.to_ascii_lowercase(),
                     label: pretty_label(&domain),
@@ -278,7 +319,16 @@ fn current_observation(conn: &Connection, elapsed: i64) -> Option<Observation> {
         }
     }
 
-    let cat = lookup_category(conn, &app_name, false, &title);
+    let cat = lookup_category(
+        conn,
+        &app_name,
+        false,
+        &title,
+        executable_path.as_deref(),
+        None,
+        None,
+        &[],
+    );
     Some(Observation {
         key: app_name.to_ascii_lowercase(),
         label: pretty_label(&app_name),
@@ -309,7 +359,11 @@ fn active_focus(conn: &Connection) -> Option<FocusCtx> {
             return None; // session window has elapsed
         }
     }
-    Some(FocusCtx { goal, allowed: parse_json_array(&allowed), blocked: parse_json_array(&blocked) })
+    Some(FocusCtx {
+        goal,
+        allowed: parse_json_array(&allowed),
+        blocked: parse_json_array(&blocked),
+    })
 }
 
 /// Returns true once when the configured end-of-day time is reached (per day).
@@ -333,17 +387,24 @@ fn check_eod(conn: &Connection) -> bool {
 }
 
 fn parse_ts(s: Option<String>) -> Option<DateTime<Utc>> {
-    s.and_then(|v| DateTime::parse_from_rfc3339(&v).ok()).map(|t| t.with_timezone(&Utc))
+    s.and_then(|v| DateTime::parse_from_rfc3339(&v).ok())
+        .map(|t| t.with_timezone(&Utc))
 }
 
 /// Drop distraction alerts that are currently snoozed (all) or muted for their
 /// specific target, per the "Snooze" / "It's intentional" toast actions.
 fn apply_suppression(conn: &Connection, alerts: &mut Vec<Alert>) {
     let now = Utc::now();
-    let snoozed =
-        parse_ts(settings::get_setting(conn, settings::DISTRACTION_SNOOZE_UNTIL)).is_some_and(|t| now < t);
+    let snoozed = parse_ts(settings::get_setting(
+        conn,
+        settings::DISTRACTION_SNOOZE_UNTIL,
+    ))
+    .is_some_and(|t| now < t);
     let mute_target = settings::get_setting(conn, settings::DISTRACTION_MUTE_TARGET);
-    let mute_until = parse_ts(settings::get_setting(conn, settings::DISTRACTION_MUTE_UNTIL));
+    let mute_until = parse_ts(settings::get_setting(
+        conn,
+        settings::DISTRACTION_MUTE_UNTIL,
+    ));
     alerts.retain(|a| match a {
         Alert::Distraction { key, .. } => {
             if snoozed {
@@ -385,8 +446,13 @@ pub fn start(db: Db, app: AppHandle) {
                 );
                 let focus = active_focus(&conn);
                 let obs = current_observation(&conn, elapsed);
-                let mut alerts =
-                    observe(&mut watch, obs.as_ref(), warn_enabled, warn_minutes, focus.as_ref());
+                let mut alerts = observe(
+                    &mut watch,
+                    obs.as_ref(),
+                    warn_enabled,
+                    warn_minutes,
+                    focus.as_ref(),
+                );
                 apply_suppression(&conn, &mut alerts);
                 let eod_due = check_eod(&conn);
                 (alerts, focus.and_then(|f| f.goal), eod_due)
@@ -394,27 +460,37 @@ pub fn start(db: Db, app: AppHandle) {
 
             for a in alerts {
                 match a {
-                    Alert::Distraction { label, key, minutes } => {
-                        let message =
-                            format!("You've been on {label} for {minutes} minutes. Still intentional?");
-                        let _ = send_native_notification(
-                            &app,
-                            "Tempo · Distraction check",
-                            &message,
+                    Alert::Distraction {
+                        label,
+                        key,
+                        minutes,
+                    } => {
+                        let message = format!(
+                            "You've been on {label} for {minutes} minutes. Still intentional?"
                         );
+                        let _ =
+                            send_native_notification(&app, "Tempo · Distraction check", &message);
                         let _ = app.emit(
                             "distraction-warning",
-                            DistractionPayload { label, key, minutes, message },
+                            DistractionPayload {
+                                label,
+                                key,
+                                minutes,
+                                message,
+                            },
                         );
                     }
                     Alert::FocusViolation { label } => {
                         let message =
                             format!("{label} isn't part of your focus session. Back to it?");
-                        let _ =
-                            send_native_notification(&app, "Tempo · Focus mode", &message);
+                        let _ = send_native_notification(&app, "Tempo · Focus mode", &message);
                         let _ = app.emit(
                             "focus-violation",
-                            FocusViolationPayload { label, goal: focus_goal.clone(), message },
+                            FocusViolationPayload {
+                                label,
+                                goal: focus_goal.clone(),
+                                message,
+                            },
                         );
                     }
                 }
@@ -453,7 +529,13 @@ mod tests {
         // 20-minute threshold; feed 60s ticks.
         let mut warned_minutes = Vec::new();
         for _ in 0..40 {
-            let a = observe(&mut w, Some(&obs("instagram.com", "distracting", false, 60)), true, 20, None);
+            let a = observe(
+                &mut w,
+                Some(&obs("instagram.com", "distracting", false, 60)),
+                true,
+                20,
+                None,
+            );
             for alert in a {
                 if let Alert::Distraction { minutes, .. } = alert {
                     warned_minutes.push(minutes);
@@ -468,11 +550,23 @@ mod tests {
     fn productive_resets_streak() {
         let mut w = Watch::default();
         for _ in 0..25 {
-            observe(&mut w, Some(&obs("instagram.com", "distracting", false, 60)), true, 20, None);
+            observe(
+                &mut w,
+                Some(&obs("instagram.com", "distracting", false, 60)),
+                true,
+                20,
+                None,
+            );
         }
         assert!(w.streak >= 20 * 60);
         // switch to productive → streak clears, no warning
-        let a = observe(&mut w, Some(&obs("code.exe", "productive", false, 60)), true, 20, None);
+        let a = observe(
+            &mut w,
+            Some(&obs("code.exe", "productive", false, 60)),
+            true,
+            20,
+            None,
+        );
         assert!(a.is_empty());
         assert_eq!(w.streak, 0);
     }
@@ -482,7 +576,15 @@ mod tests {
         let mut w = Watch::default();
         let mut any = false;
         for _ in 0..40 {
-            if !observe(&mut w, Some(&obs("instagram.com", "distracting", false, 60)), false, 20, None).is_empty() {
+            if !observe(
+                &mut w,
+                Some(&obs("instagram.com", "distracting", false, 60)),
+                false,
+                20,
+                None,
+            )
+            .is_empty()
+            {
                 any = true;
             }
         }
@@ -500,7 +602,13 @@ mod tests {
         let mut hits = 0;
         // 10s ticks on a blocked target for 3 minutes.
         for _ in 0..18 {
-            for a in observe(&mut w, Some(&obs("instagram.com", "distracting", false, 10)), false, 20, Some(&focus)) {
+            for a in observe(
+                &mut w,
+                Some(&obs("instagram.com", "distracting", false, 10)),
+                false,
+                20,
+                Some(&focus),
+            ) {
                 if matches!(a, Alert::FocusViolation { .. }) {
                     hits += 1;
                 }
@@ -512,9 +620,19 @@ mod tests {
 
     #[test]
     fn allowlist_flags_nonallowed_distraction() {
-        let f = FocusCtx { goal: None, allowed: vec!["github.com".into()], blocked: vec![] };
-        assert!(is_violation(&f, &obs("instagram.com", "distracting", false, 10)));
-        assert!(!is_violation(&f, &obs("github.com", "productive", false, 10)));
+        let f = FocusCtx {
+            goal: None,
+            allowed: vec!["github.com".into()],
+            blocked: vec![],
+        };
+        assert!(is_violation(
+            &f,
+            &obs("instagram.com", "distracting", false, 10)
+        ));
+        assert!(!is_violation(
+            &f,
+            &obs("github.com", "productive", false, 10)
+        ));
     }
 
     #[test]

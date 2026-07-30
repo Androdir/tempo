@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct SyncEvent {
     pub event_id: String,
-    pub event_type: String, // app_sample | browser_sample | output | checkin | goal | note
+    pub event_type: String, // app_sample | browser_sample | output | checkin | goal | note | classification_bundle
     #[serde(default)]
     pub source: Option<String>,
     pub timestamp: String,
@@ -42,7 +42,11 @@ pub struct EventBatch {
 
 impl SyncEvent {
     fn m_str(&self, key: &str) -> Option<String> {
-        self.metadata.as_ref()?.get(key)?.as_str().map(|s| s.to_string())
+        self.metadata
+            .as_ref()?
+            .get(key)?
+            .as_str()
+            .map(|s| s.to_string())
     }
     fn m_i64(&self, key: &str) -> Option<i64> {
         self.metadata.as_ref()?.get(key)?.as_i64()
@@ -101,7 +105,10 @@ fn register_checkin_from_event(conn: &Connection, e: &SyncEvent, id: &str) {
         .m_str("label")
         .filter(|l| !l.trim().is_empty())
         .unwrap_or_else(|| id.replace(['_', '-'], " "));
-    let icon = e.m_str("icon").filter(|i| !i.trim().is_empty()).unwrap_or_else(|| "✅".into());
+    let icon = e
+        .m_str("icon")
+        .filter(|i| !i.trim().is_empty())
+        .unwrap_or_else(|| "✅".into());
     let kind = match e.m_str("kind").as_deref() {
         Some("counter") => "counter",
         _ => "toggle",
@@ -128,17 +135,88 @@ fn apply_to_domain(conn: &Connection, e: &SyncEvent) -> rusqlite::Result<()> {
     match e.event_type.as_str() {
         "app_sample" => {
             conn.execute(
-                "INSERT INTO activity_log (timestamp, day, app_name, window_title, duration_seconds, is_idle)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO activity_log (timestamp, day, app_name, window_title, executable_path, duration_seconds, is_idle)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     e.timestamp,
                     e.day,
                     e.app_name.clone().unwrap_or_default(),
                     e.title.clone().unwrap_or_default(),
+                    e.m_str("executablePath"),
                     e.duration_seconds.unwrap_or(0),
                     e.m_bool("isIdle") as i64,
                 ],
             )?;
+        }
+        "classification_bundle" => {
+            let Some(bundle) = e.metadata.as_ref() else {
+                return Ok(());
+            };
+            if let Some(categories) = bundle.get("categories") {
+                if let Ok(defs) = serde_json::from_value::<Vec<crate::models::CategoryDefinition>>(
+                    categories.clone(),
+                ) {
+                    conn.execute("DELETE FROM category_definitions", [])?;
+                    for definition in defs {
+                        crate::models::upsert_category_definition(conn, &definition)?;
+                    }
+                }
+            }
+            conn.execute("DELETE FROM category_rules", [])?;
+            if let Some(rules) = bundle.get("appRules").and_then(|v| v.as_array()) {
+                for rule in rules {
+                    let app = rule.get("appName").and_then(|v| v.as_str()).unwrap_or("");
+                    let category = rule.get("category").and_then(|v| v.as_str()).unwrap_or("");
+                    if !app.is_empty() && crate::models::category_exists(conn, category) {
+                        conn.execute(
+                            "INSERT INTO category_rules(app_name, category, ai_review, updated_at) VALUES (?1, ?2, ?3, ?4)",
+                            params![app, category, rule.get("aiReview").and_then(|v| v.as_bool()).unwrap_or(false) as i64, e.timestamp],
+                        )?;
+                    }
+                }
+            }
+            conn.execute("DELETE FROM domain_rules", [])?;
+            if let Some(rules) = bundle.get("domainRules").and_then(|v| v.as_array()) {
+                for rule in rules {
+                    let domain = rule.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+                    if domain.is_empty() {
+                        continue;
+                    }
+                    let category = rule
+                        .get("category")
+                        .and_then(|v| v.as_str())
+                        .filter(|category| crate::models::category_exists(conn, category));
+                    let mode = rule
+                        .get("captureMode")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("meta");
+                    conn.execute(
+                        "INSERT INTO domain_rules(domain, category, capture_mode, ai_review, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![domain, category, mode, rule.get("aiReview").and_then(|v| v.as_bool()).unwrap_or(false) as i64, e.timestamp],
+                    )?;
+                }
+            }
+            if let Some(projects) = bundle.get("projects") {
+                if let Ok(items) =
+                    serde_json::from_value::<Vec<crate::projects::Project>>(projects.clone())
+                {
+                    conn.execute("DELETE FROM projects", [])?;
+                    for project in items {
+                        let _ = crate::projects::create_project(conn, &project)?;
+                    }
+                }
+            }
+            if let Some(policies) = bundle.get("policies") {
+                if let Ok(items) = serde_json::from_value::<
+                    Vec<crate::semantic::ClassificationPolicy>,
+                >(policies.clone())
+                {
+                    if let Ok(validated) = crate::semantic::validate(items) {
+                        crate::semantic::save(conn, &validated)
+                            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+                    }
+                }
+            }
         }
         "browser_sample" => {
             conn.execute(
@@ -171,8 +249,10 @@ fn apply_to_domain(conn: &Connection, e: &SyncEvent) -> rusqlite::Result<()> {
                     e.timestamp,
                     e.day,
                     e.m_str("folderPath").unwrap_or_default(),
-                    e.m_str("filePath").unwrap_or_else(|| e.title.clone().unwrap_or_default()),
-                    e.m_str("fileName").unwrap_or_else(|| e.title.clone().unwrap_or_default()),
+                    e.m_str("filePath")
+                        .unwrap_or_else(|| e.title.clone().unwrap_or_default()),
+                    e.m_str("fileName")
+                        .unwrap_or_else(|| e.title.clone().unwrap_or_default()),
                     e.m_str("extension"),
                     e.m_i64("fileSize").unwrap_or(0),
                     e.category.clone().unwrap_or_else(|| "other".into()),
@@ -186,7 +266,10 @@ fn apply_to_domain(conn: &Connection, e: &SyncEvent) -> rusqlite::Result<()> {
             if let Some(field) = e.m_str("field") {
                 let value = e.m_i64("value").unwrap_or(0);
                 if field == "main_goal_completed" {
-                    conn.execute("INSERT OR IGNORE INTO daily_checkin (day) VALUES (?1)", params![e.day])?;
+                    conn.execute(
+                        "INSERT OR IGNORE INTO daily_checkin (day) VALUES (?1)",
+                        params![e.day],
+                    )?;
                     conn.execute(
                         "UPDATE daily_checkin SET main_goal_completed = ?1 WHERE day = ?2",
                         params![(value != 0) as i64, e.day],
@@ -210,7 +293,9 @@ fn apply_to_domain(conn: &Connection, e: &SyncEvent) -> rusqlite::Result<()> {
                 } else {
                     let def = crate::models::CheckinDefinition {
                         id: id.clone(),
-                        label: e.m_str("label").unwrap_or_else(|| id.replace(['_', '-'], " ")),
+                        label: e
+                            .m_str("label")
+                            .unwrap_or_else(|| id.replace(['_', '-'], " ")),
                         icon: e.m_str("icon").unwrap_or_else(|| "✅".into()),
                         kind: match e.m_str("kind").as_deref() {
                             Some("counter") => "counter".into(),
@@ -226,9 +311,18 @@ fn apply_to_domain(conn: &Connection, e: &SyncEvent) -> rusqlite::Result<()> {
             }
         }
         "note" => {
-            let notes = e.m_str("notes").or_else(|| e.title.clone()).unwrap_or_default();
-            conn.execute("INSERT OR IGNORE INTO daily_checkin (day) VALUES (?1)", params![e.day])?;
-            conn.execute("UPDATE daily_checkin SET notes = ?1 WHERE day = ?2", params![notes, e.day])?;
+            let notes = e
+                .m_str("notes")
+                .or_else(|| e.title.clone())
+                .unwrap_or_default();
+            conn.execute(
+                "INSERT OR IGNORE INTO daily_checkin (day) VALUES (?1)",
+                params![e.day],
+            )?;
+            conn.execute(
+                "UPDATE daily_checkin SET notes = ?1 WHERE day = ?2",
+                params![notes, e.day],
+            )?;
         }
         "focus" => {
             // A focus session, synced once it ends. The hub assigns its own row id;
@@ -321,7 +415,9 @@ mod tests {
         let e = ev("activity_log:1", "app_sample");
         assert!(ingest_event(&conn, "deviceA", &e).unwrap()); // new
         assert!(!ingest_event(&conn, "deviceA", &e).unwrap()); // duplicate
-        let n: i64 = conn.query_row("SELECT COUNT(*) FROM activity_log", [], |r| r.get(0)).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM activity_log", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 1); // never double-counted
     }
 
@@ -331,7 +427,9 @@ mod tests {
         let e = ev("activity_log:1", "app_sample");
         assert!(ingest_event(&conn, "deviceA", &e).unwrap());
         assert!(ingest_event(&conn, "deviceB", &e).unwrap());
-        let n: i64 = conn.query_row("SELECT COUNT(*) FROM activity_log", [], |r| r.get(0)).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM activity_log", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 2); // different devices, same local id → both real
     }
 
@@ -359,10 +457,13 @@ mod tests {
         }));
         assert!(ingest_event(&conn, "desktop", &fe).unwrap());
         assert!(!ingest_event(&conn, "desktop", &fe).unwrap()); // dedup
-        let sessions: i64 =
-            conn.query_row("SELECT COUNT(*) FROM focus_sessions", [], |r| r.get(0)).unwrap();
+        let sessions: i64 = conn
+            .query_row("SELECT COUNT(*) FROM focus_sessions", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(sessions, 1);
-        let fid: i64 = conn.query_row("SELECT id FROM focus_sessions LIMIT 1", [], |r| r.get(0)).unwrap();
+        let fid: i64 = conn
+            .query_row("SELECT id FROM focus_sessions LIMIT 1", [], |r| r.get(0))
+            .unwrap();
 
         // Desktop coded 12:10–12:40 (focused); phone scrolled instagram 12:30–12:40.
         let mut code = ev("activity_log:1", "app_sample");
@@ -398,7 +499,11 @@ mod tests {
         e.title = Some("Ship".into());
         e.metadata = Some(serde_json::json!({ "completed": false, "priority": "high" }));
         assert!(ingest_event(&conn, "desktop", &e).unwrap());
-        let done: i64 = conn.query_row("SELECT completed FROM goals WHERE title='Ship'", [], |r| r.get(0)).unwrap();
+        let done: i64 = conn
+            .query_row("SELECT completed FROM goals WHERE title='Ship'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
         assert_eq!(done, 0);
 
         // A later event (different id) marking it done updates the *same* row.
@@ -406,9 +511,17 @@ mod tests {
         e2.title = Some("Ship".into());
         e2.metadata = Some(serde_json::json!({ "completed": true, "priority": "high" }));
         assert!(ingest_event(&conn, "desktop", &e2).unwrap());
-        let rows: i64 = conn.query_row("SELECT COUNT(*) FROM goals WHERE title='Ship'", [], |r| r.get(0)).unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM goals WHERE title='Ship'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
         assert_eq!(rows, 1); // upserted, not duplicated
-        let done2: i64 = conn.query_row("SELECT completed FROM goals WHERE title='Ship'", [], |r| r.get(0)).unwrap();
+        let done2: i64 = conn
+            .query_row("SELECT completed FROM goals WHERE title='Ship'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
         assert_eq!(done2, 1);
     }
 }

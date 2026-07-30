@@ -11,8 +11,17 @@
 
 use std::path::Path;
 
-/// `(app_name, window_title)` for the currently focused window.
+/// `(app_name, window_title)` for screen OCR and other callers that do not need
+/// executable identity.
 pub fn active_window() -> (String, String) {
+    let (app, title, _) = active_window_detailed();
+    (app, title)
+}
+
+/// Foreground app plus its executable path. The path is never shown publicly or
+/// sent to the browser extension; it lets the local classifier recognise Steam
+/// libraries and stable executables even when a window title is unhelpful.
+pub fn active_window_detailed() -> (String, String, Option<String>) {
     match active_win_pos_rs::get_active_window() {
         Ok(win) => {
             let app = if win.app_name.trim().is_empty() {
@@ -20,10 +29,12 @@ pub fn active_window() -> (String, String) {
             } else {
                 win.app_name
             };
-            (app, win.title)
+            let path = (!win.process_path.as_os_str().is_empty())
+                .then(|| win.process_path.to_string_lossy().to_string());
+            (app, win.title, path)
         }
         // No focused window (locked screen, desktop, transitions, etc.).
-        Err(_) => ("Unknown".to_string(), String::new()),
+        Err(_) => ("Unknown".to_string(), String::new(), None),
     }
 }
 

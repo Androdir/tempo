@@ -78,14 +78,16 @@ fn auth_ok(request: &Request, token: &str) -> bool {
         return false;
     }
     request.headers().iter().any(|h| {
-        h.field.as_str().as_str().eq_ignore_ascii_case("x-tempo-token")
+        h.field
+            .as_str()
+            .as_str()
+            .eq_ignore_ascii_case("x-tempo-token")
             && h.value.as_str() == token
     })
 }
 
 fn json_header() -> Header {
-    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-        .expect("valid header")
+    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).expect("valid header")
 }
 
 fn json_err(msg: &str) -> String {

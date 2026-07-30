@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::classify;
 use crate::projects::{self, Project};
+use crate::semantic::{self, ClassificationPolicy};
 
 struct BuiltInAppVerdict {
     category: &'static str,
@@ -45,21 +46,17 @@ fn built_in_app_verdict(label: &str, title: &str) -> Option<BuiltInAppVerdict> {
             })
         }
         // Transient Windows surfaces are neither productive work nor distractions.
-        "windowsshellexperiencehost" | "startmenuexperiencehost" | "searchhost"
-        | "textinputhost" | "lockapp" => Some(BuiltInAppVerdict {
+        "windowsshellexperiencehost"
+        | "startmenuexperiencehost"
+        | "searchhost"
+        | "textinputhost"
+        | "lockapp" => Some(BuiltInAppVerdict {
             category: "neutral",
             confidence: 0.95,
             reason: "Windows system surface → neutral",
             block_project_matching: true,
         }),
-        // Messaging is distracting by default. A strong configured project match or
-        // an explicit user app rule can still classify a work conversation differently.
-        "telegram" | "telegramexe" | "telegramdesktop" => Some(BuiltInAppVerdict {
-            category: "distraction",
-            confidence: 0.82,
-            reason: "Telegram default → distraction",
-            block_project_matching: false,
-        }),
+
         _ => None,
     }
 }
@@ -69,15 +66,17 @@ const CONFIDENCE_THRESHOLD: f64 = 0.75;
 
 /// Pre-loaded rule data (loaded once per read by the caller).
 pub struct RuleInputs<'a> {
-    pub app_rules: &'a HashMap<String, String>,          // app -> category
-    pub app_ai: &'a HashSet<String>,                     // apps flagged "AI review"
+    pub app_rules: &'a HashMap<String, String>, // app -> category
+    pub app_ai: &'a HashSet<String>,            // apps flagged "AI review"
     pub domain_cat: &'a HashMap<String, Option<String>>, // domain -> category
-    pub domain_ai: &'a HashSet<String>,                  // domains flagged "AI review"
+    pub domain_ai: &'a HashSet<String>,         // domains flagged "AI review"
     pub projects: &'a [Project],
+    pub policies: &'a [ClassificationPolicy],
 }
 
 pub struct RuleVerdict {
     pub category: String,
+    pub activity_kind: String,
     pub confidence: f64,
     pub reason: String,
     pub project: Option<String>,
@@ -92,14 +91,27 @@ pub fn classify_block(
     source: &str,
     label: &str,
     title: &str,
+    executable_path: Option<&str>,
     domain: Option<&str>,
     content_type: Option<&str>,
     summary: Option<&str>,
     keywords: &[String],
 ) -> RuleVerdict {
+    let activity_kind = semantic::detect_activity_kind(
+        source,
+        label,
+        title,
+        executable_path,
+        content_type,
+        summary,
+        keywords,
+    );
     // --- base: app rule (apps/screen) or content rules (web) ---
     let (mut category, mut confidence, mut reason) = if source == "web" {
-        let dcat = domain.and_then(|d| inputs.domain_cat.get(d)).cloned().flatten();
+        let dcat = domain
+            .and_then(|d| inputs.domain_cat.get(d))
+            .cloned()
+            .flatten();
         let base = classify::classify(
             domain.unwrap_or(label),
             title,
@@ -118,6 +130,11 @@ pub fn classify_block(
             },
         }
     };
+    let explicit_rule = if source == "web" {
+        domain.is_some_and(|d| inputs.domain_cat.get(d).is_some_and(|c| c.is_some()))
+    } else {
+        inputs.app_rules.contains_key(label)
+    };
     let block_project_matching = source != "web"
         && built_in_app_verdict(label, title).is_some_and(|v| v.block_project_matching);
 
@@ -131,7 +148,7 @@ pub fn classify_block(
             project = Some(m.project_name.clone());
             project_confidence = m.confidence;
             project_signals = m.signals.clone();
-            if m.confidence >= projects::OVERRIDE_THRESHOLD {
+            if m.confidence >= projects::OVERRIDE_THRESHOLD && !explicit_rule {
                 category = m.category.clone();
                 confidence = (m.confidence as f64 / 100.0).max(0.6);
                 reason = format!("project: {} ({}%)", m.project_name, m.confidence);
@@ -139,9 +156,35 @@ pub fn classify_block(
         }
     }
 
+    // Cross-app/site semantic policies are user-visible defaults. Explicit app/site
+    // rules and strong project matches take priority, so a work game or Telegram
+    // conversation can still be configured precisely.
+    if !explicit_rule
+        && !block_project_matching
+        && project_confidence < projects::OVERRIDE_THRESHOLD
+    {
+        let evidence = format!(
+            "{label} {title} {} {} {}",
+            domain.unwrap_or_default(),
+            summary.unwrap_or_default(),
+            keywords.join(" ")
+        );
+        if let Some((policy, term)) = semantic::matched(inputs.policies, &evidence, &activity_kind)
+        {
+            category = policy.category.clone();
+            confidence = 0.88;
+            reason = format!(
+                "policy: {} (activity type: {}; matched ‘{}’) → {}",
+                policy.name, activity_kind, term, policy.category
+            );
+        }
+    }
+
     // --- Step 2 gating signals ---
     let ai_review = match source {
-        "web" => domain.map(|d| inputs.domain_ai.contains(d)).unwrap_or(false),
+        "web" => domain
+            .map(|d| inputs.domain_ai.contains(d))
+            .unwrap_or(false),
         _ => inputs.app_ai.contains(label),
     };
 
@@ -159,6 +202,7 @@ pub fn classify_block(
 
     RuleVerdict {
         category,
+        activity_kind,
         confidence,
         reason,
         project,
@@ -182,16 +226,47 @@ fn build_extra(summary: Option<&str>, keywords: &[String]) -> String {
 mod tests {
     use super::*;
 
-    fn empty() -> (HashMap<String, String>, HashSet<String>, HashMap<String, Option<String>>, HashSet<String>, Vec<Project>) {
-        (HashMap::new(), HashSet::new(), HashMap::new(), HashSet::new(), Vec::new())
+    fn empty() -> (
+        HashMap<String, String>,
+        HashSet<String>,
+        HashMap<String, Option<String>>,
+        HashSet<String>,
+        Vec<Project>,
+        Vec<ClassificationPolicy>,
+    ) {
+        (
+            HashMap::new(),
+            HashSet::new(),
+            HashMap::new(),
+            HashSet::new(),
+            Vec::new(),
+            semantic::defaults(),
+        )
     }
 
     #[test]
     fn confident_app_rule_skips_llm() {
-        let (mut ar, aa, dc, da, pj) = empty();
+        let (mut ar, aa, dc, da, pj, pol) = empty();
         ar.insert("Visual Studio Code".into(), "productive".into());
-        let inp = RuleInputs { app_rules: &ar, app_ai: &aa, domain_cat: &dc, domain_ai: &da, projects: &pj };
-        let v = classify_block(&inp, "app", "Visual Studio Code", "main.rs", None, None, None, &[]);
+        let inp = RuleInputs {
+            app_rules: &ar,
+            app_ai: &aa,
+            domain_cat: &dc,
+            domain_ai: &da,
+            projects: &pj,
+            policies: &pol,
+        };
+        let v = classify_block(
+            &inp,
+            "app",
+            "Visual Studio Code",
+            "main.rs",
+            None,
+            None,
+            None,
+            None,
+            &[],
+        );
         assert_eq!(v.category, "productive");
         assert!(v.confidence >= 0.75);
         assert!(!v.needs_llm);
@@ -199,7 +274,7 @@ mod tests {
 
     #[test]
     fn tempo_is_neutral_and_cannot_inherit_a_project() {
-        let (ar, aa, dc, da, mut pj) = empty();
+        let (ar, aa, dc, da, mut pj, pol) = empty();
         pj.push(Project {
             id: 1,
             name: "Bible Reading".into(),
@@ -212,8 +287,15 @@ mod tests {
             excluded_keywords: vec![],
             priority: 100,
         });
-        let inp = RuleInputs { app_rules: &ar, app_ai: &aa, domain_cat: &dc, domain_ai: &da, projects: &pj };
-        let v = classify_block(&inp, "app", "Tempo", "Tempo", None, None, None, &[]);
+        let inp = RuleInputs {
+            app_rules: &ar,
+            app_ai: &aa,
+            domain_cat: &dc,
+            domain_ai: &da,
+            projects: &pj,
+            policies: &pol,
+        };
+        let v = classify_block(&inp, "app", "Tempo", "Tempo", None, None, None, None, &[]);
         assert_eq!(v.category, "neutral");
         assert!(v.project.is_none());
         assert!(!v.needs_llm);
@@ -221,13 +303,21 @@ mod tests {
 
     #[test]
     fn tempo_extension_options_are_neutral() {
-        let (ar, aa, dc, da, pj) = empty();
-        let inp = RuleInputs { app_rules: &ar, app_ai: &aa, domain_cat: &dc, domain_ai: &da, projects: &pj };
+        let (ar, aa, dc, da, pj, pol) = empty();
+        let inp = RuleInputs {
+            app_rules: &ar,
+            app_ai: &aa,
+            domain_cat: &dc,
+            domain_ai: &da,
+            projects: &pj,
+            policies: &pol,
+        };
         let v = classify_block(
             &inp,
             "app",
             "Firefox",
             "Tempo — Options — Mozilla Firefox",
+            None,
             None,
             None,
             None,
@@ -240,13 +330,21 @@ mod tests {
 
     #[test]
     fn telegram_is_consistently_distracting_without_work_evidence() {
-        let (ar, aa, dc, da, pj) = empty();
-        let inp = RuleInputs { app_rules: &ar, app_ai: &aa, domain_cat: &dc, domain_ai: &da, projects: &pj };
+        let (ar, aa, dc, da, pj, pol) = empty();
+        let inp = RuleInputs {
+            app_rules: &ar,
+            app_ai: &aa,
+            domain_cat: &dc,
+            domain_ai: &da,
+            projects: &pj,
+            policies: &pol,
+        };
         let v = classify_block(
             &inp,
             "app",
             "Telegram Desktop",
             "Anonymous Chat @chatbot — (139)",
+            None,
             None,
             None,
             None,
@@ -259,23 +357,48 @@ mod tests {
 
     #[test]
     fn explicit_rule_can_mark_telegram_as_work() {
-        let (mut ar, aa, dc, da, pj) = empty();
+        let (mut ar, aa, dc, da, pj, pol) = empty();
         ar.insert("Telegram Desktop".into(), "business".into());
-        let inp = RuleInputs { app_rules: &ar, app_ai: &aa, domain_cat: &dc, domain_ai: &da, projects: &pj };
-        let v = classify_block(&inp, "app", "Telegram Desktop", "Client chat", None, None, None, &[]);
+        let inp = RuleInputs {
+            app_rules: &ar,
+            app_ai: &aa,
+            domain_cat: &dc,
+            domain_ai: &da,
+            projects: &pj,
+            policies: &pol,
+        };
+        let v = classify_block(
+            &inp,
+            "app",
+            "Telegram Desktop",
+            "Client chat",
+            None,
+            None,
+            None,
+            None,
+            &[],
+        );
         assert_eq!(v.category, "business");
         assert!(!v.needs_llm);
     }
 
     #[test]
     fn windows_notification_surface_is_neutral() {
-        let (ar, aa, dc, da, pj) = empty();
-        let inp = RuleInputs { app_rules: &ar, app_ai: &aa, domain_cat: &dc, domain_ai: &da, projects: &pj };
+        let (ar, aa, dc, da, pj, pol) = empty();
+        let inp = RuleInputs {
+            app_rules: &ar,
+            app_ai: &aa,
+            domain_cat: &dc,
+            domain_ai: &da,
+            projects: &pj,
+            policies: &pol,
+        };
         let v = classify_block(
             &inp,
             "app",
             "Windows Shell Experience Host",
             "New notification",
+            None,
             None,
             None,
             None,
@@ -287,30 +410,71 @@ mod tests {
 
     #[test]
     fn uncategorized_app_needs_llm() {
-        let (ar, aa, dc, da, pj) = empty();
-        let inp = RuleInputs { app_rules: &ar, app_ai: &aa, domain_cat: &dc, domain_ai: &da, projects: &pj };
-        let v = classify_block(&inp, "app", "SomeUnknownApp", "a window", None, None, None, &[]);
+        let (ar, aa, dc, da, pj, pol) = empty();
+        let inp = RuleInputs {
+            app_rules: &ar,
+            app_ai: &aa,
+            domain_cat: &dc,
+            domain_ai: &da,
+            projects: &pj,
+            policies: &pol,
+        };
+        let v = classify_block(
+            &inp,
+            "app",
+            "SomeUnknownApp",
+            "a window",
+            None,
+            None,
+            None,
+            None,
+            &[],
+        );
         assert_eq!(v.category, "uncategorized");
         assert!(v.needs_llm); // low-confidence / ambiguous
     }
 
     #[test]
     fn ai_review_forces_llm_even_when_confident() {
-        let (mut ar, mut aa, dc, da, pj) = empty();
+        let (mut ar, mut aa, dc, da, pj, pol) = empty();
         ar.insert("Slack".into(), "business".into());
         aa.insert("Slack".into());
-        let inp = RuleInputs { app_rules: &ar, app_ai: &aa, domain_cat: &dc, domain_ai: &da, projects: &pj };
-        let v = classify_block(&inp, "app", "Slack", "#team", None, None, None, &[]);
+        let inp = RuleInputs {
+            app_rules: &ar,
+            app_ai: &aa,
+            domain_cat: &dc,
+            domain_ai: &da,
+            projects: &pj,
+            policies: &pol,
+        };
+        let v = classify_block(&inp, "app", "Slack", "#team", None, None, None, None, &[]);
         // Confident rule, but the AI-review flag still forces LLM review.
         assert!(v.confidence >= 0.75 && v.needs_llm);
     }
 
     #[test]
     fn ocr_conflict_forces_llm() {
-        let (mut ar, aa, dc, da, pj) = empty();
+        let (mut ar, aa, dc, da, pj, pol) = empty();
         ar.insert("Chrome".into(), "productive".into());
-        let inp = RuleInputs { app_rules: &ar, app_ai: &aa, domain_cat: &dc, domain_ai: &da, projects: &pj };
-        let v = classify_block(&inp, "screen", "Chrome", "window", None, None, Some("reels explore feed trending"), &[]);
+        let inp = RuleInputs {
+            app_rules: &ar,
+            app_ai: &aa,
+            domain_cat: &dc,
+            domain_ai: &da,
+            projects: &pj,
+            policies: &pol,
+        };
+        let v = classify_block(
+            &inp,
+            "screen",
+            "Chrome",
+            "window",
+            None,
+            None,
+            None,
+            Some("reels explore feed trending"),
+            &[],
+        );
         // App rule says productive, but OCR text screams distraction -> review.
         assert_eq!(v.category, "productive");
         assert!(v.needs_llm);

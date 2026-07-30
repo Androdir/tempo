@@ -37,9 +37,14 @@ pub fn start(db: Db) {
 
             let (enabled, interval) = match db.lock() {
                 Ok(conn) => (
-                    settings::get_bool(&conn, settings::SMART_TRACKING_ENABLED, false),
-                    settings::get_int(&conn, settings::SMART_INTERVAL, settings::DEFAULT_SMART_INTERVAL)
-                        .clamp(10, 3600) as u64,
+                    settings::get_bool(&conn, settings::SMART_TRACKING_ENABLED, false)
+                        && settings::tracking_paused_until(&conn).is_none(),
+                    settings::get_int(
+                        &conn,
+                        settings::SMART_INTERVAL,
+                        settings::DEFAULT_SMART_INTERVAL,
+                    )
+                    .clamp(10, 3600) as u64,
                 ),
                 Err(_) => (false, 60),
             };
@@ -49,6 +54,15 @@ pub fn start(db: Db) {
             }
             // Don't capture a screen the user has walked away from.
             if platform::idle_seconds() >= IDLE_SKIP_SECS {
+                last_capture = Instant::now();
+                continue;
+            }
+            let active_app = platform::active_window().0;
+            let title_allowed = db
+                .lock()
+                .map(|conn| settings::title_capture_allowed(&conn, &active_app))
+                .unwrap_or(false);
+            if !title_allowed {
                 last_capture = Instant::now();
                 continue;
             }
@@ -81,6 +95,9 @@ fn process_and_store(db: &Db, text: &str) {
     let day = Local::now().format("%Y-%m-%d").to_string();
 
     if let Ok(conn) = db.lock() {
+        if !settings::title_capture_allowed(&conn, &app) {
+            return;
+        }
         let project_list = projects::list_projects(&conn).unwrap_or_default();
         let app_cat = conn
             .query_row(
@@ -110,9 +127,9 @@ fn summarize(text: &str) -> String {
 }
 
 const STOPWORDS: &[&str] = &[
-    "the", "and", "for", "are", "was", "this", "that", "you", "your", "with",
-    "from", "not", "but", "can", "will", "new", "all", "page", "home", "menu",
-    "search", "sign", "log", "out", "settings", "file", "edit", "view", "help",
+    "the", "and", "for", "are", "was", "this", "that", "you", "your", "with", "from", "not", "but",
+    "can", "will", "new", "all", "page", "home", "menu", "search", "sign", "log", "out",
+    "settings", "file", "edit", "view", "help",
 ];
 
 fn keywords(text: &str) -> Vec<String> {
@@ -146,9 +163,21 @@ fn looks_sensitive(text: &str) -> bool {
     }
 
     const SECRET_WORDS: &[&str] = &[
-        "password", "passcode", "cvv", "cvc", "one-time", "verification code",
-        "2fa", "otp", "security code", "card number", "routing number",
-        "account number", "social security", "seed phrase", "recovery phrase",
+        "password",
+        "passcode",
+        "cvv",
+        "cvc",
+        "one-time",
+        "verification code",
+        "2fa",
+        "otp",
+        "security code",
+        "card number",
+        "routing number",
+        "account number",
+        "social security",
+        "seed phrase",
+        "recovery phrase",
     ];
     let has_secret = SECRET_WORDS.iter().any(|w| lower.contains(w));
     if has_secret && max_contiguous_digits(text) >= 4 {
@@ -237,7 +266,8 @@ fn ssn_like(text: &str) -> bool {
 }
 
 fn has_isolated_digit_group(text: &str, n: usize) -> bool {
-    text.split(|c: char| !c.is_ascii_digit()).any(|g| g.len() == n)
+    text.split(|c: char| !c.is_ascii_digit())
+        .any(|g| g.len() == n)
 }
 
 // -------------------------------------------------------- capture + local OCR
@@ -329,10 +359,11 @@ fn ocr_bgra(bgra: &[u8], width: i32, height: i32) -> Result<String, String> {
     use windows::Security::Cryptography::CryptographicBuffer;
 
     let buffer = CryptographicBuffer::CreateFromByteArray(bgra).map_err(|e| e.to_string())?;
-    let bitmap = SoftwareBitmap::CreateCopyFromBuffer(&buffer, BitmapPixelFormat::Bgra8, width, height)
-        .map_err(|e| e.to_string())?;
-    let engine =
-        OcrEngine::TryCreateFromUserProfileLanguages().map_err(|e| format!("OCR unavailable: {e}"))?;
+    let bitmap =
+        SoftwareBitmap::CreateCopyFromBuffer(&buffer, BitmapPixelFormat::Bgra8, width, height)
+            .map_err(|e| e.to_string())?;
+    let engine = OcrEngine::TryCreateFromUserProfileLanguages()
+        .map_err(|e| format!("OCR unavailable: {e}"))?;
     let result = engine
         .RecognizeAsync(&bitmap)
         .map_err(|e| e.to_string())?
@@ -374,8 +405,12 @@ mod tests {
 
     #[test]
     fn keeps_normal_text() {
-        assert!(!looks_sensitive("Hungarian Algorithm assignment problem notes"));
-        assert!(!looks_sensitive("Meeting at 10 with 3 people about Q2 plans"));
+        assert!(!looks_sensitive(
+            "Hungarian Algorithm assignment problem notes"
+        ));
+        assert!(!looks_sensitive(
+            "Meeting at 10 with 3 people about Q2 plans"
+        ));
     }
 
     #[test]

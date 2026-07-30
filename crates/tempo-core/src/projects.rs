@@ -123,7 +123,10 @@ pub fn test_project_match(
                 confidence: m.confidence,
                 signals: m.signals,
                 explanation: if assigned {
-                    format!("Would assign {} at {}% confidence.", project.name, m.confidence)
+                    format!(
+                        "Would assign {} at {}% confidence.",
+                        project.name, m.confidence
+                    )
                 } else {
                     format!(
                         "Found some evidence, but {}% is below the {}% assignment threshold.",
@@ -353,7 +356,13 @@ pub fn ensure_default_projects(conn: &Connection) -> rusqlite::Result<()> {
         (
             "Exam studying",
             "study",
-            &["Hungarian Algorithm", "Stable Marriage", "LCS", "suffix trees", "skip lists"],
+            &[
+                "Hungarian Algorithm",
+                "Stable Marriage",
+                "LCS",
+                "suffix trees",
+                "skip lists",
+            ],
             &["RemNote", "PDF reader", "ChatGPT"],
             &["chatgpt.com", "remnote.com"],
             80,
@@ -361,7 +370,16 @@ pub fn ensure_default_projects(conn: &Connection) -> rusqlite::Result<()> {
         (
             "Video content business",
             "business",
-            &["Premiere", "CapCut", "DaVinci", "hooks", "captions", "TikTok", "Instagram upload", "YouTube Shorts"],
+            &[
+                "Premiere",
+                "CapCut",
+                "DaVinci",
+                "hooks",
+                "captions",
+                "TikTok",
+                "Instagram upload",
+                "YouTube Shorts",
+            ],
             &["Premiere Pro", "CapCut", "DaVinci Resolve"],
             &["tiktok.com", "instagram.com", "youtube.com"],
             70,
@@ -369,7 +387,14 @@ pub fn ensure_default_projects(conn: &Connection) -> rusqlite::Result<()> {
         (
             "Coding",
             "productive",
-            &["bug", "refactor", "compile", "function", "repository", "pull request"],
+            &[
+                "bug",
+                "refactor",
+                "compile",
+                "function",
+                "repository",
+                "pull request",
+            ],
             &["Visual Studio Code", "Terminal", "IntelliJ IDEA"],
             &["github.com", "stackoverflow.com"],
             75,
@@ -406,7 +431,14 @@ pub fn ensure_default_projects(conn: &Connection) -> rusqlite::Result<()> {
 mod tests {
     use super::*;
 
-    fn project(name: &str, cat: &str, kw: &[&str], apps: &[&str], dom: &[&str], prio: i64) -> Project {
+    fn project(
+        name: &str,
+        cat: &str,
+        kw: &[&str],
+        apps: &[&str],
+        dom: &[&str],
+        prio: i64,
+    ) -> Project {
         Project {
             id: 0,
             name: name.into(),
@@ -426,7 +458,13 @@ mod tests {
             project(
                 "Exam studying",
                 "study",
-                &["Hungarian Algorithm", "Stable Marriage", "LCS", "suffix trees", "skip lists"],
+                &[
+                    "Hungarian Algorithm",
+                    "Stable Marriage",
+                    "LCS",
+                    "suffix trees",
+                    "skip lists",
+                ],
                 &["RemNote", "PDF reader", "ChatGPT"],
                 &["chatgpt.com", "remnote.com"],
                 80,
@@ -434,7 +472,14 @@ mod tests {
             project(
                 "Video content business",
                 "business",
-                &["hooks", "captions", "Premiere", "CapCut", "Instagram upload", "YouTube Shorts"],
+                &[
+                    "hooks",
+                    "captions",
+                    "Premiere",
+                    "CapCut",
+                    "Instagram upload",
+                    "YouTube Shorts",
+                ],
                 &["Premiere Pro", "CapCut"],
                 &["tiktok.com", "instagram.com", "youtube.com"],
                 70,
@@ -444,7 +489,13 @@ mod tests {
 
     #[test]
     fn chatgpt_hungarian_matches_exam_studying_strongly() {
-        let m = match_project(&sample(), "chatgpt.com", "Hungarian Algorithm — assignment problem", "minimum cost matching").unwrap();
+        let m = match_project(
+            &sample(),
+            "chatgpt.com",
+            "Hungarian Algorithm — assignment problem",
+            "minimum cost matching",
+        )
+        .unwrap();
         assert_eq!(m.project_name, "Exam studying");
         assert!(m.confidence >= 80, "confidence was {}", m.confidence);
     }
@@ -469,13 +520,26 @@ mod tests {
         let m = match_project(&sample(), "instagram.com", "Reels", "explore feed").unwrap();
         assert_eq!(m.project_name, "Video content business");
         assert_eq!(m.confidence, 50);
-        let (cat, _r, _m) = resolve(&sample(), "instagram.com", "Reels", "explore feed", "distraction", "content");
+        let (cat, _r, _m) = resolve(
+            &sample(),
+            "instagram.com",
+            "Reels",
+            "explore feed",
+            "distraction",
+            "content",
+        );
         assert_eq!(cat, "distraction");
     }
 
     #[test]
     fn desktop_app_match_by_name() {
-        let m = match_project(&sample(), "RemNote", "suffix trees and skip lists notes", "").unwrap();
+        let m = match_project(
+            &sample(),
+            "RemNote",
+            "suffix trees and skip lists notes",
+            "",
+        )
+        .unwrap();
         assert_eq!(m.project_name, "Exam studying");
         // app match (50) + 2 keywords (35+20) => capped high
         assert!(m.confidence >= 90, "confidence was {}", m.confidence);
@@ -490,8 +554,12 @@ mod tests {
             "captions ready",
         )
         .unwrap();
-        assert!(title_match.signals.contains(&"title keyword: Premiere".to_string()));
-        assert!(title_match.signals.contains(&"content keyword: captions".to_string()));
+        assert!(title_match
+            .signals
+            .contains(&"title keyword: Premiere".to_string()));
+        assert!(title_match
+            .signals
+            .contains(&"content keyword: captions".to_string()));
     }
 
     #[test]
@@ -518,7 +586,14 @@ mod tests {
 
     #[test]
     fn excluded_keyword_blocks_project_assignment() {
-        let mut p = project("Client work", "business", &["launch"], &["Telegram"], &[], 80);
+        let mut p = project(
+            "Client work",
+            "business",
+            &["launch"],
+            &["Telegram"],
+            &[],
+            80,
+        );
         p.excluded_keywords.push("personal".into());
         let tested = test_project_match(&p, "Telegram", "Personal launch chat", "");
         assert_eq!(tested.status, "excluded");

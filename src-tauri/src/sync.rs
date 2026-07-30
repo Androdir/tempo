@@ -28,8 +28,13 @@ fn normalize_hub_url(raw: &str) -> Result<String, String> {
     if raw.is_empty() {
         return Err("Hub URL is required".into());
     }
-    let candidate = if raw.contains("://") { raw.to_string() } else { format!("https://{raw}") };
-    let mut parsed = url::Url::parse(&candidate).map_err(|_| "Enter a valid Hub URL".to_string())?;
+    let candidate = if raw.contains("://") {
+        raw.to_string()
+    } else {
+        format!("https://{raw}")
+    };
+    let mut parsed =
+        url::Url::parse(&candidate).map_err(|_| "Enter a valid Hub URL".to_string())?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err("Hub URL must start with http:// or https://".into());
     }
@@ -163,7 +168,15 @@ fn sync_checkin_definitions(
     use std::hash::{Hash, Hasher};
     let fingerprint = |d: &tempo_core::models::CheckinDefinition| -> i64 {
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        (&d.label, &d.icon, &d.kind, &d.auto_kind, &d.auto_metric, d.auto_threshold).hash(&mut h);
+        (
+            &d.label,
+            &d.icon,
+            &d.kind,
+            &d.auto_kind,
+            &d.auto_metric,
+            d.auto_threshold,
+        )
+            .hash(&mut h);
         h.finish() as i64
     };
     const SNAP_KEY: &str = "sync_snap_checkin_defs";
@@ -176,56 +189,128 @@ fn sync_checkin_definitions(
         let fp = fingerprint(d);
         cur.push((d.id.clone(), fp));
         if old.get(&d.id).copied() != Some(fp) {
-            enqueue(conn, &SyncEvent {
-                event_id: format!("checkin_def:{}:{now_ms}", d.id),
-                event_type: "checkin_def".into(),
-                source: Some("desktop".into()),
-                timestamp: chrono::Utc::now().to_rfc3339(),
-                day: day.to_string(),
-                app_name: None,
-                domain: None,
-                title: None,
-                duration_seconds: None,
-                category: None,
-                project: None,
-                metadata: Some(serde_json::json!({
-                    "id": d.id, "label": d.label, "icon": d.icon, "kind": d.kind,
-                    "autoKind": d.auto_kind, "autoMetric": d.auto_metric,
-                    "autoThreshold": d.auto_threshold,
-                })),
-            });
+            enqueue(
+                conn,
+                &SyncEvent {
+                    event_id: format!("checkin_def:{}:{now_ms}", d.id),
+                    event_type: "checkin_def".into(),
+                    source: Some("desktop".into()),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    day: day.to_string(),
+                    app_name: None,
+                    domain: None,
+                    title: None,
+                    duration_seconds: None,
+                    category: None,
+                    project: None,
+                    metadata: Some(serde_json::json!({
+                        "id": d.id, "label": d.label, "icon": d.icon, "kind": d.kind,
+                        "autoKind": d.auto_kind, "autoMetric": d.auto_metric,
+                        "autoThreshold": d.auto_threshold,
+                    })),
+                },
+            );
             n += 1;
         }
     }
     for id in old.keys() {
         if !defs.iter().any(|d| &d.id == id) {
-            enqueue(conn, &SyncEvent {
-                event_id: format!("checkin_def:{id}:del:{now_ms}"),
-                event_type: "checkin_def".into(),
-                source: Some("desktop".into()),
-                timestamp: chrono::Utc::now().to_rfc3339(),
-                day: day.to_string(),
-                app_name: None,
-                domain: None,
-                title: None,
-                duration_seconds: None,
-                category: None,
-                project: None,
-                metadata: Some(serde_json::json!({ "id": id, "deleted": true })),
-            });
+            enqueue(
+                conn,
+                &SyncEvent {
+                    event_id: format!("checkin_def:{id}:del:{now_ms}"),
+                    event_type: "checkin_def".into(),
+                    source: Some("desktop".into()),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    day: day.to_string(),
+                    app_name: None,
+                    domain: None,
+                    title: None,
+                    duration_seconds: None,
+                    category: None,
+                    project: None,
+                    metadata: Some(serde_json::json!({ "id": id, "deleted": true })),
+                },
+            );
             n += 1;
         }
     }
     if n > 0 {
-        let snap =
-            format!("defs|{}", cur.iter().map(|(f, v)| format!("{f}={v}")).collect::<Vec<_>>().join(","));
+        let snap = format!(
+            "defs|{}",
+            cur.iter()
+                .map(|(f, v)| format!("{f}={v}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
         let _ = settings::set_setting(conn, SNAP_KEY, &snap);
     }
     n
 }
 
+/// Keep classification configuration identical on the desktop and Hub.
+fn sync_classification_bundle(conn: &Connection, day: &str, now_ms: i64) -> i64 {
+    let mut app_rules = Vec::new();
+    if let Ok(mut stmt) =
+        conn.prepare("SELECT app_name, category, ai_review FROM category_rules ORDER BY app_name")
+    {
+        if let Ok(rows) = stmt.query_map([], |r| {
+            Ok(serde_json::json!({
+                "appName": r.get::<_, String>(0)?, "category": r.get::<_, String>(1)?,
+                "aiReview": r.get::<_, i64>(2)? != 0,
+            }))
+        }) {
+            app_rules = rows.filter_map(Result::ok).collect();
+        }
+    }
+    let mut domain_rules = Vec::new();
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT domain, category, capture_mode, ai_review FROM domain_rules ORDER BY domain",
+    ) {
+        if let Ok(rows) = stmt.query_map([], |r| {
+            Ok(serde_json::json!({
+                "domain": r.get::<_, String>(0)?, "category": r.get::<_, Option<String>>(1)?,
+                "captureMode": r.get::<_, String>(2)?, "aiReview": r.get::<_, i64>(3)? != 0,
+            }))
+        }) {
+            domain_rules = rows.filter_map(Result::ok).collect();
+        }
+    }
+    let bundle = serde_json::json!({
+        "version": 1, "appRules": app_rules, "domainRules": domain_rules,
+        "categories": crate::models::list_category_definitions(conn).unwrap_or_default(),
+        "projects": crate::projects::list_projects(conn).unwrap_or_default(),
+        "policies": crate::semantic::load(conn),
+    });
+    let snapshot = bundle.to_string();
+    const SNAP_KEY: &str = "sync_snap_classification_bundle";
+    if settings::get_setting(conn, SNAP_KEY).as_deref() == Some(snapshot.as_str()) {
+        return 0;
+    }
+    enqueue(
+        conn,
+        &SyncEvent {
+            event_id: format!("classification_bundle:{now_ms}"),
+            event_type: "classification_bundle".into(),
+            source: Some("desktop".into()),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            day: day.to_string(),
+            app_name: None,
+            domain: None,
+            title: None,
+            duration_seconds: None,
+            category: None,
+            project: None,
+            metadata: Some(bundle),
+        },
+    );
+    let _ = settings::set_setting(conn, SNAP_KEY, &snapshot);
+    1
+}
 fn watermark(conn: &Connection, table: &str) -> i64 {
-    settings::get_setting(conn, &wm_key(table)).and_then(|s| s.parse().ok()).unwrap_or(0)
+    settings::get_setting(conn, &wm_key(table))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
 }
 fn set_watermark(conn: &Connection, table: &str, id: i64) {
     let _ = settings::set_setting(conn, &wm_key(table), &id.to_string());
@@ -241,7 +326,7 @@ pub fn scan_and_enqueue(conn: &Connection) -> i64 {
         let wm = watermark(conn, "activity_log");
         let mut max_id = wm;
         if let Ok(mut stmt) = conn.prepare(
-            "SELECT id, timestamp, day, app_name, window_title, duration_seconds, is_idle
+            "SELECT id, timestamp, day, app_name, window_title, executable_path, duration_seconds, is_idle
              FROM activity_log WHERE id > ?1 ORDER BY id LIMIT 2000",
         ) {
             let rows = stmt.query_map([wm], |r| {
@@ -251,12 +336,13 @@ pub fn scan_and_enqueue(conn: &Connection) -> i64 {
                     r.get::<_, String>(2)?,
                     r.get::<_, String>(3)?,
                     r.get::<_, String>(4)?,
-                    r.get::<_, i64>(5)?,
+                    r.get::<_, Option<String>>(5)?,
                     r.get::<_, i64>(6)?,
+                    r.get::<_, i64>(7)?,
                 ))
             });
             if let Ok(rows) = rows {
-                for (id, ts, day, app, title, dur, idle) in rows.flatten() {
+                for (id, ts, day, app, title, executable_path, dur, idle) in rows.flatten() {
                     enqueue(conn, &SyncEvent {
                         event_id: format!("activity_log:{id}"),
                         event_type: "app_sample".into(),
@@ -269,7 +355,7 @@ pub fn scan_and_enqueue(conn: &Connection) -> i64 {
                         duration_seconds: Some(dur),
                         category: None,
                         project: None,
-                        metadata: Some(serde_json::json!({ "isIdle": idle != 0 })),
+                        metadata: Some(serde_json::json!({ "isIdle": idle != 0, "executablePath": executable_path })),
                     });
                     max_id = max_id.max(id);
                     n += 1;
@@ -306,24 +392,29 @@ pub fn scan_and_enqueue(conn: &Connection) -> i64 {
                 ))
             });
             if let Ok(rows) = rows {
-                for (id, ts, day, domain, url, title, dur, idle, ctype, summary, kw) in rows.flatten() {
-                    enqueue(conn, &SyncEvent {
-                        event_id: format!("browser_activity:{id}"),
-                        event_type: "browser_sample".into(),
-                        source: Some("browser".into()),
-                        timestamp: ts,
-                        day,
-                        app_name: None,
-                        domain: Some(domain),
-                        title: Some(title),
-                        duration_seconds: Some(dur),
-                        category: None,
-                        project: None,
-                        metadata: Some(serde_json::json!({
-                            "isIdle": idle != 0, "url": url,
-                            "contentType": ctype, "summary": summary, "keywords": kw,
-                        })),
-                    });
+                for (id, ts, day, domain, url, title, dur, idle, ctype, summary, kw) in
+                    rows.flatten()
+                {
+                    enqueue(
+                        conn,
+                        &SyncEvent {
+                            event_id: format!("browser_activity:{id}"),
+                            event_type: "browser_sample".into(),
+                            source: Some("browser".into()),
+                            timestamp: ts,
+                            day,
+                            app_name: None,
+                            domain: Some(domain),
+                            title: Some(title),
+                            duration_seconds: Some(dur),
+                            category: None,
+                            project: None,
+                            metadata: Some(serde_json::json!({
+                                "isIdle": idle != 0, "url": url,
+                                "contentType": ctype, "summary": summary, "keywords": kw,
+                            })),
+                        },
+                    );
                     max_id = max_id.max(id);
                     n += 1;
                 }
@@ -360,24 +451,41 @@ pub fn scan_and_enqueue(conn: &Connection) -> i64 {
                 ))
             });
             if let Ok(rows) = rows {
-                for (id, ts, day, folder, fpath, fname, ext, size, etype, project, modified, created) in rows.flatten() {
-                    enqueue(conn, &SyncEvent {
-                        event_id: format!("output_events:{id}"),
-                        event_type: "output".into(),
-                        source: Some("desktop".into()),
-                        timestamp: ts,
-                        day,
-                        app_name: None,
-                        domain: None,
-                        title: Some(fname.clone()),
-                        duration_seconds: None,
-                        category: Some(etype),
-                        project,
-                        metadata: Some(serde_json::json!({
-                            "folderPath": folder, "filePath": fpath, "fileName": fname,
-                            "extension": ext, "fileSize": size, "modifiedAt": modified, "createdAt": created,
-                        })),
-                    });
+                for (
+                    id,
+                    ts,
+                    day,
+                    folder,
+                    fpath,
+                    fname,
+                    ext,
+                    size,
+                    etype,
+                    project,
+                    modified,
+                    created,
+                ) in rows.flatten()
+                {
+                    enqueue(
+                        conn,
+                        &SyncEvent {
+                            event_id: format!("output_events:{id}"),
+                            event_type: "output".into(),
+                            source: Some("desktop".into()),
+                            timestamp: ts,
+                            day,
+                            app_name: None,
+                            domain: None,
+                            title: Some(fname.clone()),
+                            duration_seconds: None,
+                            category: Some(etype),
+                            project,
+                            metadata: Some(serde_json::json!({
+                                "folderPath": folder, "filePath": fpath, "fileName": fname,
+                                "extension": ext, "fileSize": size, "modifiedAt": modified, "createdAt": created,
+                            })),
+                        },
+                    );
                     max_id = max_id.max(id);
                     n += 1;
                 }
@@ -467,10 +575,12 @@ pub fn scan_and_enqueue(conn: &Connection) -> i64 {
             )
             .unwrap_or(0);
         let mut manual: Vec<(String, i64)> = vec![("main_goal_completed".to_string(), mg)];
-        if let Ok(mut stmt) =
-            conn.prepare("SELECT checkin_id, value FROM checkin_values WHERE day = ?1 ORDER BY checkin_id")
-        {
-            if let Ok(rows) = stmt.query_map([&day], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))) {
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT checkin_id, value FROM checkin_values WHERE day = ?1 ORDER BY checkin_id",
+        ) {
+            if let Ok(rows) = stmt.query_map([&day], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            }) {
                 manual.extend(rows.flatten());
             }
         }
@@ -480,7 +590,11 @@ pub fn scan_and_enqueue(conn: &Connection) -> i64 {
             // An absent snapshot entry means "never sent today": 0 is the implied
             // baseline for main_goal, while a fresh manual row syncs even at 0
             // (it may be an override forcing an auto check-in off).
-            let baseline = if field == "main_goal_completed" { 0 } else { i64::MIN };
+            let baseline = if field == "main_goal_completed" {
+                0
+            } else {
+                i64::MIN
+            };
             if old.get(field).copied().unwrap_or(baseline) != *value {
                 let def = defs.iter().find(|d| &d.id == field);
                 enqueue(conn, &checkin_event(&day, field, *value, def, now_ms));
@@ -499,16 +613,22 @@ pub fn scan_and_enqueue(conn: &Connection) -> i64 {
         if changed {
             let snap = format!(
                 "{day}|{}",
-                manual.iter().map(|(f, v)| format!("{f}={v}")).collect::<Vec<_>>().join(",")
+                manual
+                    .iter()
+                    .map(|(f, v)| format!("{f}={v}"))
+                    .collect::<Vec<_>>()
+                    .join(",")
             );
             let _ = settings::set_setting(conn, "sync_snap_checkin", &snap);
         }
 
         // --- daily note ---
         let note: String = conn
-            .query_row("SELECT notes FROM daily_checkin WHERE day = ?1", [&day], |r| {
-                r.get::<_, Option<String>>(0)
-            })
+            .query_row(
+                "SELECT notes FROM daily_checkin WHERE day = ?1",
+                [&day],
+                |r| r.get::<_, Option<String>>(0),
+            )
             .ok()
             .flatten()
             .unwrap_or_default();
@@ -516,29 +636,42 @@ pub fn scan_and_enqueue(conn: &Connection) -> i64 {
         let prev_note = settings::get_setting(conn, "sync_snap_note");
         if prev_note.as_deref() != Some(note_snap.as_str()) {
             // Send when there's a note, or when clearing a note we previously sent today.
-            let cleared_today = prev_note.map(|s| s.starts_with(&format!("{day}|"))).unwrap_or(false);
+            let cleared_today = prev_note
+                .map(|s| s.starts_with(&format!("{day}|")))
+                .unwrap_or(false);
             if !note.is_empty() || cleared_today {
-                enqueue(conn, &SyncEvent {
-                    event_id: format!("note:{day}:{now_ms}"),
-                    event_type: "note".into(),
-                    source: Some("desktop".into()),
-                    timestamp: chrono::Utc::now().to_rfc3339(),
-                    day: day.clone(),
-                    app_name: None,
-                    domain: None,
-                    title: None,
-                    duration_seconds: None,
-                    category: None,
-                    project: None,
-                    metadata: Some(serde_json::json!({ "notes": note })),
-                });
+                enqueue(
+                    conn,
+                    &SyncEvent {
+                        event_id: format!("note:{day}:{now_ms}"),
+                        event_type: "note".into(),
+                        source: Some("desktop".into()),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        day: day.clone(),
+                        app_name: None,
+                        domain: None,
+                        title: None,
+                        duration_seconds: None,
+                        category: None,
+                        project: None,
+                        metadata: Some(serde_json::json!({ "notes": note })),
+                    },
+                );
                 n += 1;
             }
             let _ = settings::set_setting(conn, "sync_snap_note", &note_snap);
         }
 
         // --- goals for today (re-send all of today's goals on any change) ---
-        let mut goals: Vec<(String, Option<String>, Option<i64>, Option<i64>, Option<String>, String, i64)> = Vec::new();
+        let mut goals: Vec<(
+            String,
+            Option<String>,
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+            String,
+            i64,
+        )> = Vec::new();
         if let Ok(mut stmt) = conn.prepare(
             "SELECT title, project, target_minutes, target_count, target_unit, priority, completed FROM goals
              WHERE day = ?1 ORDER BY sort_order, id",
@@ -551,37 +684,55 @@ pub fn scan_and_enqueue(conn: &Connection) -> i64 {
         }
         let goal_snap = format!(
             "{day}|{}",
-            goals.iter().map(|g| {
-                format!("{}={}={}={}={}={}", g.0, g.6, g.5, g.2.unwrap_or(-1), g.3.unwrap_or(-1), g.4.as_deref().unwrap_or(""))
-            }).collect::<Vec<_>>().join(";;"),
+            goals
+                .iter()
+                .map(|g| {
+                    format!(
+                        "{}={}={}={}={}={}",
+                        g.0,
+                        g.6,
+                        g.5,
+                        g.2.unwrap_or(-1),
+                        g.3.unwrap_or(-1),
+                        g.4.as_deref().unwrap_or("")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(";;"),
         );
         if settings::get_setting(conn, "sync_snap_goals").as_deref() != Some(goal_snap.as_str()) {
             for (title, project, target, target_count, target_unit, priority, completed) in &goals {
-                enqueue(conn, &SyncEvent {
-                    event_id: format!("goal:{day}:{title}:{now_ms}"),
-                    event_type: "goal".into(),
-                    source: Some("desktop".into()),
-                    timestamp: chrono::Utc::now().to_rfc3339(),
-                    day: day.clone(),
-                    app_name: None,
-                    domain: None,
-                    title: Some(title.clone()),
-                    duration_seconds: None,
-                    category: None,
-                    project: project.clone(),
-                    metadata: Some(serde_json::json!({
-                        "completed": *completed != 0,
-                        "priority": priority,
-                        "targetMinutes": target,
-                        "targetCount": target_count,
-                        "targetUnit": target_unit,
-                    })),
-                });
+                enqueue(
+                    conn,
+                    &SyncEvent {
+                        event_id: format!("goal:{day}:{title}:{now_ms}"),
+                        event_type: "goal".into(),
+                        source: Some("desktop".into()),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        day: day.clone(),
+                        app_name: None,
+                        domain: None,
+                        title: Some(title.clone()),
+                        duration_seconds: None,
+                        category: None,
+                        project: project.clone(),
+                        metadata: Some(serde_json::json!({
+                            "completed": *completed != 0,
+                            "priority": priority,
+                            "targetMinutes": target,
+                            "targetCount": target_count,
+                            "targetUnit": target_unit,
+                        })),
+                    },
+                );
                 n += 1;
             }
-            let _ = settings::set_setting(conn, "sync_snap_goals", &goal_snap);        }
+            let _ = settings::set_setting(conn, "sync_snap_goals", &goal_snap);
+        }
     }
 
+    let config_day = chrono::Local::now().format("%Y-%m-%d").to_string();
+    n += sync_classification_bundle(conn, &config_day, chrono::Utc::now().timestamp_millis());
     n
 }
 
@@ -589,7 +740,10 @@ pub fn scan_and_enqueue(conn: &Connection) -> i64 {
 
 pub fn mark_sent(conn: &Connection, ids: &[String]) {
     for id in ids {
-        let _ = conn.execute("UPDATE sync_queue SET status = 'sent' WHERE event_id = ?1", params![id]);
+        let _ = conn.execute(
+            "UPDATE sync_queue SET status = 'sent' WHERE event_id = ?1",
+            params![id],
+        );
     }
 }
 
@@ -599,7 +753,10 @@ pub fn record_failure(conn: &Connection, ids: &[String], msg: &str) {
         params![chrono::Utc::now().to_rfc3339(), msg],
     );
     for id in ids {
-        let _ = conn.execute("UPDATE sync_queue SET attempts = attempts + 1 WHERE event_id = ?1", params![id]);
+        let _ = conn.execute(
+            "UPDATE sync_queue SET attempts = attempts + 1 WHERE event_id = ?1",
+            params![id],
+        );
     }
 }
 
@@ -625,9 +782,14 @@ fn drain_once(db: &Db, url: &str, token: &str, device_id: &str) -> Result<i64, S
     if items.is_empty() {
         return Ok(0);
     }
-    let events: Vec<SyncEvent> =
-        items.iter().filter_map(|(_, p)| serde_json::from_str(p).ok()).collect();
-    let batch = EventBatch { device_id: device_id.to_string(), events };
+    let events: Vec<SyncEvent> = items
+        .iter()
+        .filter_map(|(_, p)| serde_json::from_str(p).ok())
+        .collect();
+    let batch = EventBatch {
+        device_id: device_id.to_string(),
+        events,
+    };
     let body = serde_json::to_value(&batch).map_err(|e| e.to_string())?;
 
     let result = ureq::post(&format!("{url}/api/events"))
@@ -659,7 +821,9 @@ pub fn start(db: Db, app: AppHandle) {
             let Ok(conn) = db.lock() else { continue };
             sync_target(&conn)
         };
-        let Some((url, token, device_id)) = target else { continue }; // local mode → idle
+        let Some((url, token, device_id)) = target else {
+            continue;
+        }; // local mode → idle
 
         {
             let Ok(conn) = db.lock() else { continue };
@@ -673,7 +837,8 @@ pub fn start(db: Db, app: AppHandle) {
             let connected = outcome.is_ok();
             let _ = settings::set_setting(&conn, SYNC_CONNECTED, if connected { "1" } else { "0" });
             if connected {
-                let _ = settings::set_setting(&conn, SYNC_LAST_AT, &chrono::Utc::now().to_rfc3339());
+                let _ =
+                    settings::set_setting(&conn, SYNC_LAST_AT, &chrono::Utc::now().to_rfc3339());
             }
         }
         let _ = app.emit("sync-status", ());
@@ -697,7 +862,11 @@ pub struct SyncStatus {
 pub fn get_sync_status(db: State<'_, Db>) -> Result<SyncStatus, String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
     let queued: i64 = conn
-        .query_row("SELECT COUNT(*) FROM sync_queue WHERE status = 'pending'", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM sync_queue WHERE status = 'pending'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap_or(0);
     Ok(SyncStatus {
         mode: settings::get_setting(&conn, APP_MODE).unwrap_or_else(|| "local".into()),
@@ -705,7 +874,9 @@ pub fn get_sync_status(db: State<'_, Db>) -> Result<SyncStatus, String> {
         last_sync: settings::get_setting(&conn, SYNC_LAST_AT),
         queued,
         hub_url: settings::get_setting(&conn, HUB_URL).unwrap_or_default(),
-        paired: !settings::get_setting(&conn, HUB_TOKEN).unwrap_or_default().is_empty(),
+        paired: !settings::get_setting(&conn, HUB_TOKEN)
+            .unwrap_or_default()
+            .is_empty(),
     })
 }
 
@@ -718,7 +889,11 @@ pub fn set_app_mode(db: State<'_, Db>, mode: String) -> Result<(), String> {
 
 /// Pair this device with a hub: exchanges the pairing secret for a device token.
 #[tauri::command]
-pub fn pair_with_hub(db: State<'_, Db>, hub_url: String, pairing_secret: String) -> Result<(), String> {
+pub fn pair_with_hub(
+    db: State<'_, Db>,
+    hub_url: String,
+    pairing_secret: String,
+) -> Result<(), String> {
     let url = normalize_hub_url(&hub_url)?;
     let resp = ureq::post(&format!("{url}/api/pair"))
         .timeout(Duration::from_secs(15))
@@ -729,7 +904,10 @@ pub fn pair_with_hub(db: State<'_, Db>, hub_url: String, pairing_secret: String)
         }))
         .map_err(|e| format!("pairing failed: {e}"))?;
     let body: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
-    let token = body.get("token").and_then(|v| v.as_str()).ok_or("hub did not return a token")?;
+    let token = body
+        .get("token")
+        .and_then(|v| v.as_str())
+        .ok_or("hub did not return a token")?;
     let device_id = body.get("deviceId").and_then(|v| v.as_str()).unwrap_or("");
 
     let conn = db.lock().map_err(|e| e.to_string())?;
@@ -744,12 +922,22 @@ pub fn pair_with_hub(db: State<'_, Db>, hub_url: String, pairing_secret: String)
 #[tauri::command]
 pub fn import_history_to_hub(db: State<'_, Db>) -> Result<(), String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
-    for table in ["activity_log", "browser_activity", "output_events", "focus_sessions"] {
+    for table in [
+        "activity_log",
+        "browser_activity",
+        "output_events",
+        "focus_sessions",
+    ] {
         set_watermark(&conn, table, 0);
     }
     // Force today's mutable state (check-ins / definitions / note / goals) to
     // re-send as well.
-    for key in ["sync_snap_checkin", "sync_snap_checkin_defs", "sync_snap_note", "sync_snap_goals"] {
+    for key in [
+        "sync_snap_checkin",
+        "sync_snap_checkin_defs",
+        "sync_snap_note",
+        "sync_snap_goals",
+    ] {
         let _ = settings::set_setting(&conn, key, "");
     }
     Ok(())
@@ -781,8 +969,14 @@ mod tests {
 
     #[test]
     fn hub_urls_are_normalized_and_limited_to_http() {
-        assert_eq!(normalize_hub_url("tempo-hub.example.ts.net").unwrap(), "https://tempo-hub.example.ts.net");
-        assert_eq!(normalize_hub_url("http://100.90.80.70:7700/").unwrap(), "http://100.90.80.70:7700");
+        assert_eq!(
+            normalize_hub_url("tempo-hub.example.ts.net").unwrap(),
+            "https://tempo-hub.example.ts.net"
+        );
+        assert_eq!(
+            normalize_hub_url("http://100.90.80.70:7700/").unwrap(),
+            "http://100.90.80.70:7700"
+        );
         assert!(normalize_hub_url("ftp://tempo-hub").is_err());
         assert!(normalize_hub_url("https://user:secret@tempo-hub.example.ts.net").is_err());
         assert!(normalize_hub_url("https://tempo-hub.example.ts.net?token=nope").is_err());
@@ -836,21 +1030,40 @@ mod tests {
         conn.execute("DELETE FROM sync_queue", []).unwrap(); // drop the def events
         seed_activity(&conn, 2);
         scan_and_enqueue(&conn);
-        let ids: Vec<String> =
-            vec!["activity_log:1".into(), "activity_log:2".into()];
+        let ids: Vec<String> = vec!["activity_log:1".into(), "activity_log:2".into()];
 
         // Simulate a failed upload: queue stays pending, error logged.
         record_failure(&conn, &ids, "connection refused");
-        let pend: i64 = conn.query_row("SELECT COUNT(*) FROM sync_queue WHERE status='pending'", [], |r| r.get(0)).unwrap();
+        let pend: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_queue WHERE status='pending'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(pend, 2);
-        let errs: i64 = conn.query_row("SELECT COUNT(*) FROM sync_errors", [], |r| r.get(0)).unwrap();
+        let errs: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sync_errors", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(errs, 1);
-        let attempts: i64 = conn.query_row("SELECT attempts FROM sync_queue WHERE event_id='activity_log:1'", [], |r| r.get(0)).unwrap();
+        let attempts: i64 = conn
+            .query_row(
+                "SELECT attempts FROM sync_queue WHERE event_id='activity_log:1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(attempts, 1);
 
         // Now the hub comes back: a successful drain marks them sent.
         mark_sent(&conn, &ids);
-        let pend2: i64 = conn.query_row("SELECT COUNT(*) FROM sync_queue WHERE status='pending'", [], |r| r.get(0)).unwrap();
+        let pend2: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_queue WHERE status='pending'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(pend2, 0);
     }
 
@@ -875,7 +1088,11 @@ mod tests {
         .unwrap();
         assert_eq!(scan_and_enqueue(&conn), 1);
         let q: i64 = conn
-            .query_row("SELECT COUNT(*) FROM sync_queue WHERE event_id='focus_sessions:1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM sync_queue WHERE event_id='focus_sessions:1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(q, 1);
         // Watermark advanced → no re-upload.
@@ -921,8 +1138,11 @@ mod tests {
         assert_eq!(scan_and_enqueue(&conn), 0);
 
         // Completing the goal re-sends it (so completion reaches the hub).
-        conn.execute("UPDATE goals SET completed = 1 WHERE day = ?1 AND title = 'Ship v2'", params![day])
-            .unwrap();
+        conn.execute(
+            "UPDATE goals SET completed = 1 WHERE day = ?1 AND title = 'Ship v2'",
+            params![day],
+        )
+        .unwrap();
         assert!(scan_and_enqueue(&conn) >= 1);
     }
 

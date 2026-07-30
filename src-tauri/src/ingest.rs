@@ -14,12 +14,19 @@ pub fn handle_ingest(db: &Db, p: IngestPayload) -> Result<i64, String> {
     }
 
     let conn = db.lock().map_err(|e| e.to_string())?;
+    if settings::tracking_paused_until(&conn).is_some() {
+        return Ok(0);
+    }
 
     let capture_master = settings::get_bool(&conn, settings::CAPTURE_PAGE_CONTENT, false);
     let store_raw = settings::get_bool(&conn, settings::STORE_RAW_TEXT, false);
     let delete_raw_after = settings::get_bool(&conn, settings::DELETE_RAW_AFTER, false);
-    let max_len = settings::get_int(&conn, settings::MAX_TEXT_LENGTH, settings::DEFAULT_MAX_TEXT_LENGTH)
-        .clamp(0, 200_000) as usize;
+    let max_len = settings::get_int(
+        &conn,
+        settings::MAX_TEXT_LENGTH,
+        settings::DEFAULT_MAX_TEXT_LENGTH,
+    )
+    .clamp(0, 200_000) as usize;
 
     let mode = settings::effective_capture_mode(&conn, &domain);
     let blocked = mode == "never";
@@ -29,11 +36,15 @@ pub fn handle_ingest(db: &Db, p: IngestPayload) -> Result<i64, String> {
 
     // For blocked/sensitive domains, strip the URL down to its origin so we
     // never persist a path/query that could carry sensitive tokens.
-    let url = if blocked { origin_of(&p.url) } else { p.url.clone() };
+    let url = sanitized_url(&p.url, blocked);
 
     // Content retention: summary/keywords kept only for text mode; raw kept only
     // if the user explicitly opted in AND isn't auto-deleting after classify.
-    let mut summary = if allow_text { p.content_summary.clone() } else { None };
+    let mut summary = if allow_text {
+        p.content_summary.clone()
+    } else {
+        None
+    };
     let mut keywords: Vec<String> = if allow_text {
         p.detected_keywords.clone().unwrap_or_default()
     } else {
@@ -61,7 +72,10 @@ pub fn handle_ingest(db: &Db, p: IngestPayload) -> Result<i64, String> {
         .clone()
         .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
     let day = local_day(&ts);
-    let duration = p.duration_seconds.unwrap_or(settings::SAMPLE_SECONDS).clamp(0, 3600);
+    let duration = p
+        .duration_seconds
+        .unwrap_or(settings::SAMPLE_SECONDS)
+        .clamp(0, 3600);
     let is_idle = p.is_idle.unwrap_or(false) as i64;
 
     conn.execute(
@@ -90,6 +104,22 @@ pub fn handle_ingest(db: &Db, p: IngestPayload) -> Result<i64, String> {
     Ok(conn.last_insert_rowid())
 }
 
+fn sanitized_url(raw: &str, origin_only: bool) -> String {
+    let Ok(mut parsed) = url::Url::parse(raw) else {
+        return if origin_only {
+            origin_of(raw)
+        } else {
+            raw.split(['?', '#']).next().unwrap_or(raw).to_string()
+        };
+    };
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    if origin_only {
+        parsed.set_path("");
+    }
+    parsed.to_string()
+}
+
 fn origin_of(url: &str) -> String {
     if let Some(scheme_end) = url.find("://") {
         let after = &url[scheme_end + 3..];
@@ -110,5 +140,25 @@ fn local_day(ts: &str) -> String {
     match DateTime::parse_from_rfc3339(ts) {
         Ok(dt) => dt.with_timezone(&Local).format("%Y-%m-%d").to_string(),
         Err(_) => Local::now().format("%Y-%m-%d").to_string(),
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn urls_always_drop_query_and_fragment() {
+        assert_eq!(
+            sanitized_url("https://example.com/private/path?q=secret#section", false),
+            "https://example.com/private/path"
+        );
+    }
+
+    #[test]
+    fn blocked_urls_keep_only_the_origin() {
+        assert_eq!(
+            sanitized_url("https://bank.example/private/path?token=secret", true),
+            "https://bank.example/"
+        );
     }
 }

@@ -22,6 +22,7 @@ import {
   setDomainRule,
   setLlmSetting,
   setPrivacySetting,
+  setTrackingPause,
   setLaunchAtLogin,
   testOllamaConnection,
 } from "../api";
@@ -92,6 +93,7 @@ export default function PrivacySettings() {
   const [smartInterval, setSmartInterval] = useState("60");
   const [retention, setRetention] = useState("90");
   const [idleThreshold, setIdleThreshold] = useState("60");
+  const [privateApps, setPrivateApps] = useState("");
   const [newDomain, setNewDomain] = useState("");
   const [newMode, setNewMode] = useState<CaptureMode>("meta");
   const [newCat, setNewCat] = useState<Category | "">("");
@@ -123,6 +125,7 @@ export default function PrivacySettings() {
       setSmartInterval(String(s.smartIntervalSeconds));
       setRetention(String(s.retentionDays));
       setIdleThreshold(String(s.idleThresholdSeconds));
+      setPrivateApps(s.titleExcludedApps.join(", "));
       setRules(r);
       setCategories(c);
       setLaunchAtLoginState(startup);
@@ -149,6 +152,28 @@ export default function PrivacySettings() {
     window.setTimeout(() => setStatus(null), 2500);
   };
 
+  async function pauseTracking(minutes: number) {
+    try {
+      await setTrackingPause(minutes);
+      await load();
+      flash(minutes > 0 ? "Tracking paused" : "Tracking resumed");
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+  async function savePrivateApps() {
+    const apps = privateApps
+      .split(/[,\n]+/)
+      .map((app) => app.trim())
+      .filter(Boolean);
+    try {
+      await setPrivacySetting("title_excluded_apps", JSON.stringify(apps));
+      await load();
+      flash(apps.length ? "Sensitive-app privacy saved" : "Sensitive-app exclusions cleared");
+    } catch (e) {
+      setError(String(e));
+    }
+  }
   async function toggleLaunchAtLogin(value: boolean) {
     try {
       await setLaunchAtLogin(value);
@@ -315,6 +340,41 @@ export default function PrivacySettings() {
     flash(`Cleared content from ${n} row(s)`);
   }
 
+  async function copyDiagnostics() {
+    const diagnostics = {
+      app: "Tempo",
+      version: "0.1.0",
+      generatedAt: new Date().toISOString(),
+      desktopApp: isTauri(),
+      platform: navigator.platform,
+      database: health ? {
+        status: health.status,
+        ok: health.databaseOk,
+        browserConnected: health.browserConnected,
+        smartEnabled: health.smartEnabled,
+        pendingSyncEvents: health.pendingSyncEvents,
+        lastDesktopAt: health.lastDesktopAt,
+        lastBrowserAt: health.lastBrowserAt,
+        lastScreenAt: health.lastScreenAt,
+        lastBackupAt: health.lastBackupAt,
+        issues: health.issues,
+      } : null,
+      privacy: settings ? {
+        trackingPaused: settings.trackingPausedUntil != null,
+        smartTrackingEnabled: settings.smartTrackingEnabled,
+        capturePageContent: settings.capturePageContent,
+        storeRawText: settings.storeRawText,
+        retentionDays: settings.retentionDays,
+        sensitiveAppCount: settings.titleExcludedApps.length,
+      } : null,
+    };
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(diagnostics, null, 2));
+      flash("Privacy-filtered diagnostics copied");
+    } catch (e) {
+      setError(`Could not copy diagnostics: ${String(e)}`);
+    }
+  }
   async function makeBackup() {
     setBackupBusy(true);
     try {
@@ -469,6 +529,45 @@ export default function PrivacySettings() {
           </SettingRow>
         </div>
       )}
+
+      <div className="card card-pad section-gap" hidden={section !== "tracking"}>
+        <h2 className="card-title">Pause &amp; private time</h2>
+        <p className="card-hint">
+          Pausing stops desktop, browser-extension and screen activity rows. Tempo automatically resumes at the selected time.
+        </p>
+        <SettingRow
+          label={settings.trackingPausedUntil ? "Tracking is paused" : "Tracking is active"}
+          hint={settings.trackingPausedUntil ? `Resumes ${new Date(settings.trackingPausedUntil).toLocaleString()}` : "You can also pause or resume from the Tempo tray icon."}
+        >
+          <span className="pause-actions">
+            {settings.trackingPausedUntil ? (
+              <button className="btn btn-primary" onClick={() => pauseTracking(0)}>Resume now</button>
+            ) : (
+              <>
+                <button className="btn" onClick={() => pauseTracking(15)}>15 min</button>
+                <button className="btn" onClick={() => pauseTracking(60)}>1 hour</button>
+                <button className="btn" onClick={() => pauseTracking(8 * 60)}>8 hours</button>
+              </>
+            )}
+          </span>
+        </SettingRow>
+        <SettingRow
+          label="Sensitive apps"
+          hint="Tempo still records the app and duration, but stores no window title and skips screen OCR while one of these apps is active."
+        >
+          <span className="inline-edit private-apps-control">
+            <input
+              className="search"
+              placeholder="1Password, Bitwarden, Signal"
+              value={privateApps}
+              onChange={(e) => setPrivateApps(e.target.value)}
+              onBlur={savePrivateApps}
+              onKeyDown={(e) => e.key === "Enter" && savePrivateApps()}
+            />
+            <button className="btn" onClick={savePrivateApps}>Save</button>
+          </span>
+        </SettingRow>
+      </div>
 
       {/* Accountability */}
       {acct && (
@@ -890,6 +989,7 @@ export default function PrivacySettings() {
           <button className="btn btn-primary" onClick={makeBackup} disabled={!isTauri() || backupBusy}>
             {backupBusy ? "Working…" : "Back up now"}
           </button>
+          <button className="btn" onClick={copyDiagnostics}>Copy diagnostics</button>
           {health?.lastBackupAt && <span className="muted-num">Latest: {new Date(health.lastBackupAt).toLocaleString()}</span>}
           {!isTauri() && <span className="muted-num">Open the desktop app to create or restore a manual backup. Automatic startup backups also run on the Hub.</span>}
         </div>

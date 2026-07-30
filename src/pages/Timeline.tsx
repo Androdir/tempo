@@ -17,6 +17,13 @@ const CAT_FILTERS: { id: CatFilter; label: string }[] = [
   { id: "business", label: "Business" },
 ];
 
+const MIN_DURATION_OPTIONS = [
+  { seconds: 0, label: "Show all durations" },
+  { seconds: 30, label: "At least 30 seconds" },
+  { seconds: 60, label: "At least 1 minute" },
+  { seconds: 120, label: "At least 2 minutes" },
+  { seconds: 300, label: "At least 5 minutes" },
+];
 const SOURCE_LABEL: Record<string, string> = {
   desktop: "Desktop",
   browser: "Browser",
@@ -62,6 +69,7 @@ export default function Timeline() {
   const [day, setDay] = useState<string>(todayIso());
 
   const [viewMode, setViewMode] = useState<ViewMode>("overview");
+  const [minOverviewSeconds, setMinOverviewSeconds] = useState(30);
   const [data, setData] = useState<TimelineDay | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [catF, setCatF] = useState<CatFilter>("all");
@@ -104,7 +112,7 @@ export default function Timeline() {
     [blocks],
   );
 
-  const visible = useMemo(
+  const filteredBeforeDuration = useMemo(
     () =>
       blocks.filter((b) => {
         if (sourceF !== "all" && b.source !== sourceF) return false;
@@ -118,7 +126,20 @@ export default function Timeline() {
       }),
     [blocks, sourceF, projectF, labelF, catF],
   );
-  const hasOutputs = Boolean(data?.goals.length || (data?.outputs.length ?? 0) > 0);
+  const visible = useMemo(
+    () => viewMode === "overview"
+      ? filteredBeforeDuration.filter((b) => b.durationSeconds >= minOverviewSeconds)
+      : filteredBeforeDuration,
+    [filteredBeforeDuration, viewMode, minOverviewSeconds],
+  );
+  const hiddenBrief = useMemo(() => {
+    if (viewMode !== "overview" || minOverviewSeconds <= 0) return { count: 0, seconds: 0 };
+    const hidden = filteredBeforeDuration.filter((b) => b.durationSeconds < minOverviewSeconds);
+    return {
+      count: hidden.length,
+      seconds: hidden.reduce((sum, block) => sum + block.durationSeconds, 0),
+    };
+  }, [filteredBeforeDuration, viewMode, minOverviewSeconds]);  const hasOutputs = Boolean(data?.goals.length || (data?.outputs.length ?? 0) > 0);
 
   const maxDur = useMemo(
     () => Math.max(60, ...visible.map((b) => b.durationSeconds)),
@@ -317,7 +338,7 @@ export default function Timeline() {
         <>
           {viewMode === "overview" && (
             <div className="tl-mode-note" role="note">
-              Showing {data.overviewBlocks.length} meaningful runs from {data.blocks.length} exact runs. Overview ignores only an accidental detour of 20 seconds or less when the same activity resumes immediately. Exact data and totals are unchanged.
+              Overview joins brief A → B → A detours back into the surrounding activity, then applies your minimum-duration filter. Hidden rows never change tracked totals and remain available in Exact.
             </div>
           )}
           {viewMode === "exact" && (
@@ -372,7 +393,18 @@ export default function Timeline() {
                 </button>
               ))}
             </div>
-            <select className="pf-select" value={sourceF} onChange={(e) => setSourceF(e.target.value)}>
+            {viewMode === "overview" && (
+              <select
+                className="pf-select"
+                aria-label="Minimum activity duration"
+                value={minOverviewSeconds}
+                onChange={(e) => setMinOverviewSeconds(Number(e.target.value))}
+              >
+                {MIN_DURATION_OPTIONS.map((option) => (
+                  <option key={option.seconds} value={option.seconds}>{option.label}</option>
+                ))}
+              </select>
+            )}            <select className="pf-select" value={sourceF} onChange={(e) => setSourceF(e.target.value)}>
               <option value="all">All sources</option>
               <option value="desktop">Desktop</option>
               <option value="browser">Browser</option>
@@ -392,6 +424,11 @@ export default function Timeline() {
             </select>
           </div>
 
+          {hiddenBrief.count > 0 && (
+            <div className="tl-hidden-note" role="status">
+              Hidden {hiddenBrief.count} brief {hiddenBrief.count === 1 ? "activity" : "activities"} ({formatDuration(hiddenBrief.seconds)} total). Choose “Show all durations” or switch to Exact to inspect them.
+            </div>
+          )}
           <div className="card tl-list">
             {items.length === 0 ? (
               <div className="empty">

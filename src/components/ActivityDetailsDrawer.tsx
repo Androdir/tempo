@@ -5,6 +5,8 @@ import {
   getActivityDetails,
   getCategoryDefinitions,
   getCorrectionHistory,
+  getClassificationPolicies,
+  setClassificationPolicies,
   undoCorrection,
 } from "../api";
 import { categoryMeta, contentTypeMeta } from "../categories";
@@ -37,6 +39,9 @@ function explainCategory(
 
   if (classifier === "manual" || lower.includes("manual correction")) {
     return `You previously corrected this activity to ${label}. Your correction takes priority over automatic matching.`;
+  }
+  if (lower.startsWith("policy:")) {
+    return `Tempo identified the activity type first, then your visible policy mapped that type to ${label}.`;
   }
   if (lower.startsWith("project:")) {
     return `A confident project match supplied the ${label} category. See the separate project evidence below.`;
@@ -102,6 +107,7 @@ export default function ActivityDetailsDrawer({
   const [error, setError] = useState<string | null>(null);
   const [projectAction, setProjectAction] = useState<string | null>(null);
   const [history, setHistory] = useState<CorrectionHistoryEntry[]>([]);
+  const [typeAction, setTypeAction] = useState<string | null>(null);
 
   const open = id != null || activity != null;
 
@@ -144,6 +150,7 @@ export default function ActivityDetailsDrawer({
     const category = detail?.category ?? activity?.category ?? "uncategorized";
     const classifier = detail?.classifier ?? activity?.classifier ?? "rule";
     const reason = detail?.classificationReason ?? activity?.reason ?? "No explanation recorded";
+    const activityKind = activity?.activityKind ?? "unknown";
     const confidence = classifier === "llm"
       ? (detail?.llmConfidence ?? activity?.llmConfidence ?? null)
       : (detail?.confidence ?? activity?.confidence ?? null);
@@ -160,6 +167,7 @@ export default function ActivityDetailsDrawer({
       category,
       classifier,
       reason,
+      activityKind,
       confidence,
       projectName,
       projectConfidence,
@@ -182,6 +190,34 @@ export default function ActivityDetailsDrawer({
     }
   }
 
+  async function setTypeDefault(category: string) {
+    if (!view || view.activityKind === "unknown" || view.activityKind === "system") return;
+    const label = categoryMeta(category).label;
+    if (!confirm(`Classify all recognised ${view.activityKind.replace(/_/g, " ")} activity as ${label}? Saved app/site rules and strong project matches still take priority.`)) return;
+    try {
+      const policies = await getClassificationPolicies();
+      const index = policies.findIndex((policy) => policy.kinds.includes(view.activityKind));
+      if (index >= 0) {
+        policies[index] = { ...policies[index], category, enabled: true };
+      } else {
+        policies.push({
+          id: `type-${view.activityKind}-${Date.now().toString(36)}`,
+          name: `${view.activityKind.replace(/_/g, " ")} default`,
+          category,
+          kinds: [view.activityKind],
+          terms: [],
+          enabled: true,
+          builtIn: false,
+          priority: 60,
+        });
+      }
+      await setClassificationPolicies(policies);
+      setTypeAction(`All recognised ${view.activityKind.replace(/_/g, " ")} activity now defaults to ${label}.`);
+      await onCorrected?.();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
   async function undoLatestCorrection() {
     const latest = history.find((entry) => !entry.undoneAt);
     if (!latest || !view) return;
@@ -246,6 +282,9 @@ export default function ActivityDetailsDrawer({
             </Row>
             {view.source === "screen" && view.lastSeen && (
               <Row label="Observed">{new Date(view.lastSeen).toLocaleString()}</Row>
+            )}
+            {view.activityKind !== "unknown" && (
+              <Row label="Activity type">{view.activityKind.replace(/_/g, " ")}</Row>
             )}
             {view.contentType && (
               <Row label="Type">
@@ -324,6 +363,20 @@ export default function ActivityDetailsDrawer({
                 <button className="correct-btn ignore" onClick={() => doCorrect("ignore")}>Ignore</button>
               </div>
             </div>
+
+            {view.activityKind !== "unknown" && view.activityKind !== "system" && (
+              <div className="detail-section">
+                <div className="detail-section-title">Default for this activity type</div>
+                <p className="detail-help">
+                  Apply one policy to every recognised {view.activityKind.replace(/_/g, " ")} activity. Specific app, website and strong project rules still win.
+                </p>
+                <select className="select" defaultValue="" onChange={(e) => e.target.value && setTypeDefault(e.target.value)}>
+                  <option value="" disabled>Choose a default…</option>
+                  {categories.map((category) => <option key={category.id} value={category.id}>{category.label}</option>)}
+                </select>
+                {typeAction && <div className="success-inline" role="status">{typeAction}</div>}
+              </div>
+            )}
 
             {history.length > 0 && (
               <div className="detail-section correction-history">

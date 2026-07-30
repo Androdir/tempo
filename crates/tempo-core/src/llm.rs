@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::Db;
 use crate::models::{LlmError, OllamaTestResult};
-use crate::{projects, settings};
+use crate::{projects, semantic, settings};
 
 const WORKER_INTERVAL: Duration = Duration::from_secs(25);
 const MAX_PER_CYCLE: usize = 4;
@@ -40,11 +40,13 @@ pub struct ClassifyRequest {
     pub title: String,
     pub domain: Option<String>,
     pub summary: Option<String>,
+    pub activity_kind: String,
     pub rule_category: String,
     pub rule_confidence: f64,
     pub matched_project: Option<String>,
     pub matched_project_confidence: u8,
     pub goals: Vec<String>,
+    pub policies: Vec<semantic::ClassificationPolicy>,
     pub duration_seconds: i64,
     pub prev: Option<String>,
     pub next: Option<String>,
@@ -55,7 +57,10 @@ pub struct ClassifyRequest {
 fn host_of(url: &str) -> Option<String> {
     let after = url.split("://").nth(1).unwrap_or(url);
     let hostport = after.split('/').next()?;
-    let host = hostport.rsplit_once(':').map(|(h, _)| h).unwrap_or(hostport);
+    let host = hostport
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or(hostport);
     Some(host.trim().to_string())
 }
 
@@ -98,16 +103,31 @@ pub fn build_prompt(req: &ClassifyRequest) -> String {
     let none = "none".to_string();
     let mut s = String::new();
     s.push_str("You classify a user's computer activity into exactly one category.\n");
-    s.push_str("Return ONLY a JSON object with keys: category, productive, confidence, project, reason.\n");
-    s.push_str("category must be one of: productive, study, business, neutral, distraction, recovery.\n");
+    s.push_str(
+        "Return ONLY a JSON object with keys: category, productive, confidence, project, reason.\n",
+    );
+    s.push_str(
+        "category must be one of: productive, study, business, neutral, distraction, recovery.\n",
+    );
     s.push_str("productive: boolean. confidence: 0.0-1.0. project: one of the user's projects or null. reason: <= 18 words.\n");
     s.push_str("Evidence rules:\n");
     s.push_str("- Never choose a project from goals or neighboring activity. Use only the matched project below; if it is none, project must be null.\n");
     s.push_str("- A goal is not evidence that the current app belongs to that goal.\n");
     s.push_str("- Tempo itself is neutral tracking/admin time and never study or project work.\n");
-    s.push_str("- Generic Telegram/chat activity is distracting unless the title or visible text clearly shows work.\n");
     s.push_str("- If evidence is weak, choose neutral and keep confidence at or below 0.55.\n\n");
 
+    if !req.policies.is_empty() {
+        s.push_str("User classification policies (apply when their terms match the activity):\n");
+        for policy in req.policies.iter().filter(|policy| policy.enabled) {
+            s.push_str(&format!(
+                "- {} => {} when matching: {}\n",
+                policy.name,
+                policy.category,
+                policy.terms.join(", ")
+            ));
+        }
+        s.push('\n');
+    }
     if !req.goals.is_empty() {
         s.push_str("User's projects / daily goals:\n");
         for g in &req.goals {
@@ -128,15 +148,29 @@ pub fn build_prompt(req: &ClassifyRequest) -> String {
             s.push_str(&format!("- text summary: {}\n", truncate(sum, 400)));
         }
     }
-    s.push_str(&format!("- rule category: {} ({:.0}% confidence)\n", req.rule_category, req.rule_confidence * 100.0));
+    s.push_str(&format!(
+        "- detected activity type: {}\n",
+        req.activity_kind
+    ));
+    s.push_str(&format!(
+        "- rule category: {} ({:.0}% confidence)\n",
+        req.rule_category,
+        req.rule_confidence * 100.0
+    ));
     s.push_str(&format!(
         "- matched project (rule-based): {} ({}% confidence)\n",
         req.matched_project.as_ref().unwrap_or(&none),
         req.matched_project_confidence,
     ));
     s.push_str(&format!("- duration: {}s\n", req.duration_seconds));
-    s.push_str(&format!("- previous activity: {}\n", req.prev.as_ref().unwrap_or(&none)));
-    s.push_str(&format!("- next activity: {}\n", req.next.as_ref().unwrap_or(&none)));
+    s.push_str(&format!(
+        "- previous activity: {}\n",
+        req.prev.as_ref().unwrap_or(&none)
+    ));
+    s.push_str(&format!(
+        "- next activity: {}\n",
+        req.next.as_ref().unwrap_or(&none)
+    ));
     s.push_str("\nJSON:");
     s
 }
@@ -180,9 +214,21 @@ pub fn parse_and_validate(s: &str) -> Result<LlmClassification, String> {
         }
         _ => None,
     };
-    let reason: String = raw.reason.unwrap_or_default().trim().chars().take(200).collect();
+    let reason: String = raw
+        .reason
+        .unwrap_or_default()
+        .trim()
+        .chars()
+        .take(200)
+        .collect();
 
-    Ok(LlmClassification { category, productive, confidence, project, reason })
+    Ok(LlmClassification {
+        category,
+        productive,
+        confidence,
+        project,
+        reason,
+    })
 }
 
 fn normalized_app(label: &str) -> String {
@@ -195,7 +241,7 @@ fn normalized_app(label: &str) -> String {
 
 /// Enforce evidence boundaries after model output. LLM confidence is not proof:
 /// project attribution must agree with the deterministic matcher, and sparse
-/// desktop context cannot turn Tempo or Telegram into unrelated productive work.
+/// desktop context cannot turn Tempo into unrelated productive work.
 pub fn apply_evidence_guardrails(
     req: &ClassifyRequest,
     mut c: LlmClassification,
@@ -217,21 +263,31 @@ pub fn apply_evidence_guardrails(
         app.as_str(),
         "tempo" | "tempoexe" | "productivitytracker" | "productivitytrackerexe"
     );
-    let is_telegram = matches!(app.as_str(), "telegram" | "telegramexe" | "telegramdesktop");
 
     if is_tempo {
         c.category = "neutral".to_string();
         c.confidence = 0.98;
         c.project = None;
         c.reason = "Tempo is tracking/admin time".to_string();
-    } else if is_telegram && !has_visible_evidence && c.project.is_none() {
-        c.category = "distraction".to_string();
-        c.confidence = c.confidence.max(0.82);
-        c.reason = "Telegram without work evidence".to_string();
-    } else if !has_visible_evidence
-        && c.project.is_none()
-        && req.rule_category == "uncategorized"
-    {
+    } else if c.project.is_none() && req.rule_confidence < 0.75 {
+        let evidence = format!(
+            "{} {} {} {} {}",
+            req.label,
+            req.title,
+            req.domain.as_deref().unwrap_or_default(),
+            req.summary.as_deref().unwrap_or_default(),
+            c.reason,
+        );
+        if let Some((policy, term)) =
+            semantic::matched(&req.policies, &evidence, &req.activity_kind)
+        {
+            c.category = policy.category.clone();
+            c.confidence = c.confidence.max(0.88);
+            c.reason = format!("Policy: {} (matched ‘{}’)", policy.name, term);
+        } else if !has_visible_evidence && req.rule_category == "uncategorized" {
+            c.confidence = c.confidence.min(0.70);
+        }
+    } else if !has_visible_evidence && c.project.is_none() && req.rule_category == "uncategorized" {
         // App + title alone can be useful, but cannot justify near-certainty.
         c.confidence = c.confidence.min(0.70);
     }
@@ -320,7 +376,10 @@ pub fn test_connection(url: &str, model: &str) -> OllamaTestResult {
         .timeout_read(Duration::from_secs(8))
         .build();
 
-    match agent.get(&format!("{}/api/tags", url.trim_end_matches('/'))).call() {
+    match agent
+        .get(&format!("{}/api/tags", url.trim_end_matches('/')))
+        .call()
+    {
         Ok(resp) => match resp.into_json::<serde_json::Value>() {
             Ok(v) => {
                 let models: Vec<String> = v
@@ -328,7 +387,9 @@ pub fn test_connection(url: &str, model: &str) -> OllamaTestResult {
                     .and_then(|m| m.as_array())
                     .map(|arr| {
                         arr.iter()
-                            .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(String::from))
+                            .filter_map(|m| {
+                                m.get("name").and_then(|n| n.as_str()).map(String::from)
+                            })
                             .collect()
                     })
                     .unwrap_or_default();
@@ -336,13 +397,19 @@ pub fn test_connection(url: &str, model: &str) -> OllamaTestResult {
                     .iter()
                     .any(|m| m == model || m.split(':').next() == Some(model));
                 let message = if models.is_empty() {
-                    "Connected, but no models are installed. Try: ollama pull llama3.1:8b".to_string()
+                    "Connected, but no models are installed. Try: ollama pull llama3.1:8b"
+                        .to_string()
                 } else if model_available {
                     format!("Connected ✓  {} model(s) available.", models.len())
                 } else {
                     format!("Connected, but '{model}' is not installed. Try: ollama pull {model}")
                 };
-                OllamaTestResult { ok: true, message, models, model_available }
+                OllamaTestResult {
+                    ok: true,
+                    message,
+                    models,
+                    model_available,
+                }
             }
             Err(e) => OllamaTestResult {
                 ok: false,
@@ -434,9 +501,9 @@ pub fn log_error(db: &Db, context: Option<&str>, message: &str) {
 
 pub fn recent_errors(conn: &Connection) -> Vec<LlmError> {
     let mut out = Vec::new();
-    if let Ok(mut stmt) = conn.prepare(
-        "SELECT timestamp, context, message FROM llm_errors ORDER BY id DESC LIMIT 20",
-    ) {
+    if let Ok(mut stmt) =
+        conn.prepare("SELECT timestamp, context, message FROM llm_errors ORDER BY id DESC LIMIT 20")
+    {
         if let Ok(rows) = stmt.query_map([], |r| {
             Ok(LlmError {
                 timestamp: r.get(0)?,
@@ -482,9 +549,7 @@ fn read_config(db: &Db) -> Option<WorkerConfig> {
 
 fn load_today_keys(conn: &Connection, day: &str) -> HashSet<String> {
     let mut set = HashSet::new();
-    if let Ok(mut stmt) =
-        conn.prepare("SELECT block_key FROM llm_classification WHERE day = ?1")
-    {
+    if let Ok(mut stmt) = conn.prepare("SELECT block_key FROM llm_classification WHERE day = ?1") {
         if let Ok(rows) = stmt.query_map([day], |r| r.get::<_, String>(0)) {
             for k in rows.flatten() {
                 set.insert(k);
@@ -504,7 +569,11 @@ fn goal_list(conn: &Connection) -> Vec<String> {
 }
 
 fn neighbor(b: &crate::aggregate::Block) -> String {
-    let t = if b.title.is_empty() { b.label.clone() } else { b.title.clone() };
+    let t = if b.title.is_empty() {
+        b.label.clone()
+    } else {
+        b.title.clone()
+    };
     format!("{} — {}", b.label, t)
 }
 
@@ -527,6 +596,7 @@ fn gather_work(db: &Db, max: usize) -> Result<Vec<(String, String, ClassifyReque
     let cached = load_today_keys(&conn, &day);
     let manual = load_manual_keys(&conn, &day);
     let goals = goal_list(&conn);
+    let policies = semantic::load(&conn);
 
     let mut out = Vec::new();
     for (i, b) in blocks.iter().enumerate() {
@@ -542,7 +612,11 @@ fn gather_work(db: &Db, max: usize) -> Result<Vec<(String, String, ClassifyReque
         if cached.contains(&key) || manual.contains(&key) {
             continue;
         }
-        let next = if i > 0 { Some(neighbor(&blocks[i - 1])) } else { None };
+        let next = if i > 0 {
+            Some(neighbor(&blocks[i - 1]))
+        } else {
+            None
+        };
         let prev = blocks.get(i + 1).map(neighbor);
         out.push((
             key,
@@ -553,6 +627,7 @@ fn gather_work(db: &Db, max: usize) -> Result<Vec<(String, String, ClassifyReque
                 title: b.title.clone(),
                 domain: b.domain.clone(),
                 summary: b.summary.clone(),
+                activity_kind: b.activity_kind.clone(),
                 rule_category: b.rule_category.clone(),
                 rule_confidence: b.confidence,
                 matched_project: b
@@ -561,6 +636,7 @@ fn gather_work(db: &Db, max: usize) -> Result<Vec<(String, String, ClassifyReque
                     .filter(|_| b.rule_project_confidence >= projects::OVERRIDE_THRESHOLD),
                 matched_project_confidence: b.rule_project_confidence,
                 goals: goals.clone(),
+                policies: policies.clone(),
                 duration_seconds: b.seconds,
                 prev,
                 next,
@@ -579,7 +655,11 @@ pub fn start(db: Db) {
             _ => continue,
         };
         if !is_private_host(&cfg.url) {
-            log_error(&db, None, &format!("Refusing non-local Ollama URL: {}", cfg.url));
+            log_error(
+                &db,
+                None,
+                &format!("Refusing non-local Ollama URL: {}", cfg.url),
+            );
             continue;
         }
 
@@ -591,7 +671,10 @@ pub fn start(db: Db) {
             }
         };
 
-        let oc = OllamaConfig { url: cfg.url.clone(), model: cfg.model.clone() };
+        let oc = OllamaConfig {
+            url: cfg.url.clone(),
+            model: cfg.model.clone(),
+        };
         for (key, day, req) in work {
             // On any error we simply don't cache => reads use rule-based.
             match classify(&oc, &req) {
@@ -621,18 +704,32 @@ mod tests {
         assert_eq!(c.project.as_deref(), Some("Exam studying"));
     }
 
-    fn request(label: &str, summary: Option<&str>, matched_project: Option<&str>) -> ClassifyRequest {
+    fn request(
+        label: &str,
+        summary: Option<&str>,
+        matched_project: Option<&str>,
+    ) -> ClassifyRequest {
         ClassifyRequest {
             source: "app".into(),
             label: label.into(),
             title: label.into(),
             domain: None,
             summary: summary.map(str::to_string),
+            activity_kind: semantic::detect_activity_kind(
+                "app",
+                label,
+                label,
+                None,
+                None,
+                summary,
+                &[],
+            ),
             rule_category: "uncategorized".into(),
             rule_confidence: 0.3,
             matched_project: matched_project.map(str::to_string),
             matched_project_confidence: if matched_project.is_some() { 85 } else { 0 },
             goals: vec!["Bible Reading (study)".into()],
+            policies: semantic::defaults(),
             duration_seconds: 20,
             prev: None,
             next: None,
@@ -723,5 +820,15 @@ mod tests {
         assert!(is_private_host("http://nas.tail9f2c.ts.net:11434"));
         assert!(!is_private_host("http://100.63.0.1:11434")); // just below CGNAT = public
         assert!(!is_private_host("http://100.200.0.1:11434")); // above CGNAT = public
+    }
+
+    #[test]
+    fn recognized_gameplay_reason_is_forced_to_distraction() {
+        let parsed = parse_and_validate(
+            r#"{"category":"neutral","confidence":0.55,"project":null,"reason":"Short gameplay session without clear work-related context."}"#,
+        ).unwrap();
+        let guarded = apply_evidence_guardrails(&request("Unknown Game", None, None), parsed);
+        assert_eq!(guarded.category, "distraction");
+        assert!(guarded.reason.contains("Recognized gameplay"));
     }
 }

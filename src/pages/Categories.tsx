@@ -3,9 +3,11 @@ import {
   deleteCategoryDefinition,
   deleteCategoryRule,
   getCategoryDefinitions,
+  getClassificationPolicies,
   getTrackedApps,
   getTrackedDomains,
   setCategoryRule,
+  setClassificationPolicies,
   setDomainRule,
   upsertCategoryDefinition,
 } from "../api";
@@ -16,7 +18,7 @@ import {
 } from "../categories";
 import { AppGlyph } from "../components/ui";
 import { formatDuration } from "../format";
-import type { Bucket, Category, CategoryDefinition, TrackedApp, TrackedDomain } from "../types";
+import type { Bucket, Category, CategoryDefinition, ClassificationPolicy, TrackedApp, TrackedDomain } from "../types";
 
 type Tab = "all" | "apps" | "websites";
 
@@ -28,6 +30,8 @@ export default function Categories() {
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [categoryDefs, setCategoryDefs] = useState<CategoryDefinition[]>([]);
+  const [policies, setPolicies] = useState<ClassificationPolicy[]>([]);
+  const [savingPolicies, setSavingPolicies] = useState(false);
   const [draft, setDraft] = useState<CategoryDefinition>({
     id: "",
     label: "",
@@ -39,10 +43,11 @@ export default function Categories() {
 
   const load = useCallback(async () => {
     try {
-      const [a, d, defs] = await Promise.all([getTrackedApps(), getTrackedDomains(), getCategoryDefinitions()]);
+      const [a, d, defs, savedPolicies] = await Promise.all([getTrackedApps(), getTrackedDomains(), getCategoryDefinitions(), getClassificationPolicies()]);
       setApps(a);
       setDomains(d);
       setCategoryDefs(defs);
+      setPolicies(savedPolicies);
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -89,6 +94,35 @@ export default function Categories() {
     }
   }
 
+  function updatePolicy(id: string, patch: Partial<ClassificationPolicy>) {
+    setPolicies((current) => current.map((policy) => policy.id === id ? { ...policy, ...patch } : policy));
+  }
+
+  function addPolicy() {
+    const suffix = Date.now().toString(36);
+    setPolicies((current) => [...current, {
+      id: `custom-${suffix}`,
+      name: "New policy",
+      category: "distraction",
+      kinds: [],
+      terms: [],
+      enabled: true,
+      builtIn: false,
+      priority: 50,
+    }]);
+  }
+
+  async function savePolicies() {
+    try {
+      setSavingPolicies(true);
+      await setClassificationPolicies(policies);
+      await load();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSavingPolicies(false);
+    }
+  }
   useEffect(() => {
     load();
   }, [load]);
@@ -243,6 +277,49 @@ export default function Categories() {
         )}
       </div>
 
+      <details className="card card-pad section-gap category-advanced classification-policies">
+        <summary>Classification policies</summary>
+        <p className="card-hint">
+          Tempo first identifies what an activity is, then applies your policy. For example, the built-in Game policy makes recognised games distractions without labelling each title. Manual app/site rules and strong project matches remain exceptions. Saving a policy clears stale local-AI results and re-evaluates past activity when you open that day; your manual corrections remain in place.
+        </p>
+        <div className="policy-list">
+          {policies.map((policy) => (
+            <div className="policy-row" key={policy.id}>
+              <label className="ai-toggle policy-enabled" title="Use this policy">
+                <input type="checkbox" checked={policy.enabled} onChange={(e) => updatePolicy(policy.id, { enabled: e.target.checked })} />
+                <span>{policy.enabled ? "On" : "Off"}</span>
+              </label>
+              <input className="input" value={policy.name} aria-label="Policy name" onChange={(e) => updatePolicy(policy.id, { name: e.target.value })} />
+              <select className="select" value={policy.category} aria-label={`${policy.name} category`} onChange={(e) => updatePolicy(policy.id, { category: e.target.value })}>
+                {categoryDefs.map((category) => <option key={category.id} value={category.id}>{category.label}</option>)}
+              </select>
+              <input
+                className="input policy-kinds"
+                defaultValue={policy.kinds.join(", ")}
+                aria-label={`${policy.name} activity types`}
+                placeholder="Activity types: game, chat…"
+                onBlur={(e) => updatePolicy(policy.id, { kinds: e.target.value.split(",").map((kind) => kind.trim()).filter(Boolean) })}
+              />
+              <textarea
+                className="input policy-terms"
+                defaultValue={policy.terms.join(", ")}
+                aria-label={`${policy.name} matching terms`}
+                placeholder="gameplay, Steam, Minecraft…"
+                onBlur={(e) => updatePolicy(policy.id, { terms: e.target.value.split(",").map((term) => term.trim()).filter(Boolean) })}
+              />
+              <div className="policy-actions">
+                {policy.builtIn ? <span className="badge">Built in</span> : (
+                  <button className="btn ghost small" onClick={() => setPolicies((current) => current.filter((item) => item.id !== policy.id))}>Delete</button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="policy-footer">
+          <button className="btn ghost" onClick={addPolicy}>+ Add policy</button>
+          <button className="btn primary" disabled={savingPolicies} onClick={savePolicies}>{savingPolicies ? "Saving…" : "Save policies"}</button>
+        </div>
+      </details>
       <details className="card card-pad section-gap category-advanced">
         <summary>Customize categories</summary>
         <p className="card-hint">Optional: keep the defaults, rename them, or add your own.</p>
@@ -310,7 +387,7 @@ function CategoryTable({
           <th>Name</th>
           <th className="right">Tracked</th>
           <th style={{ width: 190 }}>Category</th>
-          <th style={{ width: 120 }}>AI review</th>
+          <th style={{ width: 160 }}>Local AI check</th>
         </tr>
       </thead>
       <tbody>
@@ -343,7 +420,7 @@ function CategoryTable({
                 title={
                   r.aiDisabled
                     ? "Set a category first"
-                    : "Always send this to the local LLM for review"
+                    : "Always ask your local Ollama model to double-check this rule, even when Tempo is already confident"
                 }
               >
                 <input
@@ -352,7 +429,7 @@ function CategoryTable({
                   disabled={r.aiDisabled}
                   onChange={(e) => r.onToggleAi(e.target.checked)}
                 />
-                <span>review</span>
+                <span>Always double-check</span>
               </label>
             </td>
           </tr>

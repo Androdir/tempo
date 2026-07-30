@@ -6,8 +6,8 @@
 //! Nothing here depends on `tauri`, `active-win-pos-rs`, or any windowing stack,
 //! so it cross-compiles cleanly for a headless Raspberry Pi / Docker server.
 
-pub mod aggregate;
 pub mod accountability_export;
+pub mod aggregate;
 pub mod classify;
 pub mod db;
 pub mod events;
@@ -17,5 +17,6 @@ pub mod models;
 pub mod projects;
 pub mod rules;
 pub mod scoring;
+pub mod semantic;
 pub mod settings;
 pub mod streaks;

@@ -5,6 +5,16 @@ export type Category = string;
 
 export type Bucket = "productive" | "neutral" | "distracting";
 
+export interface ClassificationPolicy {
+  id: string;
+  name: string;
+  category: string;
+  kinds: string[];
+  terms: string[];
+  enabled: boolean;
+  builtIn: boolean;
+  priority: number;
+}
 export interface CategoryDefinition {
   id: string;
   label: string;
@@ -559,6 +569,7 @@ export interface ActivityLogEntry {
   title: string;
   seconds: number;
   category: Category | "ignore";
+  activityKind: string;
   reason: string;
   contentType: string | null;
   lastSeen: string;
@@ -602,6 +613,8 @@ export interface PrivacySettings {
   retentionDays: number;
   idleThresholdSeconds: number;
   countMediaAsActive: boolean;
+  trackingPausedUntil: string | null;
+  titleExcludedApps: string[];
 }
 
 /** An app the tracker has seen (used on the Categories page). */

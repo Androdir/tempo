@@ -1,7 +1,8 @@
 // GUI-free logic now lives in the shared `tempo-core` crate. Re-export it at the
 // crate root so existing `crate::db` / `crate::models` / … paths keep resolving.
 pub use tempo_core::{
-    accountability_export, aggregate, classify, db, llm, lockin, models, projects, rules, scoring, settings, streaks,
+    accountability_export, aggregate, classify, db, llm, lockin, models, projects, rules, scoring,
+    semantic, settings, streaks,
 };
 
 mod accountability;
@@ -14,14 +15,14 @@ mod smart;
 mod sync;
 mod tracker;
 
-use tauri::Manager;
 #[cfg(desktop)]
 use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::Manager;
 #[cfg(desktop)]
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, WindowEvent,
+    AppHandle, Emitter, WindowEvent,
 };
 
 #[cfg(desktop)]
@@ -37,10 +38,45 @@ fn show_main_window(app: &AppHandle) {
 }
 
 #[cfg(desktop)]
+fn set_tracking_pause(app: &AppHandle, until: Option<String>, label: &str) {
+    let database = app.state::<db::Db>();
+    if let Ok(conn) = database.lock() {
+        let _ = settings::set_tracking_paused_until(&conn, until.as_deref());
+    }
+    let _ = accountability::send_native_notification(app, "Tempo tracking", label);
+    let _ = app.emit("tracking-updated", ());
+}
+
+#[cfg(desktop)]
 fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Open Tempo", true, None::<&str>)?;
+    let pause15 = MenuItem::with_id(
+        app,
+        "pause15",
+        "Pause tracking for 15 minutes",
+        true,
+        None::<&str>,
+    )?;
+    let pause60 = MenuItem::with_id(
+        app,
+        "pause60",
+        "Pause tracking for 1 hour",
+        true,
+        None::<&str>,
+    )?;
+    let pause_tomorrow = MenuItem::with_id(
+        app,
+        "pause_tomorrow",
+        "Pause until tomorrow",
+        true,
+        None::<&str>,
+    )?;
+    let resume = MenuItem::with_id(app, "resume", "Resume tracking", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Tempo", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &quit])?;
+    let menu = Menu::with_items(
+        app,
+        &[&open, &pause15, &pause60, &pause_tomorrow, &resume, &quit],
+    )?;
 
     let mut tray = TrayIconBuilder::with_id("tempo-tray")
         .tooltip("Tempo — tracking in the background")
@@ -48,6 +84,25 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open" => show_main_window(app),
+            "pause15" => set_tracking_pause(
+                app,
+                Some((chrono::Utc::now() + chrono::Duration::minutes(15)).to_rfc3339()),
+                "Tracking paused for 15 minutes. Resume any time from the tray.",
+            ),
+            "pause60" => set_tracking_pause(
+                app,
+                Some((chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339()),
+                "Tracking paused for 1 hour. Resume any time from the tray.",
+            ),
+            "pause_tomorrow" => {
+                let tomorrow = chrono::Local::now().date_naive() + chrono::Duration::days(1);
+                let until = tomorrow
+                    .and_hms_opt(0, 0, 0)
+                    .and_then(|naive| naive.and_local_timezone(chrono::Local).single())
+                    .map(|local| local.with_timezone(&chrono::Utc).to_rfc3339());
+                set_tracking_pause(app, until, "Tracking paused until tomorrow.");
+            }
+            "resume" => set_tracking_pause(app, None, "Tracking resumed."),
             "quit" => app.exit(0),
             _ => {}
         })
@@ -58,8 +113,7 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
                     button: MouseButton::Left,
                     button_state: MouseButtonState::Up,
                     ..
-                }
-                | TrayIconEvent::DoubleClick {
+                } | TrayIconEvent::DoubleClick {
                     button: MouseButton::Left,
                     ..
                 }
@@ -137,15 +191,15 @@ pub fn run() {
                 if settings::get_setting(&conn, settings::LAUNCH_AT_LOGIN_INITIALIZED).is_none() {
                     use tauri_plugin_autostart::ManagerExt;
                     let _ = app.autolaunch().enable();
-                    let _ = settings::set_setting(
-                        &conn,
-                        settings::LAUNCH_AT_LOGIN_INITIALIZED,
-                        "1",
-                    );
+                    let _ =
+                        settings::set_setting(&conn, settings::LAUNCH_AT_LOGIN_INITIALIZED, "1");
                 }
                 // Enforce data retention once at startup.
-                let retention =
-                    settings::get_int(&conn, settings::RETENTION_DAYS, settings::DEFAULT_RETENTION_DAYS);
+                let retention = settings::get_int(
+                    &conn,
+                    settings::RETENTION_DAYS,
+                    settings::DEFAULT_RETENTION_DAYS,
+                );
                 let _ = db::prune(&conn, retention);
                 (settings::ingest_token(&conn), settings::ingest_port(&conn))
             };
@@ -185,6 +239,8 @@ pub fn run() {
             commands::get_tracked_apps,
             commands::get_category_rules,
             commands::get_category_definitions,
+            commands::get_classification_policies,
+            commands::set_classification_policies,
             commands::upsert_category_definition,
             commands::delete_category_definition,
             commands::set_category_rule,
@@ -197,6 +253,7 @@ pub fn run() {
             commands::set_domain_rule,
             commands::delete_domain_rule,
             commands::get_privacy_settings,
+            commands::set_tracking_pause,
             commands::set_privacy_setting,
             commands::purge_raw_content,
             commands::delete_all_captured_content,

@@ -3,6 +3,10 @@ import {
   endFocusSession,
   getFocusSession,
   getFocusSummary,
+  getGoals,
+  getProjects,
+  getTrackedApps,
+  getTrackedDomains,
   startFocusSession,
 } from "../api";
 import { previewToast } from "../components/AccountabilityLayer";
@@ -47,6 +51,35 @@ export default function Focus() {
   useEffect(() => {
     load();
   }, [load]);
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([getGoals(), getProjects(), getTrackedApps(), getTrackedDomains()])
+      .then(([goals, projects, apps, domains]) => {
+        if (cancelled) return;
+        const next = goals.find((item) => !item.completed);
+        if (next) setGoal((current) => current || next.title);
+
+        const project = next?.project
+          ? projects.find((item) => item.name === next.project)
+          : null;
+        if (project) {
+          const suggested = [...project.apps, ...project.domains];
+          if (suggested.length > 0) {
+            setAllowed((current) => current || suggested.join(", "));
+          }
+        }
+
+        const distractions = [
+          ...apps.filter((item) => item.category === "distraction").map((item) => item.appName),
+          ...domains.filter((item) => item.category === "distraction").map((item) => item.domain),
+        ];
+        if (distractions.length > 0) {
+          setBlocked((current) => [...new Set([...splitList(current), ...distractions])].join(", "));
+        }
+      })
+      .catch(() => { /* suggestions are optional */ });
+    return () => { cancelled = true; };
+  }, []);
 
   // 1s tick for the countdown; also refetch the session each tick it might end.
   useEffect(() => {
@@ -98,7 +131,7 @@ export default function Focus() {
         <div>
           <h1 className="page-title">Focus Mode</h1>
           <div className="page-subtitle">
-            Pick a goal, set a timer, and get nudged when you drift off-task
+            Your next mission and its project tools are filled in automatically; adjust anything before starting
           </div>
         </div>
       </div>

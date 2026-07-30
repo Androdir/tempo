@@ -9,6 +9,7 @@ import type {
   CaptureMode,
   Category,
   CategoryDefinition,
+  ClassificationPolicy,
   AccountabilitySettings,
   CategoryRule,
   CheckinDefinition,
@@ -54,7 +55,7 @@ import type {
  * The whole app talks to the Rust backend through this module.
  *
  * When the bundle is opened inside Tauri we call real `#[tauri::command]`s.
- * When it's opened in a plain browser (e.g. `npm run dev` for UI work) we
+ * When it is opened in a plain browser (e.g. `npm run dev` for UI work) we
  * serve in-memory mock data instead, so the UI is fully explorable without a
  * compiled backend. Nothing here ever touches the network.
  */
@@ -126,12 +127,12 @@ export async function getTodaySummary(): Promise<TodaySummary> {
 }
 
 export async function getTrackedApps(): Promise<TrackedApp[]> {
-  if (isTauri()) return invoke<TrackedApp[]>("get_tracked_apps");
+  if (isTauri() || isRemote()) return callBackend<TrackedApp[]>("get_tracked_apps");
   return mockTrackedApps();
 }
 
 export async function getCategoryRules(): Promise<CategoryRule[]> {
-  if (isTauri()) return invoke<CategoryRule[]>("get_category_rules");
+  if (isTauri() || isRemote()) return callBackend<CategoryRule[]>("get_category_rules");
   return [...mockCategories]
     .filter(([, c]) => c)
     .map(([appName, category]) => ({ appName, category: category as Category }));
@@ -147,6 +148,18 @@ export async function getCategoryDefinitions(): Promise<CategoryDefinition[]> {
   return mockCategoryDefs.map((c) => ({ ...c }));
 }
 
+export async function getClassificationPolicies(): Promise<ClassificationPolicy[]> {
+  if (isTauri() || isRemote()) return callBackend<ClassificationPolicy[]>("get_classification_policies");
+  return mockClassificationPolicies.map((policy) => ({ ...policy, kinds: [...policy.kinds], terms: [...policy.terms] }));
+}
+
+export async function setClassificationPolicies(policies: ClassificationPolicy[]): Promise<void> {
+  if (isTauri() || isRemote()) {
+    await callBackend("set_classification_policies", { policies });
+    return;
+  }
+  mockClassificationPolicies = policies.map((policy) => ({ ...policy, kinds: [...policy.kinds], terms: [...policy.terms] }));
+}
 export async function upsertCategoryDefinition(category: CategoryDefinition): Promise<void> {
   if (isTauri() || isRemote()) {
     await callBackend("upsert_category_definition", { category });
@@ -183,8 +196,8 @@ export async function setCategoryRule(
   category: Category,
   aiReview = false
 ): Promise<void> {
-  if (isTauri()) {
-    await invoke("set_category_rule", { appName, category, aiReview });
+  if (isTauri() || isRemote()) {
+    await callBackend("set_category_rule", { appName, category, aiReview });
     return;
   }
   mockCategories.set(appName, category);
@@ -192,8 +205,8 @@ export async function setCategoryRule(
 }
 
 export async function deleteCategoryRule(appName: string): Promise<void> {
-  if (isTauri()) {
-    await invoke("delete_category_rule", { appName });
+  if (isTauri() || isRemote()) {
+    await callBackend("delete_category_rule", { appName });
     return;
   }
   mockCategories.set(appName, null);
@@ -716,6 +729,28 @@ function localDateIso(d = new Date()): string {
   return `${y}-${m}-${day}`;
 }
 
+let mockClassificationPolicies: ClassificationPolicy[] = [
+  {
+    id: "recognized-gameplay",
+    name: "Recognized gameplay",
+    category: "distraction",
+    kinds: ["game"],
+    terms: ["gameplay", "video game", "steam", "minecraft", "roblox", "fortnite", "valorant"],
+    enabled: true,
+    builtIn: true,
+    priority: 100,
+  },
+  {
+    id: "generic-telegram",
+    name: "Generic Telegram use",
+    category: "distraction",
+    kinds: ["chat"],
+    terms: ["telegram"],
+    enabled: true,
+    builtIn: true,
+    priority: 80,
+  },
+];
 const mockCategories = new Map<string, Category | null>();
 const mockAppAi = new Map<string, boolean>();
 const mockSeconds = new Map<string, number>();
@@ -799,12 +834,12 @@ export async function getActivityDetails(id: number): Promise<ActivityDetail> {
 }
 
 export async function getDomainRules(): Promise<DomainRule[]> {
-  if (isTauri()) return invoke<DomainRule[]>("get_domain_rules");
+  if (isTauri() || isRemote()) return callBackend<DomainRule[]>("get_domain_rules");
   return [...mockDomainRules.values()];
 }
 
 export async function getTrackedDomains(): Promise<TrackedDomain[]> {
-  if (isTauri()) return invoke<TrackedDomain[]>("get_tracked_domains");
+  if (isTauri() || isRemote()) return callBackend<TrackedDomain[]>("get_tracked_domains");
   return mockTrackedDomains();
 }
 
@@ -814,16 +849,16 @@ export async function setDomainRule(
   captureMode: CaptureMode,
   aiReview = false
 ): Promise<void> {
-  if (isTauri()) {
-    await invoke("set_domain_rule", { domain, category, captureMode, aiReview });
+  if (isTauri() || isRemote()) {
+    await callBackend("set_domain_rule", { domain, category, captureMode, aiReview });
     return;
   }
   mockDomainRules.set(domain, { domain, category, captureMode, aiReview });
 }
 
 export async function deleteDomainRule(domain: string): Promise<void> {
-  if (isTauri()) {
-    await invoke("delete_domain_rule", { domain });
+  if (isTauri() || isRemote()) {
+    await callBackend("delete_domain_rule", { domain });
     return;
   }
   mockDomainRules.delete(domain);
@@ -834,6 +869,11 @@ export async function getPrivacySettings(): Promise<PrivacySettings> {
   return { ...mockPrivacy };
 }
 
+export async function setTrackingPause(minutes: number): Promise<string | null> {
+  if (isTauri()) return invoke<string | null>("set_tracking_pause", { minutes });
+  mockPrivacy = { ...mockPrivacy, trackingPausedUntil: minutes > 0 ? new Date(Date.now() + minutes * 60_000).toISOString() : null };
+  return mockPrivacy.trackingPausedUntil;
+}
 export async function setPrivacySetting(key: string, value: string): Promise<void> {
   if (isTauri()) {
     await invoke("set_privacy_setting", { key, value });
@@ -872,11 +912,20 @@ let mockPrivacy: PrivacySettings = {
   retentionDays: 90,
   idleThresholdSeconds: 60,
   countMediaAsActive: true,
+  trackingPausedUntil: null,
+  titleExcludedApps: [],
 };
 
 function applyMockPrivacy(key: string, value: string) {
   const on = value === "1" || value.toLowerCase() === "true";
   if (key === "capture_page_content") mockPrivacy = { ...mockPrivacy, capturePageContent: on };
+  else if (key === "title_excluded_apps") {
+    try {
+      mockPrivacy = { ...mockPrivacy, titleExcludedApps: JSON.parse(value) as string[] };
+    } catch {
+      mockPrivacy = { ...mockPrivacy, titleExcludedApps: [] };
+    }
+  }
   else if (key === "store_raw_text") mockPrivacy = { ...mockPrivacy, storeRawText: on };
   else if (key === "delete_raw_after_classification")
     mockPrivacy = { ...mockPrivacy, deleteRawAfterClassification: on };
@@ -1154,6 +1203,7 @@ function mockRecentActivity(): ActivityLogEntry[] {
     title: p.pageTitle,
     seconds: p.durationSeconds,
     category: p.category,
+    activityKind: p.contentType === "video" ? "video" : "research",
     reason:
       p.id === 1
         ? "Studying assignment-problem algorithms"

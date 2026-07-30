@@ -33,7 +33,11 @@ pub struct Stats {
 
 impl Default for Stats {
     fn default() -> Self {
-        Stats { cat_seconds: HashMap::new(), target_seconds: HashMap::new(), first_productive_min: None }
+        Stats {
+            cat_seconds: HashMap::new(),
+            target_seconds: HashMap::new(),
+            first_productive_min: None,
+        }
     }
 }
 
@@ -50,8 +54,15 @@ pub struct OutputSignals {
     pub study_materials: i64,
 }
 
-pub const RULE_KINDS: [&str; 7] =
-    ["checkin", "category", "target", "goal", "no_goal", "late_start", "output"];
+pub const RULE_KINDS: [&str; 7] = [
+    "checkin",
+    "category",
+    "target",
+    "goal",
+    "no_goal",
+    "late_start",
+    "output",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -71,31 +82,133 @@ pub struct ScoreRule {
 /// Tempo starts with only universal goal rules. Everything more personal should
 /// come from the user's own projects, check-ins, apps/sites, or output watchers.
 const DEFAULT_RULES: &[(&str, &str, &str, &str, i64, Option<i64>)] = &[
-    ("main_goal", "Completed main daily goal", "goal", "", 30, None),
-    ("no_main_goal", "No main goal completed", "no_goal", "", -25, None),
+    (
+        "main_goal",
+        "Completed main daily goal",
+        "goal",
+        "",
+        30,
+        None,
+    ),
+    (
+        "no_main_goal",
+        "No main goal completed",
+        "no_goal",
+        "",
+        -25,
+        None,
+    ),
 ];
 
 /// Generic rules shipped by older versions. The v2 migration removes a row only
 /// when it is still an untouched built-in; edited rules and all custom rules stay.
 const LEGACY_PERSONAL_DEFAULTS: &[(&str, &str, &str, &str, i64, Option<i64>)] = &[
-    ("posted_video", "Posted 1+ videos", "checkin", "videos_posted", 25, Some(1)),
-    ("business_min", "90+ min editing / business work", "category", "business", 20, Some(90)),
-    ("study_min", "60+ min studying", "category", "study", 15, Some(60)),
-    ("coding_min", "60+ min coding / building", "category", "productive", 15, Some(60)),
-    ("gym", "Gym / wrestling logged", "checkin", "gym_logged,wrestled", 10, Some(1)),
-    ("instagram", "Instagram distraction over 30 min", "target", "instagram", -15, Some(30)),
-    ("youtube", "YouTube distraction over 45 min", "target", "youtube", -10, Some(45)),
-    ("recovery", "Music / pacing / recovery over 60 min", "category", "recovery", -15, Some(60)),
-    ("late_start", "First productive block after 14:00", "late_start", "", -10, Some(14)),
-    ("shipped_video", "Exported a video (proof of output)", "output", "video_export", 15, Some(1)),
-    ("shipped_code", "Shipped code changes", "output", "code_change", 10, Some(1)),
-    ("study_output", "Created/opened study material", "output", "study_material", 5, Some(1)),
+    (
+        "posted_video",
+        "Posted 1+ videos",
+        "checkin",
+        "videos_posted",
+        25,
+        Some(1),
+    ),
+    (
+        "business_min",
+        "90+ min editing / business work",
+        "category",
+        "business",
+        20,
+        Some(90),
+    ),
+    (
+        "study_min",
+        "60+ min studying",
+        "category",
+        "study",
+        15,
+        Some(60),
+    ),
+    (
+        "coding_min",
+        "60+ min coding / building",
+        "category",
+        "productive",
+        15,
+        Some(60),
+    ),
+    (
+        "gym",
+        "Gym / wrestling logged",
+        "checkin",
+        "gym_logged,wrestled",
+        10,
+        Some(1),
+    ),
+    (
+        "instagram",
+        "Instagram distraction over 30 min",
+        "target",
+        "instagram",
+        -15,
+        Some(30),
+    ),
+    (
+        "youtube",
+        "YouTube distraction over 45 min",
+        "target",
+        "youtube",
+        -10,
+        Some(45),
+    ),
+    (
+        "recovery",
+        "Music / pacing / recovery over 60 min",
+        "category",
+        "recovery",
+        -15,
+        Some(60),
+    ),
+    (
+        "late_start",
+        "First productive block after 14:00",
+        "late_start",
+        "",
+        -10,
+        Some(14),
+    ),
+    (
+        "shipped_video",
+        "Exported a video (proof of output)",
+        "output",
+        "video_export",
+        15,
+        Some(1),
+    ),
+    (
+        "shipped_code",
+        "Shipped code changes",
+        "output",
+        "code_change",
+        10,
+        Some(1),
+    ),
+    (
+        "study_output",
+        "Created/opened study material",
+        "output",
+        "study_material",
+        5,
+        Some(1),
+    ),
 ];
 
 fn migrate_starter_rules_v2(conn: &Connection) -> rusqlite::Result<()> {
     const FLAG: &str = "score_starter_rules_v2";
     let done = conn
-        .query_row("SELECT value FROM app_settings WHERE key = ?1", [FLAG], |r| r.get::<_, String>(0))
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            [FLAG],
+            |r| r.get::<_, String>(0),
+        )
         .ok()
         .is_some_and(|v| v == "1");
     if done {
@@ -120,9 +233,11 @@ fn migrate_starter_rules_v2(conn: &Connection) -> rusqlite::Result<()> {
 pub fn ensure_rule_defaults(conn: &Connection) -> rusqlite::Result<()> {
     migrate_starter_rules_v2(conn)?;
     let already = conn
-        .query_row("SELECT value FROM app_settings WHERE key = ?1", [RULES_SEEDED], |r| {
-            r.get::<_, String>(0)
-        })
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            [RULES_SEEDED],
+            |r| r.get::<_, String>(0),
+        )
         .ok()
         .is_some_and(|v| v == "1");
     if already {
@@ -178,7 +293,9 @@ pub fn list_rules(conn: &Connection) -> Vec<ScoreRule> {
 pub fn upsert_rule(conn: &Connection, rule: &ScoreRule) -> Result<(), String> {
     let id = rule.id.trim().to_ascii_lowercase();
     if id.is_empty()
-        || !id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
     {
         return Err("Rule id must use lowercase letters, numbers, dashes or underscores".into());
     }
@@ -212,7 +329,9 @@ pub fn upsert_rule(conn: &Connection, rule: &ScoreRule) -> Result<(), String> {
         }
         "output" => {
             if !["video_export", "code_change", "study_material"].contains(&metric.as_str()) {
-                return Err("Output metric must be video_export, code_change or study_material".into());
+                return Err(
+                    "Output metric must be video_export, code_change or study_material".into(),
+                );
             }
         }
         _ => {} // goal / no_goal / late_start need no metric
@@ -220,7 +339,11 @@ pub fn upsert_rule(conn: &Connection, rule: &ScoreRule) -> Result<(), String> {
     let _ = ensure_rule_defaults(conn);
     let now = chrono::Utc::now().to_rfc3339();
     let sort: i64 = conn
-        .query_row("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM score_rules", [], |r| r.get(0))
+        .query_row(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM score_rules",
+            [],
+            |r| r.get(0),
+        )
         .unwrap_or(0);
     conn.execute(
         "INSERT INTO score_rules (id, label, kind, metric, weight, threshold, built_in, sort_order, updated_at)
@@ -247,7 +370,8 @@ pub fn upsert_rule(conn: &Connection, rule: &ScoreRule) -> Result<(), String> {
 
 pub fn delete_rule(conn: &Connection, id: &str) -> Result<(), String> {
     let _ = ensure_rule_defaults(conn);
-    conn.execute("DELETE FROM score_rules WHERE id = ?1", [id.trim()]).map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM score_rules WHERE id = ?1", [id.trim()])
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -268,7 +392,11 @@ pub fn set_weight(conn: &Connection, id: &str, weight: i64) -> Result<(), String
 pub fn set_threshold(conn: &Connection, id: &str, threshold: i64) -> Result<(), String> {
     let _ = ensure_rule_defaults(conn);
     let has: Option<Option<i64>> = conn
-        .query_row("SELECT threshold FROM score_rules WHERE id = ?1", [id], |r| r.get(0))
+        .query_row(
+            "SELECT threshold FROM score_rules WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )
         .ok();
     match has {
         None => Err(format!("unknown rule: {id}")),
@@ -276,7 +404,11 @@ pub fn set_threshold(conn: &Connection, id: &str, threshold: i64) -> Result<(), 
         Some(Some(_)) => {
             conn.execute(
                 "UPDATE score_rules SET threshold = ?1, updated_at = ?2 WHERE id = ?3",
-                params![threshold.clamp(0, 1440), chrono::Utc::now().to_rfc3339(), id],
+                params![
+                    threshold.clamp(0, 1440),
+                    chrono::Utc::now().to_rfc3339(),
+                    id
+                ],
             )
             .map_err(|e| e.to_string())?;
             Ok(())
@@ -286,7 +418,8 @@ pub fn set_threshold(conn: &Connection, id: &str, threshold: i64) -> Result<(), 
 
 /// Restore the built-in rule set (drops custom rules and edits).
 pub fn reset(conn: &Connection) -> Result<(), String> {
-    conn.execute("DELETE FROM score_rules", []).map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM score_rules", [])
+        .map_err(|e| e.to_string())?;
     seed_defaults(conn).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -346,7 +479,11 @@ fn eval_rule(
                 .unwrap_or(0);
             let thr = rule.threshold.unwrap_or(1).max(1);
             let display = if thr <= 1 && value <= 1 {
-                if value > 0 { "logged".into() } else { "not logged".into() }
+                if value > 0 {
+                    "logged".into()
+                } else {
+                    "not logged".into()
+                }
             } else {
                 format!("{value}×")
             };
@@ -415,13 +552,19 @@ pub fn build_report(
 
     let score = raw.clamp(0, 100);
 
-    let mut top_wins: Vec<ScoreLine> =
-        lines.iter().filter(|l| l.positive && l.triggered).cloned().collect();
+    let mut top_wins: Vec<ScoreLine> = lines
+        .iter()
+        .filter(|l| l.positive && l.triggered)
+        .cloned()
+        .collect();
     top_wins.sort_by(|a, b| b.weight.cmp(&a.weight));
     top_wins.truncate(3);
 
-    let mut biggest_leaks: Vec<ScoreLine> =
-        lines.iter().filter(|l| !l.positive && l.triggered).cloned().collect();
+    let mut biggest_leaks: Vec<ScoreLine> = lines
+        .iter()
+        .filter(|l| !l.positive && l.triggered)
+        .cloned()
+        .collect();
     biggest_leaks.sort_by(|a, b| a.weight.cmp(&b.weight)); // most negative first
     biggest_leaks.truncate(3);
 
@@ -430,7 +573,10 @@ pub fn build_report(
     let mut category_minutes: Vec<CategoryMinutes> = stats
         .cat_seconds
         .iter()
-        .map(|(c, s)| CategoryMinutes { category: c.clone(), minutes: s / 60 })
+        .map(|(c, s)| CategoryMinutes {
+            category: c.clone(),
+            minutes: s / 60,
+        })
         .filter(|c| c.minutes > 0)
         .collect();
     category_minutes.sort_by(|a, b| b.minutes.cmp(&a.minutes));
@@ -464,14 +610,19 @@ fn build_suggestion(
 ) -> String {
     let mut cands: Vec<(i64, String)> = Vec::new();
 
-    let has_goal_rules = rules.iter().any(|r| r.kind == "goal" || r.kind == "no_goal");
+    let has_goal_rules = rules
+        .iter()
+        .any(|r| r.kind == "goal" || r.kind == "no_goal");
     if has_goal_rules && !checkins.main_goal_completed {
         let gain: i64 = rules
             .iter()
             .filter(|r| r.kind == "goal" || r.kind == "no_goal")
             .map(|r| r.weight.abs())
             .sum();
-        let suffix = main_goal_name.as_ref().map(|n| format!(" ({n})")).unwrap_or_default();
+        let suffix = main_goal_name
+            .as_ref()
+            .map(|n| format!(" ({n})"))
+            .unwrap_or_default();
         cands.push((
             gain,
             format!("Finish your main goal{suffix} before 2pm — worth {gain} points and removes the penalty."),
@@ -479,21 +630,35 @@ fn build_suggestion(
     }
 
     // Triggered leaks: cut below threshold.
-    for l in lines.iter().filter(|l| !l.positive && l.triggered && l.has_threshold) {
+    for l in lines
+        .iter()
+        .filter(|l| !l.positive && l.triggered && l.has_threshold)
+    {
         cands.push((
             l.weight.abs(),
-            format!("Cut {} below {}m to save {} points.", l.label, l.threshold.unwrap_or(0), l.weight.abs()),
+            format!(
+                "Cut {} below {}m to save {} points.",
+                l.label,
+                l.threshold.unwrap_or(0),
+                l.weight.abs()
+            ),
         ));
     }
 
     // Almost-there positives: a category rule you've started but not finished.
-    for rule in rules.iter().filter(|r| r.kind == "category" && r.weight > 0) {
+    for rule in rules
+        .iter()
+        .filter(|r| r.kind == "category" && r.weight > 0)
+    {
         let have = stats.cat_seconds.get(&rule.metric).copied().unwrap_or(0) / 60;
         let need = rule.threshold.unwrap_or(0) - have;
         if have > 0 && need > 0 {
             cands.push((
                 rule.weight,
-                format!("{need} more minutes of {} earns {} points.", rule.metric, rule.weight),
+                format!(
+                    "{need} more minutes of {} earns {} points.",
+                    rule.metric, rule.weight
+                ),
             ));
         }
     }
@@ -569,8 +734,18 @@ mod tests {
         let outputs = OutputSignals::default();
         let mut values = HashMap::new();
         values.insert("growth_research".to_string(), 1i64);
-        let checkins = Checkins { main_goal_completed: false, values };
-        let report = build_report(&conn, "2026-01-01".into(), &stats, &checkins, &outputs, None);
+        let checkins = Checkins {
+            main_goal_completed: false,
+            values,
+        };
+        let report = build_report(
+            &conn,
+            "2026-01-01".into(),
+            &stats,
+            &checkins,
+            &outputs,
+            None,
+        );
         let line = report.lines.iter().find(|l| l.id == "growth").unwrap();
         assert!(line.triggered);
     }
@@ -579,16 +754,35 @@ mod tests {
     fn any_of_checkin_metric_matches_either() {
         let conn = db::test_conn();
         crate::models::ensure_checkin_defaults(&conn).unwrap();
-        upsert_rule(&conn, &ScoreRule {
-            id: "gym".into(), label: "Gym / wrestling".into(), kind: "checkin".into(),
-            metric: "gym_logged,wrestled".into(), weight: 10, threshold: Some(1), built_in: false,
-        }).unwrap();
+        upsert_rule(
+            &conn,
+            &ScoreRule {
+                id: "gym".into(),
+                label: "Gym / wrestling".into(),
+                kind: "checkin".into(),
+                metric: "gym_logged,wrestled".into(),
+                weight: 10,
+                threshold: Some(1),
+                built_in: false,
+            },
+        )
+        .unwrap();
         let stats = Stats::default();
         let outputs = OutputSignals::default();
         let mut values = HashMap::new();
         values.insert("wrestled".to_string(), 1i64); // gym rule reads gym_logged,wrestled
-        let checkins = Checkins { main_goal_completed: false, values };
-        let report = build_report(&conn, "2026-01-01".into(), &stats, &checkins, &outputs, None);
+        let checkins = Checkins {
+            main_goal_completed: false,
+            values,
+        };
+        let report = build_report(
+            &conn,
+            "2026-01-01".into(),
+            &stats,
+            &checkins,
+            &outputs,
+            None,
+        );
         let gym = report.lines.iter().find(|l| l.id == "gym").unwrap();
         assert!(gym.triggered);
     }
@@ -596,15 +790,33 @@ mod tests {
     #[test]
     fn target_rule_reads_target_seconds() {
         let conn = db::test_conn();
-        upsert_rule(&conn, &ScoreRule {
-            id: "instagram".into(), label: "Instagram over 30 min".into(), kind: "target".into(),
-            metric: "instagram".into(), weight: -15, threshold: Some(30), built_in: false,
-        }).unwrap();
+        upsert_rule(
+            &conn,
+            &ScoreRule {
+                id: "instagram".into(),
+                label: "Instagram over 30 min".into(),
+                kind: "target".into(),
+                metric: "instagram".into(),
+                weight: -15,
+                threshold: Some(30),
+                built_in: false,
+            },
+        )
+        .unwrap();
         let mut stats = Stats::default();
         stats.target_seconds.insert("instagram".into(), 40 * 60);
-        let checkins = Checkins { main_goal_completed: false, values: HashMap::new() };
-        let report =
-            build_report(&conn, "2026-01-01".into(), &stats, &checkins, &OutputSignals::default(), None);
+        let checkins = Checkins {
+            main_goal_completed: false,
+            values: HashMap::new(),
+        };
+        let report = build_report(
+            &conn,
+            "2026-01-01".into(),
+            &stats,
+            &checkins,
+            &OutputSignals::default(),
+            None,
+        );
         let insta = report.lines.iter().find(|l| l.id == "instagram").unwrap();
         assert!(insta.triggered); // 40m > 30m threshold
     }

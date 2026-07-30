@@ -53,7 +53,6 @@ export const NAV_SECTIONS: NavSection[] = [
     pages: [
       { id: "timeline", label: "Timeline" },
       { id: "activity", label: "Classifications" },
-      { id: "browser", label: "Websites" },
       { id: "outputs", label: "Outputs" },
     ],
   },
@@ -102,22 +101,31 @@ export function navSectionForPage(page: Page): NavSection {
 export default function Sidebar({
   page,
   theme,
+  open,
   onNavigate,
+  onClose,
   onToggleTheme,
 }: {
   page: Page;
   theme: "light" | "dark";
+  open: boolean;
   onNavigate: (p: Page) => void;
+  onClose: () => void;
   onToggleTheme: () => void;
 }) {
   return (
-    <aside className="sidebar">
-      <div className="brand">
-        <div className="brand-mark">◷</div>
-        <div>
-          <div className="brand-name">Tempo</div>
-          <div className="brand-sub">Local productivity</div>
+    <aside id="tempo-navigation" className={`sidebar${open ? " mobile-open" : ""}`} aria-label="Primary navigation">
+      <div className="sidebar-head">
+        <div className="brand">
+          <div className="brand-mark">◷</div>
+          <div>
+            <div className="brand-name">Tempo</div>
+            <div className="brand-sub">Local productivity</div>
+          </div>
         </div>
+        <button className="mobile-nav-close" type="button" onClick={onClose} aria-label="Close navigation">
+          ×
+        </button>
       </div>
 
       <nav className="nav">
@@ -127,7 +135,10 @@ export default function Sidebar({
             <button
               key={section.id}
               className={`nav-item${active ? " active" : ""}`}
-              onClick={() => onNavigate(active ? page : section.defaultPage)}
+              onClick={() => {
+                onNavigate(active ? page : section.defaultPage);
+                onClose();
+              }}
               aria-label={section.label}
               aria-current={active ? "page" : undefined}
             >
@@ -145,7 +156,10 @@ export default function Sidebar({
 
       <button
         className={`setup-guide-link${page === "guide" ? " active" : ""}`}
-        onClick={() => onNavigate("guide")}
+        onClick={() => {
+          onNavigate("guide");
+          onClose();
+        }}
         type="button"
       >
         <span aria-hidden="true">?</span>

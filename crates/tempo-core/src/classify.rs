@@ -13,23 +13,76 @@ pub struct Classification {
 /// Keyword signal sets per category. Lowercase, matched as substrings against
 /// the combined "title + summary + keywords" haystack.
 const STUDY: &[&str] = &[
-    "algorithm", "assignment problem", "minimum cost", "matching", "theorem",
-    "proof", "lecture", "homework", "calculus", "linear algebra", "dataset",
-    "study", "exam", "research paper", "complexity", "hungarian algorithm",
-    "equation", "derivative", "tutorial", "documentation", "flashcard",
+    "algorithm",
+    "assignment problem",
+    "minimum cost",
+    "matching",
+    "theorem",
+    "proof",
+    "lecture",
+    "homework",
+    "calculus",
+    "linear algebra",
+    "dataset",
+    "study",
+    "exam",
+    "research paper",
+    "complexity",
+    "hungarian algorithm",
+    "equation",
+    "derivative",
+    "tutorial",
+    "documentation",
+    "flashcard",
 ];
 const BUSINESS: &[&str] = &[
-    "retention", "hook", "viral", "audience", "marketing", "conversion",
-    "client", "invoice", "revenue", "analytics", "short-form editing",
-    "content strategy", "engagement", "monetization", "campaign", "pricing",
-    "upload", "new post", "caption", "schedule post", "composer", "create reel",
-    "thumbnail", "cta",
+    "retention",
+    "hook",
+    "viral",
+    "audience",
+    "marketing",
+    "conversion",
+    "client",
+    "invoice",
+    "revenue",
+    "analytics",
+    "short-form editing",
+    "content strategy",
+    "engagement",
+    "monetization",
+    "campaign",
+    "pricing",
+    "upload",
+    "new post",
+    "caption",
+    "schedule post",
+    "composer",
+    "create reel",
+    "thumbnail",
+    "cta",
 ];
 const DISTRACTION: &[&str] = &[
-    "reels", "explore", "for you", "feed", "meme", "tiktok", "shorts feed",
-    "trending", "infinite scroll", "celebrity", "gossip",
+    "reels",
+    "explore",
+    "for you",
+    "feed",
+    "meme",
+    "tiktok",
+    "shorts feed",
+    "trending",
+    "infinite scroll",
+    "celebrity",
+    "gossip",
 ];
-const RECOVERY: &[&str] = &["meditation", "relax", "lofi", "lo-fi", "calm", "sleep", "break"];
+const RECOVERY: &[&str] = &[
+    "meditation",
+    "relax",
+    "lofi",
+    "lo-fi",
+    "calm",
+    "sleep",
+    "break",
+];
 
 fn count_hits(haystack: &str, needles: &[&str]) -> usize {
     needles.iter().filter(|n| haystack.contains(**n)).count()
@@ -103,7 +156,11 @@ pub fn classify(
             format!("default for {ct} → {base}")
         },
         // A user-set domain rule is trusted; a content-type default is a guess.
-        confidence: if domain_category.is_some() { 0.85 } else { 0.45 },
+        confidence: if domain_category.is_some() {
+            0.85
+        } else {
+            0.45
+        },
     }
 }
 

@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS activity_log (
     day              TEXT    NOT NULL,           -- local calendar day, YYYY-MM-DD
     app_name         TEXT    NOT NULL,           -- process / application name
     window_title     TEXT    NOT NULL,           -- foreground window title
+    executable_path  TEXT,                       -- used locally for stable app/game identity
     duration_seconds INTEGER NOT NULL,           -- length of this sample (~10s)
     is_idle          INTEGER NOT NULL DEFAULT 0  -- 0 = active, 1 = idle (no input)
 );
@@ -402,7 +403,9 @@ pub struct BackupInfo {
 }
 
 fn backup_directory(path: &Path) -> Result<PathBuf, String> {
-    let parent = path.parent().ok_or_else(|| "database has no parent folder".to_string())?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "database has no parent folder".to_string())?;
     Ok(parent.join("backups"))
 }
 
@@ -438,7 +441,11 @@ pub fn create_backup(conn: &Connection, automatic: bool) -> Result<BackupInfo, S
     let dir = backup_directory(&db_path)?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let stamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S%.6f");
-    let prefix = if automatic { "tempo-auto" } else { "tempo-manual" };
+    let prefix = if automatic {
+        "tempo-auto"
+    } else {
+        "tempo-manual"
+    };
     let path = dir.join(format!("{prefix}-{stamp}.db"));
     backup_to(conn, &path)?;
     rotate_automatic_backups(&dir, 7)?;
@@ -464,7 +471,10 @@ fn rotate_automatic_backups(dir: &Path, keep: usize) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .flatten()
         .map(|entry| entry.path())
-        .filter(|path| path.file_name().is_some_and(|name| name.to_string_lossy().starts_with("tempo-auto-")))
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("tempo-auto-"))
+        })
         .collect::<Vec<_>>();
     files.sort();
     let remove_count = files.len().saturating_sub(keep);
@@ -478,8 +488,11 @@ fn backup_info(path: &Path) -> Result<BackupInfo, String> {
     let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
     let modified = metadata.modified().map_err(|e| e.to_string())?;
     let created_at: chrono::DateTime<chrono::Local> = modified.into();
-    let name = path.file_name().ok_or_else(|| "invalid backup filename".to_string())?
-        .to_string_lossy().to_string();
+    let name = path
+        .file_name()
+        .ok_or_else(|| "invalid backup filename".to_string())?
+        .to_string_lossy()
+        .to_string();
     Ok(BackupInfo {
         automatic: name.starts_with("tempo-auto-"),
         name,
@@ -506,7 +519,8 @@ pub fn list_backups(conn: &Connection) -> Result<Vec<BackupInfo>, String> {
 
 pub fn restore_backup(conn: &mut Connection, name: &str) -> Result<(), String> {
     if Path::new(name).file_name().and_then(|v| v.to_str()) != Some(name)
-        || !name.starts_with("tempo-") || !name.ends_with(".db")
+        || !name.starts_with("tempo-")
+        || !name.ends_with(".db")
     {
         return Err("invalid backup name".into());
     }
@@ -518,21 +532,29 @@ pub fn restore_backup(conn: &mut Connection, name: &str) -> Result<(), String> {
     // Always preserve the current database before replacing it.
     let _ = create_backup(conn, false)?;
     let source = Connection::open(&source_path).map_err(|e| e.to_string())?;
-    let check: String = source.query_row("PRAGMA quick_check", [], |row| row.get(0)).map_err(|e| e.to_string())?;
+    let check: String = source
+        .query_row("PRAGMA quick_check", [], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
     if check != "ok" {
         return Err(format!("selected backup failed integrity check: {check}"));
     }
     let backup = Backup::new(&source, conn).map_err(|e| e.to_string())?;
-    backup.run_to_completion(8, Duration::from_millis(25), None).map_err(|e| e.to_string())?;
+    backup
+        .run_to_completion(8, Duration::from_millis(25), None)
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
 pub fn integrity_check(conn: &Connection) -> Result<String, String> {
-    conn.query_row("PRAGMA quick_check", [], |row| row.get(0)).map_err(|e| e.to_string())
+    conn.query_row("PRAGMA quick_check", [], |row| row.get(0))
+        .map_err(|e| e.to_string())
 }
 
 pub fn init(path: &Path) -> Result<Db, String> {
-    let existed = path.exists() && std::fs::metadata(path).map(|m| m.len() > 0).unwrap_or(false);
+    let existed = path.exists()
+        && std::fs::metadata(path)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false);
     let conn = Connection::open(path).map_err(|e| e.to_string())?;
     if existed {
         create_daily_startup_backup(&conn, path)?;
@@ -573,12 +595,36 @@ fn migrate(conn: &Connection) {
         )",
         [],
     );
-    let _ = conn.execute("ALTER TABLE projects ADD COLUMN excluded_apps TEXT NOT NULL DEFAULT '[]'", []);
-    let _ = conn.execute("ALTER TABLE projects ADD COLUMN excluded_domains TEXT NOT NULL DEFAULT '[]'", []);
-    let _ = conn.execute("ALTER TABLE projects ADD COLUMN excluded_keywords TEXT NOT NULL DEFAULT '[]'", []);
-    let _ = conn.execute("ALTER TABLE goals ADD COLUMN recurring INTEGER NOT NULL DEFAULT 0", []);
+    let _ = conn.execute(
+        "ALTER TABLE projects ADD COLUMN excluded_apps TEXT NOT NULL DEFAULT '[]'",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE projects ADD COLUMN excluded_domains TEXT NOT NULL DEFAULT '[]'",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE projects ADD COLUMN excluded_keywords TEXT NOT NULL DEFAULT '[]'",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE goals ADD COLUMN recurring INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
     let _ = conn.execute("ALTER TABLE goals ADD COLUMN target_count INTEGER", []);
     let _ = conn.execute("ALTER TABLE goals ADD COLUMN target_unit TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE activity_log ADD COLUMN executable_path TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_activity_day_ts ON activity_log(day, timestamp)",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_browser_day_ts ON browser_activity(day, timestamp)",
+        [],
+    );
     let _ = conn.execute(
         "CREATE TABLE IF NOT EXISTS checkin_definitions (
             id         TEXT PRIMARY KEY,
@@ -616,10 +662,14 @@ fn migrate(conn: &Connection) {
         [],
     );
     // Auto-detection source on check-ins; weekly cadence on streaks.
-    let _ = conn
-        .execute("ALTER TABLE checkin_definitions ADD COLUMN auto_kind TEXT NOT NULL DEFAULT ''", []);
-    let _ = conn
-        .execute("ALTER TABLE checkin_definitions ADD COLUMN auto_metric TEXT NOT NULL DEFAULT ''", []);
+    let _ = conn.execute(
+        "ALTER TABLE checkin_definitions ADD COLUMN auto_kind TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE checkin_definitions ADD COLUMN auto_metric TEXT NOT NULL DEFAULT ''",
+        [],
+    );
     let _ = conn.execute(
         "ALTER TABLE checkin_definitions ADD COLUMN auto_threshold INTEGER NOT NULL DEFAULT 0",
         [],
@@ -638,9 +688,11 @@ fn migrate(conn: &Connection) {
 fn invalidate_unsafe_llm_cache(conn: &Connection) {
     const FLAG: &str = "llm_evidence_guardrails_v1";
     let done = conn
-        .query_row("SELECT value FROM app_settings WHERE key = ?1", [FLAG], |r| {
-            r.get::<_, String>(0)
-        })
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            [FLAG],
+            |r| r.get::<_, String>(0),
+        )
         .map(|v| v == "1")
         .unwrap_or(false);
     if done {
@@ -664,16 +716,25 @@ fn invalidate_unsafe_llm_cache(conn: &Connection) {
 fn migrate_legacy_checkins(conn: &Connection) {
     const FLAG: &str = "checkin_values_migrated";
     let done = conn
-        .query_row("SELECT value FROM app_settings WHERE key = ?1", [FLAG], |r| {
-            r.get::<_, String>(0)
-        })
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            [FLAG],
+            |r| r.get::<_, String>(0),
+        )
         .map(|v| v == "1")
         .unwrap_or(false);
     if done {
         return;
     }
     let now = chrono::Utc::now().to_rfc3339();
-    for col in ["videos_posted", "gym_logged", "wrestled", "studied", "edited_video", "analysed_content"] {
+    for col in [
+        "videos_posted",
+        "gym_logged",
+        "wrestled",
+        "studied",
+        "edited_video",
+        "analysed_content",
+    ] {
         let _ = conn.execute(
             &format!(
                 "INSERT OR IGNORE INTO checkin_values (day, checkin_id, value, updated_at)
@@ -701,7 +762,14 @@ pub fn prune(conn: &Connection, days: i64) -> rusqlite::Result<usize> {
         .format("%Y-%m-%d")
         .to_string();
     let mut removed = 0;
-    for table in ["activity_log", "browser_activity", "smart_activity", "llm_classification", "manual_corrections", "correction_history"] {
+    for table in [
+        "activity_log",
+        "browser_activity",
+        "smart_activity",
+        "llm_classification",
+        "manual_corrections",
+        "correction_history",
+    ] {
         removed += conn.execute(&format!("DELETE FROM {table} WHERE day < ?1"), [&cutoff])?;
     }
     Ok(removed)
@@ -725,15 +793,25 @@ mod tests {
         let path = dir.join("productivity.db");
         let db = init(&path).unwrap();
         let mut conn = db.lock().unwrap();
-        conn.execute("INSERT INTO app_settings (key, value) VALUES ('proof', 'before')", []).unwrap();
-        let backup = create_backup(&conn, false).unwrap();
-        conn.execute("UPDATE app_settings SET value = 'after' WHERE key = 'proof'", []).unwrap();
-        restore_backup(&mut conn, &backup.name).unwrap();
-        let value: String = conn.query_row(
-            "SELECT value FROM app_settings WHERE key = 'proof'",
+        conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES ('proof', 'before')",
             [],
-            |row| row.get(0),
-        ).unwrap();
+        )
+        .unwrap();
+        let backup = create_backup(&conn, false).unwrap();
+        conn.execute(
+            "UPDATE app_settings SET value = 'after' WHERE key = 'proof'",
+            [],
+        )
+        .unwrap();
+        restore_backup(&mut conn, &backup.name).unwrap();
+        let value: String = conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'proof'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(value, "before");
         assert_eq!(integrity_check(&conn).unwrap(), "ok");
         drop(conn);

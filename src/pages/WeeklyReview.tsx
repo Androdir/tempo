@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { getStreaks, getWeeklyReview } from "../api";
+import type { Page } from "../components/Sidebar";
 import { StatCard } from "../components/ui";
 import { formatDuration } from "../format";
 import type { Streak, WeeklyDay, WeeklyReview as Weekly } from "../types";
@@ -8,7 +9,7 @@ import { StreakHeatmap, streakIcon } from "./Streaks";
 const VERDICT_COLOR = (score: number) =>
   score >= 85 ? "#16a34a" : score >= 70 ? "#2563eb" : score >= 50 ? "#d97706" : score >= 30 ? "#ea580c" : "#dc2626";
 
-export default function WeeklyReview() {
+export default function WeeklyReview({ onNavigate }: { onNavigate: (page: Page) => void }) {
   const [data, setData] = useState<Weekly | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -34,6 +35,15 @@ export default function WeeklyReview() {
   }
 
   const maxTracked = Math.max(1, ...data.days.map((d) => d.trackedSeconds));
+  const nextDecisions = [
+    data.bestDay
+      ? `Repeat what worked on ${data.bestDay.weekday}: protect one focus block for your main mission.`
+      : "Schedule one protected focus block for your main mission.",
+    data.mostCommonLeak
+      ? `Decide the rule for ${data.mostCommonLeak} before it pulls another ${formatDuration(data.mostCommonLeakSeconds)}.`
+      : "Keep distraction rules unchanged; there is no meaningful leak to chase yet.",
+    "Choose one concrete output for next week and make it your first mission.",
+  ];
 
   return (
     <>
@@ -112,6 +122,19 @@ export default function WeeklyReview() {
           ) : (
             <div className="leak-sub">No distractions logged — clean week.</div>
           )}
+        </div>
+      </div>
+
+      <div className="card card-pad section-gap weekly-decisions">
+        <h2 className="card-title">Three decisions for next week</h2>
+        <p className="card-hint">The review is useful only if it changes what you do next.</p>
+        <ol>
+          {nextDecisions.map((decision) => <li key={decision}>{decision}</li>)}
+        </ol>
+        <div className="review-actions">
+          <button className="btn btn-primary" onClick={() => onNavigate("goals")}>Set next mission</button>
+          {data.mostCommonLeak && <button className="btn" onClick={() => onNavigate("categories")}>Adjust distraction rule</button>}
+          <button className="btn" onClick={() => onNavigate("focus")}>Start a focus block</button>
         </div>
       </div>
 

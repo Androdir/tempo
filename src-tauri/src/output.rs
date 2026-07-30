@@ -20,7 +20,15 @@ const TICK: Duration = Duration::from_secs(20);
 const MAX_DEPTH: usize = 5;
 const SCAN_CAP: usize = 4000;
 const SKIP_DIRS: &[&str] = &[
-    "node_modules", "target", "dist", "build", ".next", "venv", "__pycache__", ".cache", "vendor",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".next",
+    "venv",
+    "__pycache__",
+    ".cache",
+    "vendor",
 ];
 
 /// File metadata for a detection candidate (no contents read).
@@ -84,7 +92,11 @@ pub fn classify_output(folder_type: &str, ext: &str) -> String {
 
 /// Pure detection: given a folder's rules and the current file listing, return
 /// the files that should become output events. Testable without a filesystem.
-pub fn detect_events(folder: &WatchedFolder, files: &[FileMeta], now: DateTime<Utc>) -> Vec<DetectedOutput> {
+pub fn detect_events(
+    folder: &WatchedFolder,
+    files: &[FileMeta],
+    now: DateTime<Utc>,
+) -> Vec<DetectedOutput> {
     if !folder.enabled {
         return Vec::new();
     }
@@ -93,7 +105,11 @@ pub fn detect_events(folder: &WatchedFolder, files: &[FileMeta], now: DateTime<U
         .map(|d| d.with_timezone(&Utc))
         .unwrap_or_else(|_| now - chrono::Duration::days(3650));
     let settle = chrono::Duration::seconds(folder.debounce_seconds.max(0));
-    let exts: Vec<String> = folder.extensions.iter().map(|e| e.trim_start_matches('.').to_ascii_lowercase()).collect();
+    let exts: Vec<String> = folder
+        .extensions
+        .iter()
+        .map(|e| e.trim_start_matches('.').to_ascii_lowercase())
+        .collect();
 
     let mut out = Vec::new();
     for f in files {
@@ -119,7 +135,11 @@ pub fn detect_events(folder: &WatchedFolder, files: &[FileMeta], now: DateTime<U
             project: folder.project.clone(),
             modified_at: f.modified.to_rfc3339(),
             created_at: f.created.map(|c| c.to_rfc3339()),
-            day: f.modified.with_timezone(&Local).format("%Y-%m-%d").to_string(),
+            day: f
+                .modified
+                .with_timezone(&Local)
+                .format("%Y-%m-%d")
+                .to_string(),
         });
     }
     out
@@ -155,7 +175,9 @@ fn scan_folder(root: &Path) -> Vec<FileMeta> {
         if out.len() >= SCAN_CAP {
             break;
         }
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let Ok(ft) = entry.file_type() else { continue };
             if ft.is_dir() {
@@ -242,7 +264,10 @@ pub fn scan_once(db: &Db) -> i64 {
         if !settings::get_bool(&conn, settings::OUTPUT_WATCH_ENABLED, true) {
             return 0;
         }
-        load_folders(&conn).into_iter().filter(|f| f.enabled).collect()
+        load_folders(&conn)
+            .into_iter()
+            .filter(|f| f.enabled)
+            .collect()
     };
     if folders.is_empty() {
         return 0;
@@ -311,7 +336,10 @@ mod tests {
     #[test]
     fn classifies_extensions() {
         assert_eq!(classify_output("video_export", "mp4"), "video_export");
-        assert_eq!(classify_output("video_export", "prproj"), "editing_project_changed");
+        assert_eq!(
+            classify_output("video_export", "prproj"),
+            "editing_project_changed"
+        );
         assert_eq!(classify_output("code_change", "rs"), "code_change");
         assert_eq!(classify_output("study_material", "pdf"), "study_material");
         assert_eq!(classify_output("download", "pdf"), "document_created");

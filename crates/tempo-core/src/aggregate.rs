@@ -11,7 +11,6 @@ use std::collections::{HashMap, HashSet};
 use chrono::{Datelike, Duration, Local, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::classify;
 use crate::llm;
 use crate::lockin;
 use crate::models::*;
@@ -58,7 +57,9 @@ pub fn domain_category_map(conn: &Connection) -> Result<HashMap<String, Option<S
         .prepare("SELECT domain, category FROM domain_rules")
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))
+        .query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })
         .map_err(|e| e.to_string())?;
     let mut map = HashMap::new();
     for row in rows {
@@ -93,6 +94,7 @@ pub struct Block {
     pub detail_id: Option<i64>,
     pub block_key: String,
     pub rule_category: String,
+    pub activity_kind: String,
     pub rule_reason: String,
     pub rule_project: Option<String>,
     pub rule_project_confidence: u8,
@@ -104,14 +106,20 @@ pub struct Block {
 /// Stable key identifying an activity block within a day.
 pub fn block_key(day: &str, source: &str, label: &str, title: &str) -> String {
     let t: String = title.chars().take(80).collect();
-    format!("{day}|{source}|{}|{}", label.to_ascii_lowercase(), t.to_ascii_lowercase())
+    format!(
+        "{day}|{source}|{}|{}",
+        label.to_ascii_lowercase(),
+        t.to_ascii_lowercase()
+    )
 }
 
 pub fn load_app_ai(conn: &Connection) -> Result<HashSet<String>, String> {
     let mut stmt = conn
         .prepare("SELECT app_name FROM category_rules WHERE ai_review = 1")
         .map_err(|e| e.to_string())?;
-    let rows = stmt.query_map([], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
     Ok(rows.filter_map(Result::ok).collect())
 }
 
@@ -119,7 +127,9 @@ pub fn load_domain_ai(conn: &Connection) -> Result<HashSet<String>, String> {
     let mut stmt = conn
         .prepare("SELECT domain FROM domain_rules WHERE ai_review = 1")
         .map_err(|e| e.to_string())?;
-    let rows = stmt.query_map([], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
     Ok(rows.filter_map(Result::ok).collect())
 }
 
@@ -152,6 +162,7 @@ pub fn make_block(
         detail_id,
         block_key: key,
         rule_category: v.category,
+        activity_kind: v.activity_kind,
         rule_reason: v.reason,
         rule_project: v.project,
         rule_project_confidence: v.project_confidence,
@@ -175,12 +186,14 @@ pub fn collect_blocks_for_day(conn: &Connection, day: &str) -> Result<Vec<Block>
     let domain_cat = domain_category_map(conn)?;
     let domain_ai = load_domain_ai(conn)?;
     let projects = load_projects(conn)?;
+    let policies = crate::semantic::load(conn);
     let inputs = rules::RuleInputs {
         app_rules: &app_rules,
         app_ai: &app_ai,
         domain_cat: &domain_cat,
         domain_ai: &domain_ai,
         projects: &projects,
+        policies: &policies,
     };
     let mut blocks: Vec<Block> = Vec::new();
 
@@ -188,7 +201,7 @@ pub fn collect_blocks_for_day(conn: &Connection, day: &str) -> Result<Vec<Block>
     {
         let mut stmt = conn
             .prepare(
-                "SELECT app_name, window_title, SUM(duration_seconds), MAX(timestamp), MIN(timestamp)
+                "SELECT app_name, window_title, MAX(executable_path), SUM(duration_seconds), MAX(timestamp), MIN(timestamp)
                  FROM activity_log WHERE day = ?1 AND is_idle = 0
                  GROUP BY app_name, window_title",
             )
@@ -198,16 +211,29 @@ pub fn collect_blocks_for_day(conn: &Connection, day: &str) -> Result<Vec<Block>
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, i64>(3)?,
                     r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
                 ))
             })
             .map_err(|e| e.to_string())?;
         for row in rows {
-            let (app, title, secs, ts, fs) = row.map_err(|e| e.to_string())?;
-            let v = rules::classify_block(&inputs, "app", &app, &title, None, None, None, &[]);
-            blocks.push(make_block("app", app, title, None, None, None, secs, ts, fs, None, &day, v));
+            let (app, title, executable_path, secs, ts, fs) = row.map_err(|e| e.to_string())?;
+            let v = rules::classify_block(
+                &inputs,
+                "app",
+                &app,
+                &title,
+                executable_path.as_deref(),
+                None,
+                None,
+                None,
+                &[],
+            );
+            blocks.push(make_block(
+                "app", app, title, None, None, None, secs, ts, fs, None, &day, v,
+            ));
         }
     }
 
@@ -237,20 +263,33 @@ pub fn collect_blocks_for_day(conn: &Connection, day: &str) -> Result<Vec<Block>
             })
             .map_err(|e| e.to_string())?;
         for row in rows {
-            let (id, domain, title, ctype, summary, kw, secs, ts, fs) = row.map_err(|e| e.to_string())?;
+            let (id, domain, title, ctype, summary, kw, secs, ts, fs) =
+                row.map_err(|e| e.to_string())?;
             let keywords = parse_keywords(kw);
             let v = rules::classify_block(
                 &inputs,
                 "web",
                 &domain,
                 &title,
+                None,
                 Some(&domain),
                 ctype.as_deref(),
                 summary.as_deref(),
                 &keywords,
             );
             blocks.push(make_block(
-                "web", domain.clone(), title, Some(domain), summary, ctype, secs, ts, fs, Some(id), &day, v,
+                "web",
+                domain.clone(),
+                title,
+                Some(domain),
+                summary,
+                ctype,
+                secs,
+                ts,
+                fs,
+                Some(id),
+                &day,
+                v,
             ));
         }
     }
@@ -279,13 +318,33 @@ pub fn collect_blocks_for_day(conn: &Connection, day: &str) -> Result<Vec<Block>
             })
             .map_err(|e| e.to_string())?;
         for row in rows {
-            let (app, title, ocr_summary, kw, _category, ts, fs) = row.map_err(|e| e.to_string())?;
+            let (app, title, ocr_summary, kw, _category, ts, fs) =
+                row.map_err(|e| e.to_string())?;
             let keywords = parse_keywords(kw);
             let v = rules::classify_block(
-                &inputs, "screen", &app, &title, None, None, ocr_summary.as_deref(), &keywords,
+                &inputs,
+                "screen",
+                &app,
+                &title,
+                None,
+                None,
+                None,
+                ocr_summary.as_deref(),
+                &keywords,
             );
             blocks.push(make_block(
-                "screen", app, title, None, ocr_summary, None, 0, ts, fs, None, &day, v,
+                "screen",
+                app,
+                title,
+                None,
+                ocr_summary,
+                None,
+                0,
+                ts,
+                fs,
+                None,
+                &day,
+                v,
             ));
         }
     }
@@ -315,9 +374,12 @@ pub fn browser_extra(summary: Option<&str>, keywords: &[String]) -> String {
 
 pub fn is_browser_app(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
-    ["chrome", "comet", "edge", "brave", "firefox", "opera", "vivaldi", "chromium", "arc", "safari"]
-        .iter()
-        .any(|b| n.contains(b))
+    [
+        "chrome", "comet", "edge", "brave", "firefox", "opera", "vivaldi", "chromium", "arc",
+        "safari",
+    ]
+    .iter()
+    .any(|b| n.contains(b))
 }
 
 pub struct BrowserRowLite {
@@ -359,107 +421,90 @@ pub fn query_browser_rows(conn: &Connection, day: &str) -> Result<Vec<BrowserRow
 /// browser websites, rolled into categories + buckets. Shared by the desktop
 /// dashboard and the hub.
 pub fn summary_for_day(conn: &Connection, day: &str) -> Result<TodaySummary, String> {
-    let mut app_rows: Vec<(String, i64)> = Vec::new();
-    {
-        let mut stmt = conn
-            .prepare(
-                "SELECT app_name, SUM(duration_seconds) AS secs
-                 FROM activity_log WHERE day = ?1 AND is_idle = 0
-                 GROUP BY app_name ORDER BY secs DESC",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([day], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
-            .map_err(|e| e.to_string())?;
-        for row in rows {
-            app_rows.push(row.map_err(|e| e.to_string())?);
-        }
-    }
-
-    let total_idle_seconds: i64 = conn
-        .query_row(
-            "SELECT COALESCE(SUM(duration_seconds), 0) FROM activity_log WHERE day = ?1 AND is_idle = 1",
-            [day],
-            |r| r.get(0),
-        )
-        .map_err(|e| e.to_string())?;
-
-    let app_rules = load_rules(conn)?;
-    let domain_rules = domain_category_map(conn)?;
-    let projects = load_projects(conn)?;
-    let browser_rows = query_browser_rows(conn, day)?;
-    let bucket_map = category_buckets(conn);
-
+    // Timeline is the canonical reconciled stream for every summary consumer.
+    let timeline = timeline_for_day(conn, day, 20)?;
     let mut per_category: HashMap<String, i64> = HashMap::new();
     let mut per_bucket: HashMap<String, i64> = HashMap::new();
-    let mut domain_secs: HashMap<String, (i64, i64)> = HashMap::new();
+    let mut app_secs: HashMap<String, (i64, String)> = HashMap::new();
+    let mut domain_secs: HashMap<String, (i64, i64, String)> = HashMap::new();
     let mut browser_seconds = 0i64;
-    for row in &browser_rows {
-        browser_seconds += row.duration;
-        let dcat = domain_rules.get(&row.domain).cloned().flatten();
-        let base = classify::classify(
-            &row.domain,
-            &row.title,
-            row.content_type.as_deref(),
-            row.summary.as_deref(),
-            &row.keywords,
-            dcat.as_deref(),
-        );
-        let extra = browser_extra(row.summary.as_deref(), &row.keywords);
-        let (cat, _r, _pm) =
-            projects::resolve(&projects, &row.domain, &row.title, &extra, &base.category, &base.reason);
-        let cat = category_or_fallback(conn, &cat);
-        *per_category.entry(cat.clone()).or_insert(0) += row.duration;
-        *per_bucket.entry(bucket_for_category(&bucket_map, &cat)).or_insert(0) += row.duration;
-        let entry = domain_secs.entry(row.domain.clone()).or_insert((0, 0));
-        entry.0 += row.duration;
-        entry.1 += 1;
-    }
-    let has_browser = browser_seconds > 0;
 
-    let mut per_app = Vec::new();
-    let mut app_active = 0i64;
-    for (name, secs) in &app_rows {
-        if has_browser && is_browser_app(name) {
-            continue;
+    for block in timeline.blocks.iter().filter(|block| !block.idle) {
+        *per_category.entry(block.category.clone()).or_insert(0) += block.duration_seconds;
+        *per_bucket.entry(block.bucket.clone()).or_insert(0) += block.duration_seconds;
+        if block.is_web {
+            browser_seconds += block.duration_seconds;
+            let entry =
+                domain_secs
+                    .entry(block.label.clone())
+                    .or_insert((0, 0, block.category.clone()));
+            entry.0 += block.duration_seconds;
+            entry.1 += block.sample_count;
+            entry.2 = block.category.clone();
+        } else if block.source == "desktop" {
+            let entry = app_secs
+                .entry(block.label.clone())
+                .or_insert((0, block.category.clone()));
+            entry.0 += block.duration_seconds;
+            entry.1 = block.category.clone();
         }
-        let category = app_rules.get(name).cloned();
-        app_active += *secs;
-        let cat_key = category.clone().unwrap_or_else(|| "uncategorized".to_string());
-        *per_category.entry(cat_key.clone()).or_insert(0) += *secs;
-        *per_bucket.entry(bucket_for_category(&bucket_map, &cat_key)).or_insert(0) += *secs;
-        per_app.push(AppUsage { app_name: name.clone(), seconds: *secs, category });
     }
 
-    let mut per_website: Vec<WebsiteUsage> = domain_secs
+    let mut app_pairs: Vec<(String, (i64, String))> = app_secs.into_iter().collect();
+    app_pairs.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then_with(|| a.0.cmp(&b.0)));
+    let per_app = app_pairs
         .into_iter()
-        .map(|(domain, (secs, views))| {
-            let category = domain_rules.get(&domain).cloned().flatten();
-            WebsiteUsage { domain, seconds: secs, category, page_views: views }
+        .map(|(app_name, (seconds, category))| AppUsage {
+            app_name,
+            seconds,
+            category: (category != "uncategorized").then_some(category),
         })
         .collect();
-    per_website.sort_by(|a, b| b.seconds.cmp(&a.seconds).then_with(|| a.domain.cmp(&b.domain)));
+    let mut per_website: Vec<WebsiteUsage> = domain_secs
+        .into_iter()
+        .map(|(domain, (seconds, page_views, category))| WebsiteUsage {
+            domain,
+            seconds,
+            category: (category != "uncategorized").then_some(category),
+            page_views,
+        })
+        .collect();
+    per_website.sort_by(|a, b| {
+        b.seconds
+            .cmp(&a.seconds)
+            .then_with(|| a.domain.cmp(&b.domain))
+    });
 
     Ok(TodaySummary {
         date: day.to_string(),
-        total_active_seconds: app_active + browser_seconds,
-        total_idle_seconds,
+        total_active_seconds: timeline.active_seconds,
+        total_idle_seconds: timeline.idle_seconds,
         total_browser_seconds: browser_seconds,
         per_app,
         per_website,
-        per_category: sorted_desc(per_category, |category, seconds| CategoryUsage { category, seconds }),
-        per_bucket: sorted_desc(per_bucket, |bucket, seconds| BucketUsage { bucket, seconds }),
+        per_category: sorted_desc(per_category, |category, seconds| CategoryUsage {
+            category,
+            seconds,
+        }),
+        per_bucket: sorted_desc(per_bucket, |bucket, seconds| BucketUsage {
+            bucket,
+            seconds,
+        }),
     })
 }
-
 // -------------------------------------------------- classification resolution
 
-pub fn load_manual_corrections(conn: &Connection, day: &str) -> Result<HashMap<String, String>, String> {
+pub fn load_manual_corrections(
+    conn: &Connection,
+    day: &str,
+) -> Result<HashMap<String, String>, String> {
     let mut stmt = conn
         .prepare("SELECT block_key, category FROM manual_corrections WHERE day = ?1")
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map([day], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .query_map([day], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })
         .map_err(|e| e.to_string())?;
     let mut map = HashMap::new();
     for row in rows {
@@ -486,9 +531,87 @@ pub fn final_category(
     }
     b.rule_category.clone()
 }
+pub struct ResolvedVerdict {
+    pub category: String,
+    pub activity_kind: String,
+    pub reason: String,
+    pub classifier: String,
+    pub confidence: f64,
+}
 
+/// Resolve one target through the same precedence used by Timeline.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_activity(
+    conn: &Connection,
+    day: &str,
+    source: &str,
+    label: &str,
+    title: &str,
+    executable_path: Option<&str>,
+    domain: Option<&str>,
+    content_type: Option<&str>,
+    summary: Option<&str>,
+    keywords: &[String],
+) -> Result<ResolvedVerdict, String> {
+    let app_rules = load_rules(conn)?;
+    let app_ai = load_app_ai(conn)?;
+    let domain_cat = domain_category_map(conn)?;
+    let domain_ai = load_domain_ai(conn)?;
+    let projects = load_projects(conn)?;
+    let policies = crate::semantic::load(conn);
+    let inputs = rules::RuleInputs {
+        app_rules: &app_rules,
+        app_ai: &app_ai,
+        domain_cat: &domain_cat,
+        domain_ai: &domain_ai,
+        projects: &projects,
+        policies: &policies,
+    };
+    let verdict = rules::classify_block(
+        &inputs,
+        source,
+        label,
+        title,
+        executable_path,
+        domain,
+        content_type,
+        summary,
+        keywords,
+    );
+    let key = block_key(day, source, label, title);
+    let manual = load_manual_corrections(conn, day)?;
+    if let Some(category) = manual.get(&key) {
+        return Ok(ResolvedVerdict {
+            category: category_or_fallback(conn, category),
+            activity_kind: verdict.activity_kind,
+            reason: "manual correction".into(),
+            classifier: "manual".into(),
+            confidence: 1.0,
+        });
+    }
+    if verdict.needs_llm {
+        if let Some(cached) = llm::load_cache_for_day(conn, day).get(&key) {
+            return Ok(ResolvedVerdict {
+                category: category_or_fallback(conn, &cached.category),
+                activity_kind: verdict.activity_kind,
+                reason: cached.reason.clone(),
+                classifier: "llm".into(),
+                confidence: cached.confidence,
+            });
+        }
+    }
+    Ok(ResolvedVerdict {
+        category: category_or_fallback(conn, &verdict.category),
+        activity_kind: verdict.activity_kind,
+        reason: verdict.reason,
+        classifier: "rule".into(),
+        confidence: verdict.confidence,
+    })
+}
 pub fn parse_utc(s: &str) -> Option<chrono::DateTime<Utc>> {
-    chrono::DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc))
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|d| d.with_timezone(&Utc))
 }
 
 pub fn local_minutes(ts: &str) -> Option<i64> {
@@ -536,7 +659,11 @@ pub fn compute_stats_for_day(conn: &Connection, day: &str) -> Result<scoring::St
         if bucket != "productive" {
             // Time on a watched app/site only counts while it isn't productive work
             // (a corrected "research on YouTube" block doesn't ding the score).
-            let label = b.domain.clone().unwrap_or_else(|| b.label.clone()).to_ascii_lowercase();
+            let label = b
+                .domain
+                .clone()
+                .unwrap_or_else(|| b.label.clone())
+                .to_ascii_lowercase();
             for t in &targets {
                 if label.contains(t.as_str()) {
                     *target_seconds.entry(t.clone()).or_insert(0) += b.seconds;
@@ -550,7 +677,11 @@ pub fn compute_stats_for_day(conn: &Connection, day: &str) -> Result<scoring::St
         }
     }
 
-    Ok(scoring::Stats { cat_seconds, target_seconds, first_productive_min: first_productive })
+    Ok(scoring::Stats {
+        cat_seconds,
+        target_seconds,
+        first_productive_min: first_productive,
+    })
 }
 
 pub fn top_goal_completed(conn: &Connection, day: &str) -> Option<bool> {
@@ -567,17 +698,24 @@ pub fn top_goal_completed(conn: &Connection, day: &str) -> Option<bool> {
 
 pub fn effective_checkins(conn: &Connection, day: &str) -> scoring::Checkins {
     let main_goal_completed = top_goal_completed(conn, day).unwrap_or_else(|| {
-        conn.query_row("SELECT main_goal_completed FROM daily_checkin WHERE day = ?1", [day], |r| {
-            r.get::<_, i64>(0)
-        })
+        conn.query_row(
+            "SELECT main_goal_completed FROM daily_checkin WHERE day = ?1",
+            [day],
+            |r| r.get::<_, i64>(0),
+        )
         .map(|v| v != 0)
         .unwrap_or(false)
     });
-    scoring::Checkins { main_goal_completed, values: checkin_map_for_day(conn, day) }
+    scoring::Checkins {
+        main_goal_completed,
+        values: checkin_map_for_day(conn, day),
+    }
 }
 
 pub fn top_project_name(conn: &Connection) -> Option<String> {
-    projects::list_projects(conn).ok().and_then(|p| p.into_iter().max_by_key(|x| x.priority).map(|x| x.name))
+    projects::list_projects(conn)
+        .ok()
+        .and_then(|p| p.into_iter().max_by_key(|x| x.priority).map(|x| x.name))
 }
 
 // ----------------------------------------------------------------- outputs
@@ -623,13 +761,17 @@ pub fn link_outputs_for_day(conn: &Connection, day: &str) -> Result<i64, String>
             .prepare("SELECT id, modified_at FROM output_events WHERE day = ?1 AND linked_block_key IS NULL")
             .map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map([day], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?)))
+            .query_map([day], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?))
+            })
             .map_err(|e| e.to_string())?;
         rows.filter_map(Result::ok).collect()
     };
     let mut linked = 0i64;
     for (id, modified_at) in events {
-        let Some(when) = modified_at.as_deref().and_then(parse_utc) else { continue };
+        let Some(when) = modified_at.as_deref().and_then(parse_utc) else {
+            continue;
+        };
         let lo = (when - Duration::minutes(10)).to_rfc3339();
         let hi = (when + Duration::minutes(10)).to_rfc3339();
         let app: Option<(String, i64)> = conn
@@ -651,7 +793,11 @@ pub fn link_outputs_for_day(conn: &Connection, day: &str) -> Result<i64, String>
             .optional()
             .map_err(|e| e.to_string())?;
         let chosen = match (app, web) {
-            (Some(a), Some(w)) => Some(if w.1 > a.1 { ("web", w.0) } else { ("app", a.0) }),
+            (Some(a), Some(w)) => Some(if w.1 > a.1 {
+                ("web", w.0)
+            } else {
+                ("app", a.0)
+            }),
             (Some(a), None) => Some(("app", a.0)),
             (None, Some(w)) => Some(("web", w.0)),
             (None, None) => None,
@@ -675,9 +821,11 @@ pub const STREAK_WINDOW_DAYS: i64 = 28;
 
 pub fn day_metrics(conn: &Connection, day: &str) -> crate::streaks::DayMetrics {
     let main_goal = top_goal_completed(conn, day).unwrap_or_else(|| {
-        conn.query_row("SELECT main_goal_completed FROM daily_checkin WHERE day = ?1", [day], |r| {
-            r.get::<_, i64>(0)
-        })
+        conn.query_row(
+            "SELECT main_goal_completed FROM daily_checkin WHERE day = ?1",
+            [day],
+            |r| r.get::<_, i64>(0),
+        )
         .map(|v| v != 0)
         .unwrap_or(false)
     });
@@ -721,8 +869,10 @@ pub fn day_metrics(conn: &Connection, day: &str) -> crate::streaks::DayMetrics {
 }
 
 pub fn compute_streaks(conn: &Connection) -> Result<Vec<Streak>, String> {
-    let defs: Vec<crate::streaks::StreakDef> =
-        crate::streaks::load_defs(conn).into_iter().filter(|d| d.enabled).collect();
+    let defs: Vec<crate::streaks::StreakDef> = crate::streaks::load_defs(conn)
+        .into_iter()
+        .filter(|d| d.enabled)
+        .collect();
     if defs.is_empty() {
         return Ok(Vec::new());
     }
@@ -731,17 +881,25 @@ pub fn compute_streaks(conn: &Connection) -> Result<Vec<Streak>, String> {
         .rev()
         .map(|i| (today - Duration::days(i)).format("%Y-%m-%d").to_string())
         .collect();
-    let metrics: Vec<crate::streaks::DayMetrics> = days.iter().map(|d| day_metrics(conn, d)).collect();
+    let metrics: Vec<crate::streaks::DayMetrics> =
+        days.iter().map(|d| day_metrics(conn, d)).collect();
 
     let today_weekday0 = today.weekday().num_days_from_monday() as usize;
     let mut out = Vec::new();
     for def in &defs {
-        let status: Vec<bool> = metrics.iter().map(|m| crate::streaks::streak_met(def, m)).collect();
+        let status: Vec<bool> = metrics
+            .iter()
+            .map(|m| crate::streaks::streak_met(def, m))
+            .collect();
         // Daily streaks run in days; weekly ("N days per week") streaks in weeks.
         let (current, window_best, week_met_days) = if def.days_per_week > 0 {
             crate::streaks::weekly_runs(&status, today_weekday0, def.days_per_week)
         } else {
-            (crate::streaks::current_run(&status), crate::streaks::best_run(&status), 0)
+            (
+                crate::streaks::current_run(&status),
+                crate::streaks::best_run(&status),
+                0,
+            )
         };
         let best = def.best_streak.max(window_best).max(current);
         let last = days
@@ -756,8 +914,14 @@ pub fn compute_streaks(conn: &Connection) -> Result<Vec<Streak>, String> {
                 last_completed_day = COALESCE(?2, last_completed_day) WHERE id = ?3",
             params![best, last, def.id],
         );
-        let calendar: Vec<StreakDay> =
-            days.iter().zip(&status).map(|(d, &met)| StreakDay { day: d.clone(), met }).collect();
+        let calendar: Vec<StreakDay> = days
+            .iter()
+            .zip(&status)
+            .map(|(d, &met)| StreakDay {
+                day: d.clone(),
+                met,
+            })
+            .collect();
         out.push(Streak {
             id: def.id.clone(),
             name: def.name.clone(),
@@ -975,9 +1139,8 @@ fn smooth_brief_interruptions(
         merged.title = right.title.clone();
         merged.summary = right.summary.clone().or(left.summary.clone());
         merged.sample_count = left.sample_count + interruption.sample_count + right.sample_count;
-        merged.absorbed_seconds = left.absorbed_seconds
-            + interruption.duration_seconds
-            + right.absorbed_seconds;
+        merged.absorbed_seconds =
+            left.absorbed_seconds + interruption.duration_seconds + right.absorbed_seconds;
         merged.absorbed_count =
             left.absorbed_count + interruption.absorbed_count + right.absorbed_count + 1;
         merged.confidence = left.confidence.min(right.confidence);
@@ -1000,12 +1163,6 @@ fn smooth_brief_interruptions(
     refresh_timeline_highlights(&mut overview);
     overview
 }
-fn overlaps(a: &TimelineBlock, b: &TimelineBlock) -> bool {
-    match (parse_utc(&a.start), parse_utc(&a.end), parse_utc(&b.start), parse_utc(&b.end)) {
-        (Some(a0), Some(a1), Some(b0), Some(b1)) => a0 < b1 && b0 < a1,
-        _ => false,
-    }
-}
 
 /// The proof-of-work timeline for a day: raw samples merged into continuous,
 /// classified blocks, with the day's highlights flagged.
@@ -1015,27 +1172,35 @@ pub fn timeline_for_day(conn: &Connection, day: &str, max_gap: i64) -> Result<Ti
     let domain_cat = domain_category_map(conn)?;
     let domain_ai = load_domain_ai(conn)?;
     let projects = load_projects(conn)?;
+    let policies = crate::semantic::load(conn);
     let inputs = rules::RuleInputs {
         app_rules: &app_rules,
         app_ai: &app_ai,
         domain_cat: &domain_cat,
         domain_ai: &domain_ai,
         projects: &projects,
+        policies: &policies,
     };
     let manual = load_manual_corrections(conn, day)?;
     let llm_cache = llm::load_cache_for_day(conn, day);
     let bucket_map = category_buckets(conn);
-    let smart_interval =
-        settings::get_int(conn, settings::SMART_INTERVAL, settings::DEFAULT_SMART_INTERVAL).max(1);
+    let smart_interval = settings::get_int(
+        conn,
+        settings::SMART_INTERVAL,
+        settings::DEFAULT_SMART_INTERVAL,
+    )
+    .max(1);
 
     let (mut desk, mut web, mut scr): (Vec<TlSample>, Vec<TlSample>, Vec<TlSample>) =
         (Vec::new(), Vec::new(), Vec::new());
 
     {
-        let mut resolved: HashMap<String, (String, Option<String>, u8, f64, String)> = HashMap::new();
+        let mut resolved: HashMap<String, (String, Option<String>, u8, f64, String)> =
+            HashMap::new();
         let mut classify = |code: &str,
                             label: &str,
                             title: &str,
+                            executable_path: Option<&str>,
                             domain: Option<&str>,
                             ctype: Option<&str>,
                             summary: Option<&str>,
@@ -1045,7 +1210,17 @@ pub fn timeline_for_day(conn: &Connection, day: &str, max_gap: i64) -> Result<Ti
             let val = resolved
                 .entry(key.clone())
                 .or_insert_with(|| {
-                    let v = rules::classify_block(&inputs, code, label, title, domain, ctype, summary, keywords);
+                    let v = rules::classify_block(
+                        &inputs,
+                        code,
+                        label,
+                        title,
+                        executable_path,
+                        domain,
+                        ctype,
+                        summary,
+                        keywords,
+                    );
                     // A weak keyword hit is useful diagnostic evidence, not a real
                     // assignment. Only expose projects once the deterministic
                     // matcher has enough independent evidence to override.
@@ -1053,10 +1228,19 @@ pub fn timeline_for_day(conn: &Connection, day: &str, max_gap: i64) -> Result<Ti
                         .project
                         .clone()
                         .filter(|_| v.project_confidence >= projects::OVERRIDE_THRESHOLD);
-                    let visible_project_confidence =
-                        if visible_project.is_some() { v.project_confidence } else { 0 };
+                    let visible_project_confidence = if visible_project.is_some() {
+                        v.project_confidence
+                    } else {
+                        0
+                    };
                     if let Some(c) = manual.get(&key) {
-                        (c.clone(), visible_project, visible_project_confidence, 1.0, "manual".to_string())
+                        (
+                            c.clone(),
+                            visible_project,
+                            visible_project_confidence,
+                            1.0,
+                            "manual".to_string(),
+                        )
                     } else if v.needs_llm {
                         match llm_cache.get(&key) {
                             Some(c) => (
@@ -1068,21 +1252,42 @@ pub fn timeline_for_day(conn: &Connection, day: &str, max_gap: i64) -> Result<Ti
                                 c.confidence,
                                 "llm".to_string(),
                             ),
-                            None => (v.category, visible_project, visible_project_confidence, v.confidence, "rule".to_string()),
+                            None => (
+                                v.category,
+                                visible_project,
+                                visible_project_confidence,
+                                v.confidence,
+                                "rule".to_string(),
+                            ),
                         }
                     } else {
-                        (v.category, visible_project, visible_project_confidence, v.confidence, "rule".to_string())
+                        (
+                            v.category,
+                            visible_project,
+                            visible_project_confidence,
+                            v.confidence,
+                            "rule".to_string(),
+                        )
                     }
                 })
                 .clone();
             let (category, project, pconf, conf, classifier) = val;
-            (key, (category_or_fallback(conn, &category), project, pconf, conf, classifier))
+            (
+                key,
+                (
+                    category_or_fallback(conn, &category),
+                    project,
+                    pconf,
+                    conf,
+                    classifier,
+                ),
+            )
         };
 
         {
             let mut stmt = conn
                 .prepare(
-                    "SELECT timestamp, app_name, window_title, duration_seconds, is_idle
+                    "SELECT timestamp, app_name, window_title, executable_path, duration_seconds, is_idle
                      FROM activity_log WHERE day = ?1 ORDER BY timestamp",
                 )
                 .map_err(|e| e.to_string())?;
@@ -1092,21 +1297,43 @@ pub fn timeline_for_day(conn: &Connection, day: &str, max_gap: i64) -> Result<Ti
                         r.get::<_, String>(0)?,
                         r.get::<_, String>(1)?,
                         r.get::<_, String>(2)?,
-                        r.get::<_, i64>(3)?,
-                        r.get::<_, i64>(4)? != 0,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, i64>(4)?,
+                        r.get::<_, i64>(5)? != 0,
                     ))
                 })
                 .map_err(|e| e.to_string())?;
             for row in rows {
-                let (ts_s, app, title, secs, idle) = row.map_err(|e| e.to_string())?;
+                let (ts_s, app, title, executable_path, secs, idle) =
+                    row.map_err(|e| e.to_string())?;
                 let Some(ts) = parse_utc(&ts_s) else { continue };
-                let (key, (category, project, pconf, conf, classifier)) =
-                    classify("app", &app, &title, None, None, None, &[]);
+                let (key, (category, project, pconf, conf, classifier)) = classify(
+                    "app",
+                    &app,
+                    &title,
+                    executable_path.as_deref(),
+                    None,
+                    None,
+                    None,
+                    &[],
+                );
                 let bucket = bucket_for_category(&bucket_map, &category);
                 desk.push(TlSample {
-                    ts, source: "desktop".to_string(), label: app, title, idle,
-                    eff_seconds: secs.max(1), is_web: false, summary: None, category, bucket,
-                    project, project_confidence: pconf, confidence: conf, classifier, block_key: key,
+                    ts,
+                    source: "desktop".to_string(),
+                    label: app,
+                    title,
+                    idle,
+                    eff_seconds: secs.max(1),
+                    is_web: false,
+                    summary: None,
+                    category,
+                    bucket,
+                    project,
+                    project_confidence: pconf,
+                    confidence: conf,
+                    classifier,
+                    block_key: key,
                 });
             }
         }
@@ -1134,16 +1361,37 @@ pub fn timeline_for_day(conn: &Connection, day: &str, max_gap: i64) -> Result<Ti
                 })
                 .map_err(|e| e.to_string())?;
             for row in rows {
-                let (ts_s, domain, title, secs, idle, ctype, summary, kw) = row.map_err(|e| e.to_string())?;
+                let (ts_s, domain, title, secs, idle, ctype, summary, kw) =
+                    row.map_err(|e| e.to_string())?;
                 let Some(ts) = parse_utc(&ts_s) else { continue };
                 let keywords = parse_keywords(kw);
-                let (key, (category, project, pconf, conf, classifier)) =
-                    classify("web", &domain, &title, Some(&domain), ctype.as_deref(), summary.as_deref(), &keywords);
+                let (key, (category, project, pconf, conf, classifier)) = classify(
+                    "web",
+                    &domain,
+                    &title,
+                    None,
+                    Some(&domain),
+                    ctype.as_deref(),
+                    summary.as_deref(),
+                    &keywords,
+                );
                 let bucket = bucket_for_category(&bucket_map, &category);
                 web.push(TlSample {
-                    ts, source: "browser".to_string(), label: domain, title, idle,
-                    eff_seconds: secs.max(1), is_web: true, summary, category, bucket,
-                    project, project_confidence: pconf, confidence: conf, classifier, block_key: key,
+                    ts,
+                    source: "browser".to_string(),
+                    label: domain,
+                    title,
+                    idle,
+                    eff_seconds: secs.max(1),
+                    is_web: true,
+                    summary,
+                    category,
+                    bucket,
+                    project,
+                    project_confidence: pconf,
+                    confidence: conf,
+                    classifier,
+                    block_key: key,
                 });
             }
         }
@@ -1171,37 +1419,76 @@ pub fn timeline_for_day(conn: &Connection, day: &str, max_gap: i64) -> Result<Ti
                 let (ts_s, app, title, ocr, kw, idle) = row.map_err(|e| e.to_string())?;
                 let Some(ts) = parse_utc(&ts_s) else { continue };
                 let keywords = parse_keywords(kw);
-                let (key, (category, project, pconf, conf, classifier)) =
-                    classify("screen", &app, &title, None, None, ocr.as_deref(), &keywords);
+                let (key, (category, project, pconf, conf, classifier)) = classify(
+                    "screen",
+                    &app,
+                    &title,
+                    None,
+                    None,
+                    None,
+                    ocr.as_deref(),
+                    &keywords,
+                );
                 let bucket = bucket_for_category(&bucket_map, &category);
                 scr.push(TlSample {
-                    ts, source: "screen".to_string(), label: app, title, idle,
-                    eff_seconds: smart_interval, is_web: false, summary: ocr, category, bucket,
-                    project, project_confidence: pconf, confidence: conf, classifier, block_key: key,
+                    ts,
+                    source: "screen".to_string(),
+                    label: app,
+                    title,
+                    idle,
+                    eff_seconds: smart_interval,
+                    is_web: false,
+                    summary: ocr,
+                    category,
+                    bucket,
+                    project,
+                    project_confidence: pconf,
+                    confidence: conf,
+                    classifier,
+                    block_key: key,
                 });
             }
         }
     }
 
-    let web_blocks = merge_samples(web, max_gap);
-    let mut desk_blocks = merge_samples(desk, max_gap);
-    let mut scr_blocks = merge_samples(scr, max_gap);
-
-    // Prefer the richest source for an interval. Browser records replace the
-    // browser process, while Smart Tracking replaces its matching desktop row.
-    // This prevents double-counting and contradictory labels for the same work.
-    scr_blocks.retain(|s| {
-        !is_browser_app(&s.label) || !web_blocks.iter().any(|w| overlaps(s, w))
+    // Reconcile at sample granularity before merging. Dropping a merged 30-minute
+    // Chrome block because the extension covered one 10-second sample would
+    // otherwise undercount the other 29m50s.
+    let web_spans: Vec<(chrono::DateTime<Utc>, chrono::DateTime<Utc>)> = web
+        .iter()
+        .map(|sample| (sample.ts, sample.ts + Duration::seconds(sample.eff_seconds)))
+        .collect();
+    scr.retain(|sample| {
+        !is_browser_app(&sample.label)
+            || !web_spans.iter().any(|(start, end)| {
+                sample.ts < *end && *start < sample.ts + Duration::seconds(sample.eff_seconds)
+            })
     });
-    desk_blocks.retain(|d| {
-        let covered_by_browser =
-            is_browser_app(&d.label) && web_blocks.iter().any(|w| overlaps(d, w));
-        let covered_by_screen = scr_blocks
-            .iter()
-            .any(|s| s.label.eq_ignore_ascii_case(&d.label) && overlaps(d, s));
+    let screen_spans: Vec<(String, chrono::DateTime<Utc>, chrono::DateTime<Utc>)> = scr
+        .iter()
+        .map(|sample| {
+            (
+                sample.label.clone(),
+                sample.ts,
+                sample.ts + Duration::seconds(sample.eff_seconds),
+            )
+        })
+        .collect();
+    desk.retain(|sample| {
+        let end = sample.ts + Duration::seconds(sample.eff_seconds);
+        let covered_by_browser = is_browser_app(&sample.label)
+            && web_spans
+                .iter()
+                .any(|(start, web_end)| sample.ts < *web_end && *start < end);
+        let covered_by_screen = screen_spans.iter().any(|(label, start, screen_end)| {
+            label.eq_ignore_ascii_case(&sample.label) && sample.ts < *screen_end && *start < end
+        });
         !covered_by_browser && !covered_by_screen
     });
 
+    let web_blocks = merge_samples(web, max_gap);
+    let desk_blocks = merge_samples(desk, max_gap);
+    let scr_blocks = merge_samples(scr, max_gap);
     let mut blocks: Vec<TimelineBlock> = Vec::new();
     blocks.extend(desk_blocks);
     blocks.extend(web_blocks);
@@ -1250,15 +1537,21 @@ pub fn timeline_for_day(conn: &Connection, day: &str, max_gap: i64) -> Result<Ti
                  ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, sort_order, id",
             )
             .map_err(|e| e.to_string())?;
-        let rows = stmt.query_map([day], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([day], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
         rows.filter_map(Result::ok).collect()
     };
     let goal_projects: HashSet<String> = {
         let mut stmt = conn
             .prepare("SELECT DISTINCT project FROM goals WHERE day = ?1 AND project IS NOT NULL AND project <> ''")
             .map_err(|e| e.to_string())?;
-        let rows = stmt.query_map([day], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())?;
-        rows.filter_map(Result::ok).map(|p| p.to_ascii_lowercase()).collect()
+        let rows = stmt
+            .query_map([day], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        rows.filter_map(Result::ok)
+            .map(|p| p.to_ascii_lowercase())
+            .collect()
     };
 
     if let Some((i, _)) = longest_prod {
@@ -1284,8 +1577,10 @@ pub fn timeline_for_day(conn: &Connection, day: &str, max_gap: i64) -> Result<Ti
     }
 
     let overview_blocks = smooth_brief_interruptions(&blocks, 20);
-    let outputs: Vec<CheckinValue> =
-        checkin_values_for_day(conn, day).into_iter().filter(|c| c.value > 0).collect();
+    let outputs: Vec<CheckinValue> = checkin_values_for_day(conn, day)
+        .into_iter()
+        .filter(|c| c.value > 0)
+        .collect();
 
     Ok(TimelineDay {
         day: day.to_string(),
@@ -1351,7 +1646,11 @@ pub fn weekly_review(conn: &Connection) -> Result<WeeklyReview, String> {
         distraction += d;
         // Counters sum their values across the week; toggles count met days.
         for c in checkin_values_for_day(conn, &day) {
-            let inc = if c.kind == "counter" { c.value } else { (c.value > 0) as i64 };
+            let inc = if c.kind == "counter" {
+                c.value
+            } else {
+                (c.value > 0) as i64
+            };
             *checkin_totals.entry(c.id).or_insert(0) += inc;
         }
 
@@ -1420,25 +1719,38 @@ pub fn score_report_for_day(conn: &Connection, day: &str) -> Result<ScoreReport,
     let checkins = effective_checkins(conn, day);
     let outputs = output_signals_for_day(conn, day);
     let goal = top_project_name(conn);
-    Ok(scoring::build_report(conn, day.to_string(), &stats, &checkins, &outputs, goal))
+    Ok(scoring::build_report(
+        conn,
+        day.to_string(),
+        &stats,
+        &checkins,
+        &outputs,
+        goal,
+    ))
 }
 
 // --------------------------------------------------------------- goal helpers
 
 /// Next free `sort_order` for a day's goal list (max + 1, or 1 when empty).
 pub fn next_sort_order(conn: &Connection, day: &str) -> i64 {
-    conn.query_row("SELECT COALESCE(MAX(sort_order), 0) + 1 FROM goals WHERE day = ?1", [day], |r| {
-        r.get(0)
-    })
+    conn.query_row(
+        "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM goals WHERE day = ?1",
+        [day],
+        |r| r.get(0),
+    )
     .unwrap_or(0)
 }
 
 /// Whether a goal with this exact title already exists for the day.
 pub fn goal_exists(conn: &Connection, day: &str, title: &str) -> bool {
-    conn.query_row("SELECT 1 FROM goals WHERE day = ?1 AND title = ?2 LIMIT 1", params![day, title], |_| Ok(()))
-        .optional()
-        .unwrap_or(None)
-        .is_some()
+    conn.query_row(
+        "SELECT 1 FROM goals WHERE day = ?1 AND title = ?2 LIMIT 1",
+        params![day, title],
+        |_| Ok(()),
+    )
+    .optional()
+    .unwrap_or(None)
+    .is_some()
 }
 
 // --------------------------------------------------------------- daily lock-in plan
@@ -1471,8 +1783,14 @@ pub fn gather_plan_inputs(conn: &Connection, day: &str) -> lockin::PlanInputs {
     let stats = compute_stats_for_day(conn, day).unwrap_or_default();
     let checkins = effective_checkins(conn, day);
     let outputs = output_signals_for_day(conn, day);
-    let report =
-        scoring::build_report(conn, day.to_string(), &stats, &checkins, &outputs, top_project_name(conn));
+    let report = scoring::build_report(
+        conn,
+        day.to_string(),
+        &stats,
+        &checkins,
+        &outputs,
+        top_project_name(conn),
+    );
 
     let mut completed = Vec::new();
     let mut missed = Vec::new();
@@ -1480,7 +1798,9 @@ pub fn gather_plan_inputs(conn: &Connection, day: &str) -> lockin::PlanInputs {
         "SELECT title, completed FROM goals WHERE day = ?1
          ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, sort_order, id",
     ) {
-        if let Ok(rows) = stmt.query_map([day], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0))) {
+        if let Ok(rows) = stmt.query_map([day], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0))
+        }) {
             for (title, done) in rows.flatten() {
                 if done {
                     completed.push(title);
@@ -1493,9 +1813,9 @@ pub fn gather_plan_inputs(conn: &Connection, day: &str) -> lockin::PlanInputs {
 
     let recurring_goals: Vec<String> = {
         let mut v = Vec::new();
-        if let Ok(mut stmt) =
-            conn.prepare("SELECT DISTINCT title FROM goals WHERE recurring = 1 ORDER BY day DESC LIMIT 5")
-        {
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT DISTINCT title FROM goals WHERE recurring = 1 ORDER BY day DESC LIMIT 5",
+        ) {
             if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
                 v = rows.filter_map(Result::ok).collect();
             }
@@ -1504,9 +1824,11 @@ pub fn gather_plan_inputs(conn: &Connection, day: &str) -> lockin::PlanInputs {
     };
 
     let notes: String = conn
-        .query_row("SELECT notes FROM daily_checkin WHERE day = ?1", [day], |r| {
-            r.get::<_, Option<String>>(0)
-        })
+        .query_row(
+            "SELECT notes FROM daily_checkin WHERE day = ?1",
+            [day],
+            |r| r.get::<_, Option<String>>(0),
+        )
         .ok()
         .flatten()
         .unwrap_or_default();
@@ -1540,8 +1862,17 @@ pub fn store_plan(conn: &Connection, p: &LockinPlan) -> Result<(), String> {
            roast_line = excluded.roast_line, source = excluded.source, edited = excluded.edited,
            created_at = excluded.created_at",
         params![
-            p.day, p.main_mission, sec, p.first_block, p.distraction_rule, p.focus_mode,
-            p.avoid_trap, p.roast_line, p.source, p.edited as i64, Utc::now().to_rfc3339(),
+            p.day,
+            p.main_mission,
+            sec,
+            p.first_block,
+            p.distraction_rule,
+            p.focus_mode,
+            p.avoid_trap,
+            p.roast_line,
+            p.source,
+            p.edited as i64,
+            Utc::now().to_rfc3339(),
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -1716,9 +2047,11 @@ fn logged_checkins(values: &[CheckinValue]) -> Vec<String> {
 }
 
 fn get_daily_note(conn: &Connection, day: &str) -> String {
-    conn.query_row("SELECT notes FROM daily_checkin WHERE day = ?1", [day], |r| {
-        r.get::<_, Option<String>>(0)
-    })
+    conn.query_row(
+        "SELECT notes FROM daily_checkin WHERE day = ?1",
+        [day],
+        |r| r.get::<_, Option<String>>(0),
+    )
     .ok()
     .flatten()
     .unwrap_or_default()
@@ -1759,7 +2092,11 @@ fn build_review_input(conn: &Connection) -> Result<(ScoreReport, ReviewInput), S
         let bucket = bucket_for_category(&bucket_map, &cat);
         *cat_seconds.entry(cat).or_insert(0) += b.seconds;
         if bucket != "productive" {
-            let label = b.domain.clone().unwrap_or_else(|| b.label.clone()).to_ascii_lowercase();
+            let label = b
+                .domain
+                .clone()
+                .unwrap_or_else(|| b.label.clone())
+                .to_ascii_lowercase();
             for t in &targets {
                 if label.contains(t.as_str()) {
                     *target_seconds.entry(t.clone()).or_insert(0) += b.seconds;
@@ -1790,10 +2127,21 @@ fn build_review_input(conn: &Connection) -> Result<(ScoreReport, ReviewInput), S
     let checkins = effective_checkins(conn, &day);
     let goal = top_project_name(conn);
     let outputs = output_signals_for_day(conn, &day);
-    let report = scoring::build_report(conn, day.clone(), &stats, &checkins, &outputs, goal.clone());
+    let report =
+        scoring::build_report(conn, day.clone(), &stats, &checkins, &outputs, goal.clone());
 
-    let completed = report.lines.iter().filter(|l| l.positive && l.triggered).map(|l| l.label.clone()).collect();
-    let missed = report.lines.iter().filter(|l| l.positive && !l.triggered).map(|l| l.label.clone()).collect();
+    let completed = report
+        .lines
+        .iter()
+        .filter(|l| l.positive && l.triggered)
+        .map(|l| l.label.clone())
+        .collect();
+    let missed = report
+        .lines
+        .iter()
+        .filter(|l| l.positive && !l.triggered)
+        .map(|l| l.label.clone())
+        .collect();
     let mins = |c: &str| cat_seconds.get(c).copied().unwrap_or(0) / 60;
     let (goals_done, goals_todo) = goal_lines(conn, &day);
     let logged = logged_checkins(&checkin_values_for_day(conn, &day));
@@ -1823,18 +2171,33 @@ fn build_review_input(conn: &Connection) -> Result<(ScoreReport, ReviewInput), S
 }
 
 fn build_review_prompt(i: &ReviewInput) -> String {
-    let list = |v: &[String]| if v.is_empty() { "none".to_string() } else { v.join("; ") };
+    let list = |v: &[String]| {
+        if v.is_empty() {
+            "none".to_string()
+        } else {
+            v.join("; ")
+        }
+    };
     let apps = |v: &[(String, i64)]| {
         if v.is_empty() {
             "none".to_string()
         } else {
-            v.iter().map(|(l, m)| format!("{l} {m}m")).collect::<Vec<_>>().join(", ")
+            v.iter()
+                .map(|(l, m)| format!("{l} {m}m"))
+                .collect::<Vec<_>>()
+                .join(", ")
         }
     };
     let blk = |b: &Option<(String, i64)>| {
-        b.as_ref().map(|(l, m)| format!("{l} {m}m")).unwrap_or_else(|| "none".to_string())
+        b.as_ref()
+            .map(|(l, m)| format!("{l} {m}m"))
+            .unwrap_or_else(|| "none".to_string())
     };
-    let notes = if i.notes.trim().is_empty() { "none".to_string() } else { i.notes.clone() };
+    let notes = if i.notes.trim().is_empty() {
+        "none".to_string()
+    } else {
+        i.notes.clone()
+    };
 
     format!(
         "You are the user's blunt, funny accountability coach. Write a short daily review.\n\
@@ -1899,7 +2262,13 @@ fn parse_review(json: &str, input: &ReviewInput, model: &str) -> Result<DailyAiR
         roast: Option<String>,
     }
     let raw: Raw = serde_json::from_str(json.trim()).map_err(|e| format!("invalid JSON: {e}"))?;
-    let verdict: String = raw.verdict.unwrap_or_default().trim().chars().take(200).collect();
+    let verdict: String = raw
+        .verdict
+        .unwrap_or_default()
+        .trim()
+        .chars()
+        .take(200)
+        .collect();
     if verdict.is_empty() {
         return Err("empty verdict".into());
     }
@@ -1908,8 +2277,20 @@ fn parse_review(json: &str, input: &ReviewInput, model: &str) -> Result<DailyAiR
         verdict,
         wins: clean_list(raw.wins, 3),
         problems: clean_list(raw.problems, 3),
-        tomorrow: raw.tomorrow.unwrap_or_default().trim().chars().take(200).collect(),
-        roast: raw.roast.unwrap_or_default().trim().chars().take(200).collect(),
+        tomorrow: raw
+            .tomorrow
+            .unwrap_or_default()
+            .trim()
+            .chars()
+            .take(200)
+            .collect(),
+        roast: raw
+            .roast
+            .unwrap_or_default()
+            .trim()
+            .chars()
+            .take(200)
+            .collect(),
         source: "llm".into(),
         model: Some(model.to_string()),
         generated_at: Some(Utc::now().to_rfc3339()),
@@ -1928,8 +2309,12 @@ fn fallback_review(report: &ScoreReport, input: &ReviewInput) -> DailyAiReview {
     .to_string();
 
     // Completed goals lead the wins; score wins fill the rest.
-    let mut wins: Vec<String> =
-        input.goals_done.iter().take(3).map(|g| format!("Finished: {g}")).collect();
+    let mut wins: Vec<String> = input
+        .goals_done
+        .iter()
+        .take(3)
+        .map(|g| format!("Finished: {g}"))
+        .collect();
     for l in &report.top_wins {
         if wins.len() >= 3 {
             break;
@@ -1942,8 +2327,12 @@ fn fallback_review(report: &ScoreReport, input: &ReviewInput) -> DailyAiReview {
     wins.truncate(3);
 
     // Unfinished goals lead the problems; score leaks fill the rest.
-    let mut problems: Vec<String> =
-        input.goals_todo.iter().take(2).map(|g| format!("Didn't finish: {g}")).collect();
+    let mut problems: Vec<String> = input
+        .goals_todo
+        .iter()
+        .take(2)
+        .map(|g| format!("Didn't finish: {g}"))
+        .collect();
     for l in &report.biggest_leaks {
         if problems.len() >= 3 {
             break;
@@ -1992,7 +2381,9 @@ fn load_cached_review(conn: &Connection, day: &str) -> Option<DailyAiReview> {
                 problems: parse_keywords(r.get::<_, Option<String>>(2)?),
                 tomorrow: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
                 roast: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                source: r.get::<_, Option<String>>(5)?.unwrap_or_else(|| "fallback".into()),
+                source: r
+                    .get::<_, Option<String>>(5)?
+                    .unwrap_or_else(|| "fallback".into()),
                 model: r.get::<_, Option<String>>(6)?,
                 generated_at: r.get::<_, Option<String>>(7)?,
                 notes: String::new(),
@@ -2045,7 +2436,10 @@ pub fn generate_review(conn: &Connection) -> Result<DailyAiReview, String> {
         .unwrap_or_else(|| settings::DEFAULT_OLLAMA_MODEL.to_string());
 
     let review = if enabled {
-        let cfg = llm::OllamaConfig { url, model: model.clone() };
+        let cfg = llm::OllamaConfig {
+            url,
+            model: model.clone(),
+        };
         match llm::generate_json(&cfg, &build_review_prompt(&input), 0.6)
             .and_then(|j| parse_review(&j, &input, &model))
         {
@@ -2105,26 +2499,20 @@ fn list_match(list: &[String], key: &str) -> bool {
 }
 
 fn quick_category(conn: &Connection, key: &str, is_web: bool) -> String {
-    if is_web {
-        if let Ok(Some(c)) = conn.query_row(
-            "SELECT category FROM domain_rules WHERE domain = ?1",
-            [key],
-            |r| r.get::<_, Option<String>>(0),
-        ) {
-            if is_valid_category(&c) {
-                return c;
-            }
-        }
-    } else if let Ok(c) =
-        conn.query_row("SELECT category FROM category_rules WHERE app_name = ?1", [key], |r| {
-            r.get::<_, String>(0)
-        })
-    {
-        if is_valid_category(&c) {
-            return c;
-        }
-    }
-    classify::classify(key, "", None, None, &[], None).category
+    resolve_activity(
+        conn,
+        &today(),
+        if is_web { "web" } else { "app" },
+        key,
+        "",
+        None,
+        is_web.then_some(key),
+        None,
+        None,
+        &[],
+    )
+    .map(|verdict| verdict.category)
+    .unwrap_or_else(|_| "uncategorized".into())
 }
 
 /// 0 = focused, 1 = distracted, 2 = other.
@@ -2170,7 +2558,9 @@ fn add_focus_span(
     if dur <= 0 {
         return;
     }
-    let Some(t0) = parse_utc(ts).map(|t| t.timestamp()) else { return };
+    let Some(t0) = parse_utc(ts).map(|t| t.timestamp()) else {
+        return;
+    };
     let a = t0.max(win_start);
     let b = (t0 + dur).min(win_end);
     if b <= a {
@@ -2181,7 +2571,11 @@ fn add_focus_span(
     if class == 1 {
         *dist_by.entry(key).or_insert(0) += b - a;
     }
-    spans.push(FocusSpan { start: a, end: b, class });
+    spans.push(FocusSpan {
+        start: a,
+        end: b,
+        class,
+    });
 }
 
 /// Union the classified spans onto a single wall-clock timeline so overlapping
@@ -2231,10 +2625,17 @@ fn merge_focus_spans(spans: &[FocusSpan]) -> (i64, i64, i64) {
 /// against the block, and overlapping time is never double-counted.
 pub fn focus_summary(conn: &Connection, id: i64) -> Result<FocusSummary, String> {
     let sess = conn
-        .query_row(&format!("SELECT {FOCUS_COLS} FROM focus_sessions WHERE id = ?1"), [id], row_to_focus)
+        .query_row(
+            &format!("SELECT {FOCUS_COLS} FROM focus_sessions WHERE id = ?1"),
+            [id],
+            row_to_focus,
+        )
         .map_err(|e| e.to_string())?;
     let start = sess.started_at.clone();
-    let end = sess.ended_at.clone().unwrap_or_else(|| Utc::now().to_rfc3339());
+    let end = sess
+        .ended_at
+        .clone()
+        .unwrap_or_else(|| Utc::now().to_rfc3339());
     let win_start = parse_utc(&start).map(|t| t.timestamp()).unwrap_or(0);
     let win_end = parse_utc(&end).map(|t| t.timestamp()).unwrap_or(win_start);
 
@@ -2251,11 +2652,26 @@ pub fn focus_summary(conn: &Connection, id: i64) -> Result<FocusSummary, String>
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map(params![start, end], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
             })
             .map_err(|e| e.to_string())?;
         for (app, ts, dur) in rows.flatten() {
-            add_focus_span(conn, &sess, win_start, win_end, &ts, dur, app, false, &mut spans, &mut dist_by);
+            add_focus_span(
+                conn,
+                &sess,
+                win_start,
+                win_end,
+                &ts,
+                dur,
+                app,
+                false,
+                &mut spans,
+                &mut dist_by,
+            );
         }
     }
     // Browser-tab samples in the window (all devices).
@@ -2268,17 +2684,36 @@ pub fn focus_summary(conn: &Connection, id: i64) -> Result<FocusSummary, String>
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map(params![start, end], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
             })
             .map_err(|e| e.to_string())?;
         for (domain, ts, dur) in rows.flatten() {
-            add_focus_span(conn, &sess, win_start, win_end, &ts, dur, domain, true, &mut spans, &mut dist_by);
+            add_focus_span(
+                conn,
+                &sess,
+                win_start,
+                win_end,
+                &ts,
+                dur,
+                domain,
+                true,
+                &mut spans,
+                &mut dist_by,
+            );
         }
     }
 
     let (focused, distracted, other) = merge_focus_spans(&spans);
     let tracked = focused + distracted + other;
-    let adherence = if tracked > 0 { focused * 100 / tracked } else { 0 };
+    let adherence = if tracked > 0 {
+        focused * 100 / tracked
+    } else {
+        0
+    };
     let top_distraction = dist_by.into_iter().max_by_key(|(_, s)| *s).map(|(k, _)| k);
 
     Ok(FocusSummary {
@@ -2365,9 +2800,27 @@ mod tests {
     #[test]
     fn overview_absorbs_one_brief_switch_when_same_work_resumes() {
         let blocks = vec![
-            timeline_test_block("DaVinci Resolve", "2026-07-28T12:00:00Z", 900, "business", "productive"),
-            timeline_test_block("Telegram", "2026-07-28T12:15:00Z", 10, "distraction", "distracting"),
-            timeline_test_block("DaVinci Resolve", "2026-07-28T12:15:10Z", 900, "business", "productive"),
+            timeline_test_block(
+                "DaVinci Resolve",
+                "2026-07-28T12:00:00Z",
+                900,
+                "business",
+                "productive",
+            ),
+            timeline_test_block(
+                "Telegram",
+                "2026-07-28T12:15:00Z",
+                10,
+                "distraction",
+                "distracting",
+            ),
+            timeline_test_block(
+                "DaVinci Resolve",
+                "2026-07-28T12:15:10Z",
+                900,
+                "business",
+                "productive",
+            ),
         ];
 
         let overview = smooth_brief_interruptions(&blocks, 20);
@@ -2383,9 +2836,27 @@ mod tests {
     #[test]
     fn overview_keeps_a_meaningful_interruption() {
         let blocks = vec![
-            timeline_test_block("DaVinci Resolve", "2026-07-28T12:00:00Z", 900, "business", "productive"),
-            timeline_test_block("Telegram", "2026-07-28T12:15:00Z", 60, "distraction", "distracting"),
-            timeline_test_block("DaVinci Resolve", "2026-07-28T12:16:00Z", 900, "business", "productive"),
+            timeline_test_block(
+                "DaVinci Resolve",
+                "2026-07-28T12:00:00Z",
+                900,
+                "business",
+                "productive",
+            ),
+            timeline_test_block(
+                "Telegram",
+                "2026-07-28T12:15:00Z",
+                60,
+                "distraction",
+                "distracting",
+            ),
+            timeline_test_block(
+                "DaVinci Resolve",
+                "2026-07-28T12:16:00Z",
+                900,
+                "business",
+                "productive",
+            ),
         ];
 
         assert_eq!(smooth_brief_interruptions(&blocks, 20).len(), 3);
@@ -2394,9 +2865,27 @@ mod tests {
     #[test]
     fn overview_never_merges_different_surrounding_work() {
         let blocks = vec![
-            timeline_test_block("DaVinci Resolve", "2026-07-28T12:00:00Z", 900, "business", "productive"),
-            timeline_test_block("Telegram", "2026-07-28T12:15:00Z", 10, "distraction", "distracting"),
-            timeline_test_block("Adobe Premiere Pro", "2026-07-28T12:15:10Z", 900, "business", "productive"),
+            timeline_test_block(
+                "DaVinci Resolve",
+                "2026-07-28T12:00:00Z",
+                900,
+                "business",
+                "productive",
+            ),
+            timeline_test_block(
+                "Telegram",
+                "2026-07-28T12:15:00Z",
+                10,
+                "distraction",
+                "distracting",
+            ),
+            timeline_test_block(
+                "Adobe Premiere Pro",
+                "2026-07-28T12:15:10Z",
+                900,
+                "business",
+                "productive",
+            ),
         ];
 
         assert_eq!(smooth_brief_interruptions(&blocks, 20).len(), 3);
@@ -2411,7 +2900,8 @@ mod tests {
             "INSERT INTO projects (name, category, keywords, apps, domains, priority, updated_at)
              VALUES ('AFM Business', 'business', '[\"tate\"]', '[]', '[]', 100, 't')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO smart_activity
                (timestamp, day, app_name, window_title, ocr_summary, detected_keywords, category, is_idle)
@@ -2451,7 +2941,11 @@ mod tests {
         .unwrap();
 
         let timeline = timeline_for_day(&conn, day, 15).unwrap();
-        let tempo: Vec<_> = timeline.blocks.iter().filter(|b| b.label == "Tempo").collect();
+        let tempo: Vec<_> = timeline
+            .blocks
+            .iter()
+            .filter(|b| b.label == "Tempo")
+            .collect();
         assert_eq!(tempo.len(), 1);
         assert_eq!(tempo[0].source, "screen");
         assert_eq!(tempo[0].category, "neutral");

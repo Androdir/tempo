@@ -49,7 +49,10 @@ function SectionTabs({ page, onNavigate }: { page: Page; onNavigate: (page: Page
 export default function App() {
   const [page, setPage] = useState<Page>("dashboard");
   const [theme, setTheme] = useState<Theme>(initialTheme);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const mainRef = useRef<HTMLElement | null>(null);
+  const currentSection = navSectionForPage(page);
+  const currentPageLabel = currentSection.pages.find((item) => item.id === page)?.label ?? currentSection.label;
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -59,16 +62,52 @@ export default function App() {
 
   useEffect(() => {
     if (mainRef.current) mainRef.current.scrollTop = 0;
+    setMobileNavOpen(false);
   }, [page]);
 
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMobileNavOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [mobileNavOpen]);
+
   return (
-    <div className="app-shell">
+    <div className={`app-shell${mobileNavOpen ? " nav-open" : ""}`}>
+      <header className="mobile-app-bar">
+        <button
+          className="mobile-menu-button"
+          type="button"
+          aria-label="Open navigation"
+          aria-expanded={mobileNavOpen}
+          aria-controls="tempo-navigation"
+          onClick={() => setMobileNavOpen(true)}
+        >
+          <span aria-hidden="true">☰</span>
+        </button>
+        <div className="mobile-app-title">
+          <strong>Tempo</strong>
+          <span>{currentPageLabel}</span>
+        </div>
+      </header>
       <Sidebar
         page={page}
         theme={theme}
+        open={mobileNavOpen}
         onNavigate={setPage}
+        onClose={() => setMobileNavOpen(false)}
         onToggleTheme={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
       />
+      {mobileNavOpen && (
+        <button
+          className="mobile-nav-backdrop"
+          type="button"
+          aria-label="Close navigation"
+          onClick={() => setMobileNavOpen(false)}
+        />
+      )}
       <main className="main" ref={mainRef}>
         <SectionTabs page={page} onNavigate={setPage} />
         {page === "dashboard" && <Dashboard onNavigate={setPage} />}
@@ -82,7 +121,7 @@ export default function App() {
         {page === "projects" && <Projects />}
         {page === "categories" && <Categories />}
         {page === "review" && <DailyReview onNavigate={setPage} />}
-        {page === "weekly" && <WeeklyReview />}
+        {page === "weekly" && <WeeklyReview onNavigate={setPage} />}
         {page === "streaks" && <Streaks />}
         {page === "privacy" && <PrivacySettings />}
         {page === "guide" && <SetupGuide onNavigate={setPage} />}

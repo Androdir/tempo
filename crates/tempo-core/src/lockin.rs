@@ -32,7 +32,8 @@ pub fn fallback_plan(day: &str, i: &PlanInputs) -> LockinPlan {
     } else if let Some(g) = i.recurring_goals.first() {
         g.clone()
     } else {
-        "Ship one concrete output — a video, a shipped feature, or 60 focused min of study.".to_string()
+        "Ship one concrete output — a video, a shipped feature, or 60 focused min of study."
+            .to_string()
     };
 
     // Up to 2 secondary missions from remaining missed/recurring goals + a default.
@@ -63,7 +64,8 @@ pub fn fallback_plan(day: &str, i: &PlanInputs) -> LockinPlan {
         Some(m) if m > 11 * 60 => {
             format!("You didn't get going until {} yesterday — open your main project by 09:30, phone in another room.", clock(m))
         }
-        _ => "Open your main project first thing — a 50-min focus block before anything else.".to_string(),
+        _ => "Open your main project first thing — a 50-min focus block before anything else."
+            .to_string(),
     };
 
     // Distraction rule + avoid-trap from yesterday's biggest leak.
@@ -73,8 +75,10 @@ pub fn fallback_plan(day: &str, i: &PlanInputs) -> LockinPlan {
             format!("The trap is opening {label} 'just to check'. It's never just a check."),
         ),
         _ => (
-            "Phone out of reach during every focus block; no feeds before the first win.".to_string(),
-            "The trap is a slow, comfortable morning that quietly eats your best hours.".to_string(),
+            "Phone out of reach during every focus block; no feeds before the first win."
+                .to_string(),
+            "The trap is a slow, comfortable morning that quietly eats your best hours."
+                .to_string(),
         ),
     };
 
@@ -83,7 +87,8 @@ pub fn fallback_plan(day: &str, i: &PlanInputs) -> LockinPlan {
         .as_ref()
         .map(|(l, _)| l.clone())
         .unwrap_or_else(|| "instagram.com, youtube.com, tiktok.com".to_string());
-    let focus_mode = format!("Start a 50-min Focus session on the main mission; block {block_target}.");
+    let focus_mode =
+        format!("Start a 50-min Focus session on the main mission; block {block_target}.");
 
     let roast_line = roast_for(i);
 
@@ -104,29 +109,48 @@ pub fn fallback_plan(day: &str, i: &PlanInputs) -> LockinPlan {
 fn roast_for(i: &PlanInputs) -> String {
     if i.video_exports > 0 || !i.completed_goals.is_empty() {
         if i.score >= 70 {
-            "Solid day — now do it again before you start believing your own highlight reel.".to_string()
+            "Solid day — now do it again before you start believing your own highlight reel."
+                .to_string()
         } else {
-            "You shipped something, which beats most people. Tomorrow, ship it before lunch.".to_string()
+            "You shipped something, which beats most people. Tomorrow, ship it before lunch."
+                .to_string()
         }
     } else if let Some((label, min)) = &i.top_distraction {
         format!("{min} minutes on {label} and nothing to show for it. Tomorrow you owe yourself an output.")
     } else if i.score < 30 {
         "Yesterday was a write-off. No speeches — just open the main project and start.".to_string()
     } else {
-        "Decent, forgettable day. Tomorrow, make it count for something you can point at.".to_string()
+        "Decent, forgettable day. Tomorrow, make it count for something you can point at."
+            .to_string()
     }
 }
 
 pub fn build_prompt(i: &PlanInputs) -> String {
-    let missed = if i.missed_goals.is_empty() { "none".to_string() } else { i.missed_goals.join("; ") };
-    let done = if i.completed_goals.is_empty() { "none".to_string() } else { i.completed_goals.join("; ") };
+    let missed = if i.missed_goals.is_empty() {
+        "none".to_string()
+    } else {
+        i.missed_goals.join("; ")
+    };
+    let done = if i.completed_goals.is_empty() {
+        "none".to_string()
+    } else {
+        i.completed_goals.join("; ")
+    };
     let leak = i
         .top_distraction
         .as_ref()
         .map(|(l, m)| format!("{l} ({m} min)"))
         .unwrap_or_else(|| "none".to_string());
-    let recurring = if i.recurring_goals.is_empty() { "none".to_string() } else { i.recurring_goals.join("; ") };
-    let notes = if i.notes.trim().is_empty() { "none".to_string() } else { i.notes.trim().to_string() };
+    let recurring = if i.recurring_goals.is_empty() {
+        "none".to_string()
+    } else {
+        i.recurring_goals.join("; ")
+    };
+    let notes = if i.notes.trim().is_empty() {
+        "none".to_string()
+    } else {
+        i.notes.trim().to_string()
+    };
 
     format!(
         "You are a blunt, funny accountability coach. Make a concrete lock-in plan for TOMORROW \
@@ -151,9 +175,16 @@ pub fn parse_plan(day: &str, json: &str) -> Result<LockinPlan, String> {
     let start = json.find('{').ok_or("no JSON object in response")?;
     let end = json.rfind('}').ok_or("no JSON object in response")?;
     let slice = &json[start..=end];
-    let v: serde_json::Value = serde_json::from_str(slice).map_err(|e| format!("invalid JSON: {e}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(slice).map_err(|e| format!("invalid JSON: {e}"))?;
 
-    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    let s = |k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
     let main_mission = s("main_mission");
     if main_mission.is_empty() {
         return Err("missing main_mission".to_string());
@@ -190,7 +221,8 @@ impl LockinPlan {
     /// Fill any blank fields the model omitted with sane placeholders.
     fn non_empty_or_default(mut self) -> Self {
         if self.secondary_missions.is_empty() {
-            self.secondary_missions.push("One focused deep-work block before noon.".to_string());
+            self.secondary_missions
+                .push("One focused deep-work block before noon.".to_string());
         }
         if self.first_block.is_empty() {
             self.first_block = "Open your main project first — 50 focused minutes.".to_string();

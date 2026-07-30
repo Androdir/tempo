@@ -12,13 +12,26 @@ pub fn hash_token(token: &str) -> String {
 }
 
 fn random_hex(conn: &Connection, bytes: usize) -> String {
-    conn.query_row(&format!("SELECT lower(hex(randomblob({bytes})))"), [], |r| r.get::<_, String>(0))
-        .unwrap_or_else(|_| format!("{:x}", Sha256::digest(chrono::Utc::now().to_rfc3339().as_bytes())))
+    conn.query_row(
+        &format!("SELECT lower(hex(randomblob({bytes})))"),
+        [],
+        |r| r.get::<_, String>(0),
+    )
+    .unwrap_or_else(|_| {
+        format!(
+            "{:x}",
+            Sha256::digest(chrono::Utc::now().to_rfc3339().as_bytes())
+        )
+    })
 }
 
 /// Create a new paired device; returns (device_id, plaintext_token) ONCE. Only
 /// the token's hash is persisted.
-pub fn pair_device(conn: &Connection, name: &str, platform: &str) -> Result<(String, String), String> {
+pub fn pair_device(
+    conn: &Connection,
+    name: &str,
+    platform: &str,
+) -> Result<(String, String), String> {
     let id = random_hex(conn, 16);
     let token = random_hex(conn, 32);
     let now = chrono::Utc::now().to_rfc3339();
@@ -38,7 +51,11 @@ pub fn device_for_token(conn: &Connection, token: &str) -> Option<String> {
     }
     let h = hash_token(token);
     let id: Option<String> = conn
-        .query_row("SELECT id FROM devices WHERE token_hash = ?1 AND revoked = 0", params![h], |r| r.get(0))
+        .query_row(
+            "SELECT id FROM devices WHERE token_hash = ?1 AND revoked = 0",
+            params![h],
+            |r| r.get(0),
+        )
         .ok();
     if let Some(ref did) = id {
         let _ = conn.execute(
@@ -50,7 +67,8 @@ pub fn device_for_token(conn: &Connection, token: &str) -> Option<String> {
 }
 
 pub fn revoke_device(conn: &Connection, id: &str) -> Result<(), String> {
-    conn.execute("UPDATE devices SET revoked = 1 WHERE id = ?1", params![id]).map_err(|e| e.to_string())?;
+    conn.execute("UPDATE devices SET revoked = 1 WHERE id = ?1", params![id])
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 

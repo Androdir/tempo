@@ -423,7 +423,7 @@ export default function Goals() {
                     >
                       {PRIORITIES.map((p) => (
                         <option key={p} value={p}>
-                          {p}
+                          {p === "high" ? "High — primary" : p === "medium" ? "Medium — normal" : "Low — later"}
                         </option>
                       ))}
                     </select>
@@ -544,7 +544,7 @@ export default function Goals() {
           >
             {PRIORITIES.map((p) => (
               <option key={p} value={p}>
-                {p}
+                {p === "high" ? "High — primary" : p === "medium" ? "Medium — normal" : "Low — later"}
               </option>
             ))}
           </select>
@@ -560,6 +560,9 @@ export default function Goals() {
             Add
           </button>
         </form>
+        <p className="card-hint mission-priority-help">
+          Priority controls the order and which mission Tempo treats as your main mission. It does not secretly change your Daily Score.
+        </p>
       </div>
 
       {checkins && (
