@@ -361,6 +361,7 @@ export interface AccountabilitySettings {
   distractionWarnMinutes: number;
   eodPopupEnabled: boolean;
   eodPopupTime: string; // "HH:MM"
+  mainGoalDeadline: string; // optional "HH:MM"
 }
 
 export interface WeeklyDay {

@@ -2268,6 +2268,8 @@ pub fn get_accountability_settings(db: State<'_, Db>) -> Result<AccountabilitySe
         eod_popup_enabled: settings::get_bool(&conn, settings::EOD_POPUP_ENABLED, false),
         eod_popup_time: settings::get_setting(&conn, settings::EOD_POPUP_TIME)
             .unwrap_or_else(|| settings::DEFAULT_EOD_TIME.to_string()),
+        main_goal_deadline: settings::get_setting(&conn, settings::MAIN_GOAL_DEADLINE)
+            .unwrap_or_default(),
     })
 }
 
@@ -2291,6 +2293,7 @@ pub fn set_accountability_setting(
         settings::DISTRACTION_WARN_MINUTES,
         settings::EOD_POPUP_ENABLED,
         settings::EOD_POPUP_TIME,
+        settings::MAIN_GOAL_DEADLINE,
     ];
     if !allowed.contains(&key.as_str()) {
         return Err(format!("unknown setting: {key}"));
@@ -2301,11 +2304,16 @@ pub fn set_accountability_setting(
             .parse()
             .map_err(|_| "minutes must be a number".to_string())?;
         n.clamp(1, 240).to_string()
-    } else if key == settings::EOD_POPUP_TIME {
-        if !valid_hhmm(value.trim()) {
-            return Err("time must be HH:MM (24-hour)".into());
+    } else if key == settings::EOD_POPUP_TIME || key == settings::MAIN_GOAL_DEADLINE {
+        let trimmed = value.trim();
+        if key == settings::MAIN_GOAL_DEADLINE && trimmed.is_empty() {
+            String::new()
+        } else {
+            if !valid_hhmm(trimmed) {
+                return Err("time must be HH:MM (24-hour)".into());
+            }
+            trimmed.to_string()
         }
-        value.trim().to_string()
     } else if value == "true" || value == "1" {
         "1".to_string()
     } else {
@@ -2769,7 +2777,8 @@ mod tests {
         assert_eq!(tl.blocks[0].duration_seconds, 30);
         assert_eq!(tl.blocks[0].category, "productive");
         assert!(tl.blocks[0].longest_productive); // 30s > 10s
-        assert!(tl.blocks[0].first_productive);
+        assert!(!tl.blocks[0].first_productive);
+        assert!(tl.first_productive_start.is_none());
         assert_eq!(tl.productive_seconds, 40);
     }
 

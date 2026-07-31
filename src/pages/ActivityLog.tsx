@@ -1,6 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { correctActivity, getCategoryDefinitions, getRecentActivity } from "../api";
-import { contentTypeMeta } from "../categories";
 import ActivityDetailsDrawer from "../components/ActivityDetailsDrawer";
 import { AppGlyph, CategoryBadge, ProjectTag } from "../components/ui";
 import { formatDuration } from "../format";
@@ -21,6 +20,48 @@ function SrcChip({ classifier }: { classifier: ActivityLogEntry["classifier"] })
   if (classifier === "manual")
     return <span className="src-chip manual" title="Manual correction">✎ Manual</span>;
   return <span className="src-chip rule" title="Rule-based classification">Rule</span>;
+}
+
+interface ActivityGroup {
+  key: string;
+  activity: ActivityLogEntry;
+  entries: ActivityLogEntry[];
+  sources: ActivityLogEntry["source"][];
+  titles: string[];
+  mixedCategory: boolean;
+}
+
+function groupActivities(entries: ActivityLogEntry[]): ActivityGroup[] {
+  const grouped = new Map<string, ActivityLogEntry[]>();
+  for (const entry of entries) {
+    const family = entry.source === "web" ? "web" : "app";
+    const key = `${family}:${entry.label.trim().toLocaleLowerCase()}`;
+    grouped.set(key, [...(grouped.get(key) ?? []), entry]);
+  }
+  const rank = (entry: ActivityLogEntry) =>
+    (entry.classifier === "manual" ? 30 : entry.classifier === "rule" ? 20 : 10)
+    + (entry.source === "screen" ? 0 : 2);
+  return Array.from(grouped, ([key, items]) => {
+    const sorted = [...items].sort((a, b) =>
+      rank(b) - rank(a) || new Date(b.lastSeen).getTime() - new Date(a.lastSeen).getTime(),
+    );
+    const timed = items.filter((entry) => entry.source !== "screen");
+    const durationEntries = timed.length > 0 ? timed : items;
+    const seconds = durationEntries.reduce((sum, entry) => sum + entry.seconds, 0);
+    const lastSeen = items.reduce((latest, entry) =>
+      new Date(entry.lastSeen).getTime() > new Date(latest).getTime() ? entry.lastSeen : latest,
+    items[0].lastSeen);
+    const titles = Array.from(new Set(items.map((entry) => entry.title.trim()).filter(Boolean)));
+    const sources = Array.from(new Set(items.map((entry) => entry.source)));
+    return {
+      key,
+      activity: { ...sorted[0], seconds, lastSeen },
+      entries: items,
+      sources,
+      titles,
+      mixedCategory: new Set(items.map((entry) => entry.category)).size > 1,
+    };
+  }).sort((a, b) => new Date(b.activity.lastSeen).getTime() - new Date(a.activity.lastSeen).getTime());
 }
 
 export default function ActivityLog() {
@@ -59,13 +100,15 @@ export default function ActivityLog() {
   }
 
   const visible = useMemo(
-    () => (entries ?? []).filter((e) => filter === "all" || e.source === filter),
-    [entries, filter]
+    () => (entries ?? []).filter((entry) => filter === "all" || entry.source === filter),
+    [entries, filter],
   );
-  const openActivity = useMemo(
-    () => (entries ?? []).find((entry) => entry.blockKey === openKey) ?? null,
-    [entries, openKey]
+  const groups = useMemo(() => groupActivities(visible), [visible]);
+  const openGroup = useMemo(
+    () => groups.find((group) => group.key === openKey) ?? null,
+    [groups, openKey],
   );
+  const openActivity = openGroup?.activity ?? null;
 
   return (
     <>
@@ -73,7 +116,7 @@ export default function ActivityLog() {
         <div>
           <h1 className="page-title">Classifications</h1>
           <div className="page-subtitle">
-            One row per captured activity pattern. Click any app or website to see why it matched and correct it; use Timeline for chronology.
+            One row per app or website. Window titles and screen observations stay available as context instead of appearing as duplicate apps.
           </div>
         </div>
         <div className="head-actions">
@@ -91,7 +134,7 @@ export default function ActivityLog() {
       <div className="card">
         {!entries ? (
           <div className="loading">Loading activity…</div>
-        ) : visible.length === 0 ? (
+        ) : groups.length === 0 ? (
           <div className="empty">
             <div className="empty-glyph">🗂️</div>
             <h3>No activity yet</h3>
@@ -109,21 +152,22 @@ export default function ActivityLog() {
               </tr>
             </thead>
             <tbody>
-              {visible.map((e) => {
+              {groups.map((group) => {
+                const e = group.activity;
                 const projConf =
                   e.classifier === "llm" && e.llmConfidence != null
                     ? Math.round(e.llmConfidence * 100)
                     : e.projectConfidence;
                 return (
-                  <Fragment key={e.blockKey}>
+                  <Fragment key={group.key}>
                     <tr
                       className="clickable"
                       tabIndex={0}
-                      onClick={() => setOpenKey(e.blockKey)}
+                      onClick={() => setOpenKey(group.key)}
                       onKeyDown={(event) => {
                         if (event.key === "Enter" || event.key === " ") {
                           event.preventDefault();
-                          setOpenKey(e.blockKey);
+                          setOpenKey(group.key);
                         }
                       }}
                     >
@@ -131,11 +175,16 @@ export default function ActivityLog() {
                         <div className="app-cell">
                           <AppGlyph name={e.label} />
                           <div style={{ minWidth: 0 }}>
-                            <div className="ellip">{e.title || e.label}</div>
-                            <div className="muted-num ellip" style={{ fontSize: 11.5 }}>
-                              <span className="src-tag">{e.source}</span>
-                              {e.label}
-                              {e.contentType ? ` · ${contentTypeMeta(e.contentType).label}` : ""}
+                            <div className="ellip">{e.label}</div>
+                            <div className="muted-num activity-contexts" style={{ fontSize: 11.5 }}>
+                              <span className="activity-source-list">
+                                {group.sources.map((source) => <span className="src-tag" key={source}>{source}</span>)}
+                              </span>
+                              <span className="ellip">
+                                {group.entries.length === 1
+                                  ? e.title || "One observed context"
+                                  : `${group.entries.length} contexts${group.titles.length ? ` · ${group.titles.slice(0, 2).join(" · ")}${group.titles.length > 2 ? "…" : ""}` : ""}`}
+                              </span>
                             </div>
                             {e.summary && <div className="muted-num ellip log-summary">{e.summary}</div>}
                           </div>
@@ -150,12 +199,14 @@ export default function ActivityLog() {
                       </td>
                       <td>
                         <div className="cat-src">
-                          <CategoryBadge category={e.category} />
+                          {group.mixedCategory
+                            ? <span className="src-chip conflict" title="Observed contexts currently have different categories">Mixed categories</span>
+                            : <CategoryBadge category={e.category} />}
                           <SrcChip classifier={e.classifier} />
                         </div>
                       </td>
                       <td className="right muted-num">
-                        {e.source === "screen" ? timeOf(e.lastSeen) : formatDuration(e.seconds)}
+                        {group.sources.every((source) => source === "screen") ? timeOf(e.lastSeen) : formatDuration(e.seconds)}
                       </td>
                       <td className="right">
                         <button
@@ -163,14 +214,14 @@ export default function ActivityLog() {
                           title="Correct classification"
                           onClick={(ev) => {
                             ev.stopPropagation();
-                            setCorrectingKey(correctingKey === e.blockKey ? null : e.blockKey);
+                            setCorrectingKey(correctingKey === group.key ? null : group.key);
                           }}
                         >
                           ✎
                         </button>
                       </td>
                     </tr>
-                    {correctingKey === e.blockKey && (
+                    {correctingKey === group.key && (
                       <tr className="correct-row">
                         <td colSpan={5}>
                           <div className="correct-bar">
@@ -199,6 +250,7 @@ export default function ActivityLog() {
       <ActivityDetailsDrawer
         id={openActivity?.detailId ?? null}
         activity={openActivity}
+        relatedActivities={openGroup?.entries ?? []}
         onClose={() => setOpenKey(null)}
         onCorrected={load}
       />

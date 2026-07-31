@@ -4896,3 +4896,72 @@ tr.row-dim .tick.off {
 .private-apps-control .search { width: min(360px, 52vw); }
 .weekly-decisions ol { margin: 14px 0; padding-left: 22px; }
 .weekly-decisions li { margin: 9px 0; line-height: 1.45; }
+
+.score-deadline-setting {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.score-deadline-setting label {
+  display: block;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+}
+.score-deadline-setting p {
+  margin: 3px 0 0;
+  color: var(--text-faint);
+  font-size: 11.5px;
+}
+.score-deadline-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.score-deadline-control .search { width: 118px; }
+@media (max-width: 600px) {
+  .score-deadline-setting { align-items: stretch; flex-direction: column; text-align: left; }
+}
+
+.activity-contexts {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin-top: 3px;
+}
+.activity-source-list {
+  display: inline-flex;
+  flex: none;
+  gap: 3px;
+}
+.src-chip.conflict {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+}
+.activity-context-list {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+}
+.activity-context-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  font-size: 12px;
+}
+@media (max-width: 600px) {
+  .activity-contexts { align-items: flex-start; flex-direction: column; }
+  .activity-context-row { grid-template-columns: auto minmax(0, 1fr); }
+  .activity-context-row > .muted-num { grid-column: 2; }
+}

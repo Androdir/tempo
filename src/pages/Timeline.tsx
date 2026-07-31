@@ -1,9 +1,10 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { correctActivity, getCategoryDefinitions, getOutputEvents, getTimelineForDay } from "../api";
 import { categoryMeta } from "../categories";
+import ActivityDetailsDrawer from "../components/ActivityDetailsDrawer";
 import { AppGlyph, CategoryBadge, ProjectTag, StatCard } from "../components/ui";
 import { formatDuration } from "../format";
-import type { CategoryDefinition, OutputEvent, TimelineBlock, TimelineDay } from "../types";
+import type { ActivityLogEntry, CategoryDefinition, OutputEvent, TimelineBlock, TimelineDay } from "../types";
 import { outputMeta } from "./OutputEvents";
 
 
@@ -45,6 +46,41 @@ function timeOf(iso: string): string {
 }
 
 /** The block's classifier, as a small chip (matches the Classifications). */
+function timelineActivity(block: TimelineBlock): ActivityLogEntry {
+  const source: ActivityLogEntry["source"] = block.isWeb
+    ? "web"
+    : block.source === "screen"
+      ? "screen"
+      : "app";
+  const reason = block.classifier === "manual"
+    ? "Manual correction"
+    : block.classifier === "llm"
+      ? "Local AI timeline classification"
+      : source === "web"
+        ? "Website rule or content signals"
+        : "App rule or activity signals";
+  return {
+    source,
+    label: block.label,
+    title: block.title,
+    seconds: block.durationSeconds,
+    category: block.category as ActivityLogEntry["category"],
+    activityKind: "unknown",
+    reason,
+    contentType: null,
+    lastSeen: block.end,
+    detailId: null,
+    summary: block.summary,
+    projectName: block.project,
+    projectConfidence: block.projectConfidence,
+    projectSignals: [],
+    classifier: block.classifier,
+    llmConfidence: block.classifier === "llm" ? block.confidence : null,
+    confidence: block.confidence,
+    blockKey: block.blockKey,
+  };
+}
+
 function SrcChip({ classifier }: { classifier: TimelineBlock["classifier"] }) {
   if (classifier === "llm")
     return <span className="src-chip llm" title="Classified by the local LLM">🤖 LLM</span>;
@@ -58,7 +94,7 @@ function Badges({ b }: { b: TimelineBlock }) {
     <>
       {b.longestProductive && <span className="tl-badge win" title="Longest unbroken productive block">🏆 Longest focus</span>}
       {b.biggestDistraction && <span className="tl-badge bad" title="Biggest single distraction block">🕳️ Biggest leak</span>}
-      {b.firstProductive && <span className="tl-badge first" title="First productive block of the day">🌅 First work</span>}
+      {b.firstProductive && <span className="tl-badge first" title="First sustained productive block (at least 5 minutes)">🌅 First work</span>}
       {b.goalRelated && <span className="tl-badge goal" title="Tied to one of today's goals/projects">🎯 Goal</span>}
       {b.outputLinked && <span className="tl-badge output" title="Output / content-shipping work">📤 Output</span>}
     </>
@@ -77,6 +113,7 @@ export default function Timeline() {
   const [projectF, setProjectF] = useState<string>("all");
   const [labelF, setLabelF] = useState<string>("all");
   const [correctingKey, setCorrectingKey] = useState<string | null>(null);
+  const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
 
   const [outputs, setOutputs] = useState<OutputEvent[]>([]);
   const [categories, setCategories] = useState<CategoryDefinition[]>([]);
@@ -102,6 +139,12 @@ export default function Timeline() {
   }, [load]);
 
   const blocks = (viewMode === "overview" ? data?.overviewBlocks : data?.blocks) ?? [];
+
+  const selectedBlock = useMemo(
+    () => blocks.find((block) => `${block.blockKey}|${block.start}` === selectedBlockId) ?? null,
+    [blocks, selectedBlockId],
+  );
+  const selectedActivity = useMemo(() => selectedBlock ? timelineActivity(selectedBlock) : null, [selectedBlock]);
 
   const projects = useMemo(
     () => Array.from(new Set(blocks.map((b) => b.project).filter((p): p is string => !!p))).sort(),
@@ -223,7 +266,17 @@ export default function Timeline() {
     const conf = b.projectConfidence;
     return (
       <Fragment key={b.blockKey + b.start}>
-        <div className={`tl-row ${b.idle ? "idle" : ""}`}>
+        <div
+          className={`tl-row ${b.idle ? "idle" : "clickable"}`}
+          tabIndex={b.idle ? undefined : 0}
+          onClick={() => !b.idle && setSelectedBlockId(`${b.blockKey}|${b.start}`)}
+          onKeyDown={(event) => {
+            if (!b.idle && (event.key === "Enter" || event.key === " ")) {
+              event.preventDefault();
+              setSelectedBlockId(`${b.blockKey}|${b.start}`);
+            }
+          }}
+        >
           <div className="tl-time">
             <div className="tl-clock">{timeOf(b.start)}</div>
             <div className="tl-dur">{formatDuration(b.durationSeconds)}</div>
@@ -269,7 +322,10 @@ export default function Timeline() {
                   <button
                     className="icon-btn"
                     title="Correct classification"
-                    onClick={() => setCorrectingKey(correctingKey === b.blockKey ? null : b.blockKey)}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setCorrectingKey(correctingKey === b.blockKey ? null : b.blockKey);
+                    }}
                   >
                     ✎
                   </button>
@@ -343,7 +399,7 @@ export default function Timeline() {
           )}
           {viewMode === "exact" && (
             <div className="tl-mode-note" role="note">
-              Exact groups consecutive 10-second samples of the same activity into a run, but does not join them across a longer gap. Use Classifications to audit or correct a category.
+              Exact groups consecutive 10-second samples of the same activity into a run, but does not join them across a longer gap. Click any activity to inspect or correct it.
             </div>
           )}
 
@@ -366,7 +422,7 @@ export default function Timeline() {
             <StatCard
               label="First productive"
               value={data.firstProductiveStart ? timeOf(data.firstProductiveStart) : "—"}
-              foot={data.firstProductiveStart ? "earliest real work" : "no work yet"}
+              foot={data.firstProductiveStart ? "first 5+ min work block" : "no 5+ min work block yet"}
             />
           </div>
 
@@ -442,6 +498,12 @@ export default function Timeline() {
           </div>
         </>
       )}
+      <ActivityDetailsDrawer
+        id={selectedActivity?.detailId ?? null}
+        activity={selectedActivity}
+        onClose={() => setSelectedBlockId(null)}
+        onCorrected={load}
+      />
     </>
   );
 }

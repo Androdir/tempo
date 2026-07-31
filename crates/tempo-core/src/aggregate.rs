@@ -17,6 +17,9 @@ use crate::models::*;
 use crate::projects::{self, Project};
 use crate::rules;
 use crate::scoring;
+/// A productive visit becomes a real work start only after five sustained minutes.
+pub const MIN_PRODUCTIVE_BLOCK_SECONDS: i64 = 5 * 60;
+
 use crate::settings;
 
 pub fn today() -> String {
@@ -647,7 +650,6 @@ pub fn compute_stats_for_day(conn: &Connection, day: &str) -> Result<scoring::St
 
     let mut cat_seconds: HashMap<String, i64> = HashMap::new();
     let mut target_seconds: HashMap<String, i64> = HashMap::new();
-    let mut first_productive: Option<i64> = None;
 
     for b in &blocks {
         if b.seconds <= 0 {
@@ -670,12 +672,17 @@ pub fn compute_stats_for_day(conn: &Connection, day: &str) -> Result<scoring::St
                 }
             }
         }
-        if bucket == "productive" {
-            if let Some(m) = local_minutes(&b.first_seen) {
-                first_productive = Some(first_productive.map_or(m, |cur| cur.min(m)));
-            }
-        }
     }
+
+    let first_productive = timeline_for_day(conn, &day, 20)?
+        .blocks
+        .into_iter()
+        .find(|block| {
+            !block.idle
+                && block.bucket == "productive"
+                && block.duration_seconds >= MIN_PRODUCTIVE_BLOCK_SECONDS
+        })
+        .and_then(|block| local_minutes(&block.start));
 
     Ok(scoring::Stats {
         cat_seconds,
@@ -1141,7 +1148,7 @@ fn refresh_timeline_highlights(blocks: &mut [TimelineBlock]) {
                     Some((j, duration)) if duration >= block.duration_seconds => (j, duration),
                     _ => (i, block.duration_seconds),
                 });
-                if first_prod.is_none() {
+                if first_prod.is_none() && block.duration_seconds >= MIN_PRODUCTIVE_BLOCK_SECONDS {
                     first_prod = Some(i);
                 }
             }
@@ -1582,7 +1589,7 @@ pub fn timeline_for_day(conn: &Connection, day: &str, max_gap: i64) -> Result<Ti
                     Some((j, dj)) if dj >= b.duration_seconds => (j, dj),
                     _ => (i, b.duration_seconds),
                 });
-                if first_prod.is_none() {
+                if first_prod.is_none() && b.duration_seconds >= MIN_PRODUCTIVE_BLOCK_SECONDS {
                     first_prod = Some(i);
                 }
             }
@@ -2150,7 +2157,6 @@ fn build_review_input(conn: &Connection) -> Result<(ScoreReport, ReviewInput), S
     let targets = target_metrics(conn);
     let mut cat_seconds: HashMap<String, i64> = HashMap::new();
     let mut target_seconds: HashMap<String, i64> = HashMap::new();
-    let mut first_prod: Option<i64> = None;
     let mut prod_by_label: HashMap<String, i64> = HashMap::new();
     let mut dist_by_label: HashMap<String, i64> = HashMap::new();
     let mut biggest_focus: Option<(String, i64)> = None;
@@ -2176,9 +2182,6 @@ fn build_review_input(conn: &Connection) -> Result<(ScoreReport, ReviewInput), S
             }
         }
         if bucket == "productive" {
-            if let Some(m) = local_minutes(&b.first_seen) {
-                first_prod = Some(first_prod.map_or(m, |c| c.min(m)));
-            }
             *prod_by_label.entry(b.label.clone()).or_insert(0) += b.seconds;
             if biggest_focus.as_ref().map_or(true, |(_, s)| b.seconds > *s) {
                 biggest_focus = Some((b.label.clone(), b.seconds));
@@ -2190,6 +2193,17 @@ fn build_review_input(conn: &Connection) -> Result<(ScoreReport, ReviewInput), S
             }
         }
     }
+
+    let first_prod = timeline_for_day(conn, &day, 20)
+        .ok()
+        .and_then(|timeline| {
+            timeline.blocks.into_iter().find(|block| {
+                !block.idle
+                    && block.bucket == "productive"
+                    && block.duration_seconds >= MIN_PRODUCTIVE_BLOCK_SECONDS
+            })
+        })
+        .and_then(|block| local_minutes(&block.start));
 
     let stats = scoring::Stats {
         cat_seconds: cat_seconds.clone(),
@@ -2867,6 +2881,31 @@ mod tests {
             goal_related: false,
             output_linked: false,
         }
+    }
+
+    #[test]
+    fn first_productive_requires_five_sustained_minutes() {
+        let mut blocks = vec![
+            timeline_test_block(
+                "Quick work tab",
+                "2026-07-28T08:00:00Z",
+                20,
+                "productive",
+                "productive",
+            ),
+            timeline_test_block(
+                "DaVinci Resolve",
+                "2026-07-28T18:00:00Z",
+                MIN_PRODUCTIVE_BLOCK_SECONDS,
+                "business",
+                "productive",
+            ),
+        ];
+
+        refresh_timeline_highlights(&mut blocks);
+
+        assert!(!blocks[0].first_productive);
+        assert!(blocks[1].first_productive);
     }
 
     #[test]

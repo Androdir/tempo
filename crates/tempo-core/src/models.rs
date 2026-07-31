@@ -797,6 +797,7 @@ pub struct AccountabilitySettings {
     pub distraction_warn_minutes: i64,
     pub eod_popup_enabled: bool,
     pub eod_popup_time: String,
+    pub main_goal_deadline: String,
 }
 
 /// One day's roll-up inside the weekly review.

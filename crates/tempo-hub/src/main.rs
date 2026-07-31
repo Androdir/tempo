@@ -1017,6 +1017,72 @@ fn dispatch(conn: &Connection, cmd: &str, args: &Value) -> Result<Value, String>
             scoring::delete_rule(conn, id)?;
             Ok(Value::Null)
         }
+        "get_accountability_settings" => Ok(json!({
+            "distractionWarnEnabled": settings::get_bool(
+                conn,
+                settings::DISTRACTION_WARN_ENABLED,
+                true,
+            ),
+            "distractionWarnMinutes": settings::get_int(
+                conn,
+                settings::DISTRACTION_WARN_MINUTES,
+                settings::DEFAULT_DISTRACTION_MINUTES,
+            ),
+            "eodPopupEnabled": settings::get_bool(conn, settings::EOD_POPUP_ENABLED, false),
+            "eodPopupTime": settings::get_setting(conn, settings::EOD_POPUP_TIME)
+                .unwrap_or_else(|| settings::DEFAULT_EOD_TIME.to_string()),
+            "mainGoalDeadline": settings::get_setting(conn, settings::MAIN_GOAL_DEADLINE)
+                .unwrap_or_default(),
+        })),
+        "set_accountability_setting" => {
+            let key = args
+                .get("key")
+                .and_then(|value| value.as_str())
+                .ok_or("missing key")?;
+            let raw = args
+                .get("value")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let allowed = [
+                settings::DISTRACTION_WARN_ENABLED,
+                settings::DISTRACTION_WARN_MINUTES,
+                settings::EOD_POPUP_ENABLED,
+                settings::EOD_POPUP_TIME,
+                settings::MAIN_GOAL_DEADLINE,
+            ];
+            if !allowed.contains(&key) {
+                return Err(format!("unknown setting: {key}"));
+            }
+            let value = if key == settings::DISTRACTION_WARN_MINUTES {
+                raw.trim()
+                    .parse::<i64>()
+                    .map_err(|_| "minutes must be a number".to_string())?
+                    .clamp(1, 240)
+                    .to_string()
+            } else if key == settings::EOD_POPUP_TIME || key == settings::MAIN_GOAL_DEADLINE {
+                let value = raw.trim();
+                if key == settings::MAIN_GOAL_DEADLINE && value.is_empty() {
+                    String::new()
+                } else {
+                    let valid = value.split_once(':').is_some_and(|(hour, minute)| {
+                        hour.len() == 2
+                            && minute.len() == 2
+                            && hour.parse::<u32>().is_ok_and(|number| number < 24)
+                            && minute.parse::<u32>().is_ok_and(|number| number < 60)
+                    });
+                    if !valid {
+                        return Err("time must be HH:MM (24-hour)".into());
+                    }
+                    value.to_string()
+                }
+            } else if raw == "true" || raw == "1" {
+                "1".into()
+            } else {
+                "0".into()
+            };
+            settings::set_setting(conn, key, &value).map_err(|error| error.to_string())?;
+            Ok(Value::Null)
+        }
         "get_streak_definitions" => {
             let defs: Vec<models::StreakDefinition> = tempo_core::streaks::load_defs(conn)
                 .into_iter()

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   deleteScoreRule,
+  getAccountabilitySettings,
   getCategoryDefinitions,
   getCheckinDefinitions,
   getDailyScore,
@@ -8,6 +9,7 @@ import {
   resetScoringWeights,
   setScoringThreshold,
   setScoringWeight,
+  setAccountabilitySetting,
   upsertScoreRule,
 } from "../api";
 import { formatDuration, formatLongDate } from "../format";
@@ -53,6 +55,7 @@ export default function DailyScore() {
   const [checkinDefs, setCheckinDefs] = useState<CheckinDefinition[]>([]);
   const [categories, setCategories] = useState<CategoryDefinition[]>([]);
   const [rules, setRules] = useState<ScoreRule[]>([]);
+  const [goalDeadline, setGoalDeadline] = useState("");
 
   const [newLabel, setNewLabel] = useState("");
   const [newKind, setNewKind] = useState<ScoreRuleKind>("checkin");
@@ -62,16 +65,18 @@ export default function DailyScore() {
 
   const load = useCallback(async () => {
     try {
-      const [r, c, cats, scoreRules] = await Promise.all([
+      const [r, c, cats, scoreRules, accountability] = await Promise.all([
         getDailyScore(),
         getCheckinDefinitions(),
         getCategoryDefinitions(),
         getScoreRules(),
+        getAccountabilitySettings(),
       ]);
       setReport(r);
       setCheckinDefs(c);
       setCategories(cats);
       setRules(scoreRules);
+      setGoalDeadline(accountability.mainGoalDeadline);
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -188,6 +193,36 @@ export default function DailyScore() {
         <div className="score-hero-body">
           <div className="verdict-pill" style={{ background: color }}>{VERDICT_LABEL[r.verdict] ?? r.verdict}</div>
           <p className="score-suggestion">💡 {r.suggestion}</p>
+          <div className="score-deadline-setting">
+            <div>
+              <label htmlFor="main-goal-deadline">Preferred main-goal deadline</label>
+              <p>Planning guidance only. Finishing later still counts for the same score.</p>
+            </div>
+            <div className="score-deadline-control">
+              <input
+                id="main-goal-deadline"
+                className="search"
+                type="time"
+                value={goalDeadline}
+                onChange={(event) => setGoalDeadline(event.target.value)}
+                onBlur={(event) => {
+                  const value = event.currentTarget.value;
+                  run(() => setAccountabilitySetting("main_goal_deadline", value));
+                }}
+              />
+              {goalDeadline && (
+                <button
+                  className="btn btn-small"
+                  onClick={() => {
+                    setGoalDeadline("");
+                    run(() => setAccountabilitySetting("main_goal_deadline", ""));
+                  }}
+                >
+                  No deadline
+                </button>
+              )}
+            </div>
+          </div>
         </div>
       </div>
 

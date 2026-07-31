@@ -568,7 +568,16 @@ pub fn build_report(
     biggest_leaks.sort_by(|a, b| a.weight.cmp(&b.weight)); // most negative first
     biggest_leaks.truncate(3);
 
-    let suggestion = build_suggestion(&rules, &lines, stats, checkins, &main_goal_name);
+    let goal_deadline = crate::settings::get_setting(conn, crate::settings::MAIN_GOAL_DEADLINE)
+        .filter(|value| !value.trim().is_empty());
+    let suggestion = build_suggestion(
+        &rules,
+        &lines,
+        stats,
+        checkins,
+        &main_goal_name,
+        goal_deadline.as_deref(),
+    );
 
     let mut category_minutes: Vec<CategoryMinutes> = stats
         .cat_seconds
@@ -607,6 +616,7 @@ fn build_suggestion(
     stats: &Stats,
     checkins: &Checkins,
     main_goal_name: &Option<String>,
+    goal_deadline: Option<&str>,
 ) -> String {
     let mut cands: Vec<(i64, String)> = Vec::new();
 
@@ -623,9 +633,13 @@ fn build_suggestion(
             .as_ref()
             .map(|n| format!(" ({n})"))
             .unwrap_or_default();
+        let timing = goal_deadline
+            .and_then(format_goal_deadline)
+            .map(|deadline| format!(" by your preferred {deadline} deadline"))
+            .unwrap_or_else(|| " when your schedule allows".to_string());
         cands.push((
             gain,
-            format!("Finish your main goal{suffix} before 2pm — worth {gain} points and removes the penalty."),
+            format!("Finish your main goal{suffix}{timing} — worth {gain} points and removes the penalty."),
         ));
     }
 
@@ -670,6 +684,25 @@ fn build_suggestion(
         .unwrap_or_else(|| "Strong, balanced day — keep the momentum tomorrow.".to_string())
 }
 
+fn format_goal_deadline(value: &str) -> Option<String> {
+    let (hour, minute) = value.split_once(':')?;
+    let hour = hour.parse::<u32>().ok()?;
+    let minute = minute.parse::<u32>().ok()?;
+    if hour >= 24 || minute >= 60 {
+        return None;
+    }
+    let suffix = if hour < 12 { "am" } else { "pm" };
+    let display_hour = match hour % 12 {
+        0 => 12,
+        value => value,
+    };
+    Some(if minute == 0 {
+        format!("{display_hour}{suffix}")
+    } else {
+        format!("{display_hour}:{minute:02}{suffix}")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -686,6 +719,14 @@ mod tests {
         assert_eq!(verdict(30), "bad");
         assert_eq!(verdict(29), "cooked");
         assert_eq!(verdict(0), "cooked");
+    }
+
+    #[test]
+    fn formats_optional_goal_deadline() {
+        assert_eq!(format_goal_deadline("00:00").as_deref(), Some("12am"));
+        assert_eq!(format_goal_deadline("14:30").as_deref(), Some("2:30pm"));
+        assert_eq!(format_goal_deadline("24:00"), None);
+        assert_eq!(format_goal_deadline(""), None);
     }
 
     #[test]

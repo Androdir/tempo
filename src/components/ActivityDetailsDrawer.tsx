@@ -17,6 +17,7 @@ import { CategoryBadge, ProjectTag } from "./ui";
 interface ActivityDetailsDrawerProps {
   id?: number | null;
   activity?: ActivityLogEntry | null;
+  relatedActivities?: ActivityLogEntry[];
   onClose: () => void;
   onCorrected?: () => void;
 }
@@ -100,6 +101,7 @@ export default function ActivityDetailsDrawer({
   id = null,
   activity = null,
   onClose,
+  relatedActivities = [],
   onCorrected,
 }: ActivityDetailsDrawerProps) {
   const [detail, setDetail] = useState<ActivityDetail | null>(null);
@@ -177,6 +179,16 @@ export default function ActivityDetailsDrawer({
       blockKey: activity?.blockKey ?? detail?.blockKey ?? "",
     };
   }, [activity, detail]);
+  const relatedContexts = useMemo(() => {
+    const seen = new Set<string>();
+    return relatedActivities.filter((entry) => {
+      const key = `${entry.source}|${entry.title.trim().toLocaleLowerCase()}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).slice(0, 8);
+  }, [relatedActivities]);
+
 
   async function doCorrect(category: string) {
     if (!view) return;
@@ -299,6 +311,22 @@ export default function ActivityDetailsDrawer({
                 <span className="muted-num">No project assigned</span>
               )}
             </Row>
+
+            {relatedContexts.length > 1 && (
+              <div className="detail-section">
+                <div className="detail-section-title">Recent contexts</div>
+                <p className="detail-help">These are window titles or screen observations from the same app/site, not separate apps.</p>
+                <div className="activity-context-list">
+                  {relatedContexts.map((entry) => (
+                    <div className="activity-context-row" key={`${entry.source}|${entry.blockKey}|${entry.title}`}>
+                      <span className="src-tag">{entry.source}</span>
+                      <span className="ellip">{entry.title || entry.label}</span>
+                      <span className="muted-num">{entry.source === "screen" ? new Date(entry.lastSeen).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : formatDuration(entry.seconds)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             <div className="detail-section match-explanation">
               <div className="detail-section-title">Why was this matched?</div>

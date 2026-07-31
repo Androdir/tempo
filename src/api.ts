@@ -577,13 +577,13 @@ export async function setLaunchAtLogin(enabled: boolean): Promise<void> {
 }
 
 export async function getAccountabilitySettings(): Promise<AccountabilitySettings> {
-  if (isTauri()) return invoke<AccountabilitySettings>("get_accountability_settings");
+  if (isTauri() || isRemote()) return callBackend<AccountabilitySettings>("get_accountability_settings");
   return { ...mockAccountability };
 }
 
 export async function setAccountabilitySetting(key: string, value: string): Promise<void> {
-  if (isTauri()) {
-    await invoke("set_accountability_setting", { key, value });
+  if (isTauri() || isRemote()) {
+    await callBackend("set_accountability_setting", { key, value });
     return;
   }
   if (key === "distraction_warn_enabled") mockAccountability.distractionWarnEnabled = value === "1";
@@ -591,6 +591,7 @@ export async function setAccountabilitySetting(key: string, value: string): Prom
     mockAccountability.distractionWarnMinutes = Math.max(1, Math.min(240, parseInt(value, 10) || 20));
   else if (key === "eod_popup_enabled") mockAccountability.eodPopupEnabled = value === "1";
   else if (key === "eod_popup_time") mockAccountability.eodPopupTime = value;
+  else if (key === "main_goal_deadline") mockAccountability.mainGoalDeadline = value;
 }
 
 export async function getFocusSession(): Promise<FocusSession | null> {
@@ -1519,7 +1520,9 @@ function mockScore(): ScoreReport {
   const suggestion = !sortedGoals.length
     ? "Add a main goal and start tracking to build today's score."
     : !mainGoalDone
-      ? "Finish your main goal before 2pm — it's worth the most points."
+      ? mockAccountability.mainGoalDeadline
+        ? `Finish your main goal by your preferred ${new Date(`2000-01-01T${mockAccountability.mainGoalDeadline}`).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} deadline — it's worth the most points.`
+        : "Finish your main goal when your schedule allows — it's worth the most points."
       : "Strong, balanced day — keep the momentum tomorrow.";
 
   return {
@@ -1544,6 +1547,7 @@ let mockAccountability: AccountabilitySettings = {
   distractionWarnMinutes: 20,
   eodPopupEnabled: false,
   eodPopupTime: "21:00",
+  mainGoalDeadline: "",
 };
 
 let mockFocus: FocusSession | null = null;
@@ -1587,9 +1591,12 @@ function mockTimeline(day: string): TimelineDay {
   const nonIdle = blocks.filter((b) => !b.idle);
   const prod = nonIdle.filter((b) => b.bucket === "productive");
   const dist = nonIdle.filter((b) => b.bucket === "distracting");
+  const qualifyingProd = prod.filter((b) => b.durationSeconds >= 5 * 60);
   if (prod.length) {
     prod.reduce((a, b) => (b.durationSeconds > a.durationSeconds ? b : a)).longestProductive = true;
-    prod[0].firstProductive = true;
+  }
+  if (qualifyingProd.length) {
+    qualifyingProd[0].firstProductive = true;
   }
   if (dist.length) {
     dist.reduce((a, b) => (b.durationSeconds > a.durationSeconds ? b : a)).biggestDistraction = true;
@@ -1613,7 +1620,7 @@ function mockTimeline(day: string): TimelineDay {
     idleSeconds: sum((b) => b.idle),
     productiveSeconds: sum((b) => !b.idle && b.bucket === "productive"),
     distractedSeconds: sum((b) => !b.idle && b.bucket === "distracting"),
-    firstProductiveStart: prod.length ? prod[0].start : null,
+    firstProductiveStart: qualifyingProd.length ? qualifyingProd[0].start : null,
     goals: [],
   };
 }

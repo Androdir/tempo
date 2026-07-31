@@ -28,6 +28,8 @@ pub const DISTRACTION_WARN_ENABLED: &str = "distraction_warn_enabled";
 pub const DISTRACTION_WARN_MINUTES: &str = "distraction_warn_minutes";
 pub const EOD_POPUP_ENABLED: &str = "eod_popup_enabled";
 pub const EOD_POPUP_TIME: &str = "eod_popup_time";
+/// Optional HH:MM planning target for the day's main goal. Empty means no deadline.
+pub const MAIN_GOAL_DEADLINE: &str = "main_goal_deadline";
 // Accountability runtime state (not user-configured).
 pub const EOD_LAST_SHOWN: &str = "eod_last_shown";
 pub const DISTRACTION_SNOOZE_UNTIL: &str = "distraction_snooze_until";
@@ -159,6 +161,7 @@ pub fn ensure_defaults(conn: &Connection) -> rusqlite::Result<()> {
     )?;
     set_if_absent(conn, EOD_POPUP_ENABLED, "0")?; // OFF by default
     set_if_absent(conn, EOD_POPUP_TIME, DEFAULT_EOD_TIME)?;
+    set_if_absent(conn, MAIN_GOAL_DEADLINE, "")?;
     set_if_absent(conn, RETENTION_DAYS, &DEFAULT_RETENTION_DAYS.to_string())?;
     set_if_absent(conn, OUTPUT_WATCH_ENABLED, "1")?;
     set_if_absent(conn, LOCKIN_AUTO_ENABLED, "1")?;
