@@ -150,6 +150,12 @@ not required for one Windows computer. If you do want it, the
 secret, and exposes it to your own Tailscale network through a private HTTPS
 URL. Paste that exact URL into Tempo on each device; do not open router ports.
 
+After pairing the Windows app, select **Sync projects & rules now**. This sends
+the desktop's projects, categories, app and website rules, and classification
+policies immediately. **Import history** also resets configuration sync, but is
+intended for copying historical activity. Project configuration flows from the
+Windows desktop to the Hub; edits made only in the mobile/Hub dashboard do not copy back.
+
 ## Pause and protect private context
 
 Use **Settings → Tracking → Pause tracking** (or the tray menu) for private time. Add sensitive apps such as a password manager to the title-exclusion list when you still want accurate time totals but never want Tempo to store their window titles. Browser samples always discard query strings and fragments; configured sensitive domains retain only their origin. These controls are local to each device.

@@ -466,6 +466,11 @@ export async function importHistoryToHub(): Promise<void> {
   if (isTauri()) await invoke("import_history_to_hub");
 }
 
+export async function syncConfigurationNow(): Promise<number> {
+  if (isTauri()) return invoke<number>("sync_configuration_now");
+  throw new Error("Configuration sync runs from the desktop app.");
+}
+
 export function onSyncStatus(cb: () => void): Promise<() => void> {
   return listenTo<unknown>("sync-status", () => cb());
 }

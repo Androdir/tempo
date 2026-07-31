@@ -151,12 +151,18 @@ In Tempo:
 3. Paste the pairing secret from the Pi.
 4. Select **Pair this device**.
 5. Select **Import history** if you want to copy existing local events to the Hub.
+6. Select **Sync projects & rules now** to immediately replace old Hub examples or
+   stale matching configuration with the projects, categories, and rules from this desktop.
 
 The desktop still records locally. If the Pi or Tailscale is temporarily
 offline, events remain queued and upload later.
 
 A successful setup shows **Connected**, a recent sync time, and zero queued
 events after the next sync cycle.
+
+Project configuration currently has one source of truth: the Windows desktop.
+Changes made in the Hub dashboard do not copy back to Windows and may be replaced
+the next time the desktop sends its configuration.
 
 ## 6. Connect the Android tracker
 

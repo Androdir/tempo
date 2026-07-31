@@ -673,8 +673,26 @@ Delete that file to wipe all history. Nothing is stored anywhere else.
 | Mouse position | ❌ never read |
 | Audio          | ❌ never accessed (media detection reads only a play/pause flag, never sound) |
 | Screenshots    | ❌ never taken to disk (if OCR enabled, RAM-only, auto-discarded) |
-| Network/upload | ❌ none from the app UI — strict CSP, no outbound client |
-| Storage        | ✅ local SQLite only |
+| Network/upload | ✅ local-only by default; optional sync goes only to your configured self-hosted Hub |
+| Storage        | ✅ desktop SQLite; an optional Hub keeps its own shared SQLite database |
+
+When Hub sync is enabled, Tempo sends event records rather than the database file:
+
+- Desktop samples: timestamp/day, app name, permitted window title, executable path,
+  duration, and idle state.
+- Browser samples: timestamp/day, domain, URL with query strings and fragments removed,
+  permitted page title, duration, idle state, content type, and—only when page capture is
+  enabled for that domain—the locally generated summary and keywords. Raw page-text excerpts
+  remain on the desktop and are not included in Hub events.
+- Optional records: completed focus-session details, goals, check-ins, notes, detected output
+  file metadata, and the projects/categories/rules needed to produce the shared dashboard.
+- Android samples: app label, package name, foreground start time, and duration. Android does
+  not expose window text, the page inside an app, or browser domains to Tempo.
+
+Smart screen OCR is a separate Windows-only opt-in. It captures the primary screen in memory,
+runs Windows OCR locally, immediately discards the pixels, and stores a short summary plus
+keywords after sensitive-text filtering. OCR samples are currently local to the desktop and are
+not sent to Tempo Hub.
 
 ---
 
@@ -774,8 +792,9 @@ Pick your level — each builds on the last:
 1. Install Tailscale on the computer and sign into the same tailnet.
 2. In Tempo, open **Settings → Connections**, choose *Connect to Tempo Hub*, and paste the exact
    HTTPS URL plus the secret from the Pi's `.env` file.
-3. Choose **Pair**, then **Import history** once if you want existing desktop data on the Hub.
-   Tempo continues tracking locally and safely queues uploads while the Hub is unavailable.
+3. Choose **Pair**, then **Sync projects & rules now**. Choose **Import history** once if you also
+   want existing desktop activity on the Hub. Tempo continues tracking locally and safely queues
+   uploads while the Hub is unavailable.
 
 **C — Add an Android phone.**
 

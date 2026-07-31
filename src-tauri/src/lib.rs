@@ -291,6 +291,7 @@ pub fn run() {
             sync::set_app_mode,
             sync::pair_with_hub,
             sync::import_history_to_hub,
+            sync::sync_configuration_now,
             commands::get_llm_settings,
             commands::set_llm_setting,
             commands::test_ollama_connection,

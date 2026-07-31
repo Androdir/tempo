@@ -1056,6 +1056,61 @@ fn blocks_are_close(a: &TimelineBlock, b: &TimelineBlock, tolerance_seconds: i64
     }
 }
 
+/// Reconnect identical activities that were split only because the tracker
+/// missed a short stretch of samples. This is intentionally overview-only:
+/// Exact retains every observed boundary for auditing and corrections.
+///
+/// Durations remain the sum of captured time rather than inventing activity
+/// inside the missing interval. The start/end range still shows the complete
+/// observed session span.
+fn join_same_activity_across_tracking_gaps(
+    blocks: &[TimelineBlock],
+    max_tracking_gap_seconds: i64,
+) -> Vec<TimelineBlock> {
+    if max_tracking_gap_seconds <= 0 {
+        return blocks.to_vec();
+    }
+
+    let mut overview: Vec<TimelineBlock> = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        let should_join = overview.last().is_some_and(|previous| {
+            same_overview_activity(previous, block)
+                && blocks_are_close(previous, block, max_tracking_gap_seconds)
+        });
+
+        if !should_join {
+            overview.push(block.clone());
+            continue;
+        }
+
+        let previous = overview.last_mut().expect("checked above");
+        previous.end = block.end.clone();
+        previous.duration_seconds += block.duration_seconds;
+        previous.title = block.title.clone();
+        previous.summary = block.summary.clone().or(previous.summary.clone());
+        previous.sample_count += block.sample_count;
+        previous.absorbed_seconds += block.absorbed_seconds;
+        previous.absorbed_count += block.absorbed_count;
+        previous.confidence = previous.confidence.min(block.confidence);
+        previous.project_confidence = previous.project_confidence.min(block.project_confidence);
+        previous.classifier = if previous.classifier == "manual" || block.classifier == "manual" {
+            "manual".to_string()
+        } else if previous.classifier == "llm" || block.classifier == "llm" {
+            "llm".to_string()
+        } else {
+            "rule".to_string()
+        };
+        previous.goal_related |= block.goal_related;
+        previous.output_linked |= block.output_linked;
+        previous.longest_productive = false;
+        previous.biggest_distraction = false;
+        previous.first_productive = false;
+    }
+
+    refresh_timeline_highlights(&mut overview);
+    overview
+}
+
 fn refresh_timeline_highlights(blocks: &mut [TimelineBlock]) {
     let mut longest_prod: Option<(usize, i64)> = None;
     let mut biggest_dist: Option<(usize, i64)> = None;
@@ -1576,7 +1631,12 @@ pub fn timeline_for_day(conn: &Connection, day: &str, max_gap: i64) -> Result<Ti
         }
     }
 
-    let overview_blocks = smooth_brief_interruptions(&blocks, 20);
+    // Full-screen apps can occasionally leave short gaps in desktop samples.
+    // Overview treats up to 90 seconds between otherwise identical adjacent
+    // blocks as one session. Exact retains the original evidence.
+    let overview_runs = join_same_activity_across_tracking_gaps(&blocks, 90);
+    let overview_blocks = smooth_brief_interruptions(&overview_runs, 20);
+
     let outputs: Vec<CheckinValue> = checkin_values_for_day(conn, day)
         .into_iter()
         .filter(|c| c.value > 0)
@@ -2831,6 +2891,100 @@ mod tests {
         assert_eq!(overview[0].absorbed_seconds, 10);
         assert_eq!(overview[0].absorbed_count, 1);
         assert!(overview[0].longest_productive);
+    }
+
+    #[test]
+    fn overview_joins_same_app_across_short_tracking_gaps() {
+        let blocks = vec![
+            timeline_test_block(
+                "Dead by Daylight",
+                "2026-07-28T12:36:00Z",
+                60,
+                "distraction",
+                "distracting",
+            ),
+            timeline_test_block(
+                "Dead by Daylight",
+                "2026-07-28T12:38:00Z",
+                60,
+                "distraction",
+                "distracting",
+            ),
+            timeline_test_block(
+                "Dead by Daylight",
+                "2026-07-28T12:39:00Z",
+                120,
+                "distraction",
+                "distracting",
+            ),
+        ];
+
+        let overview = join_same_activity_across_tracking_gaps(&blocks, 90);
+
+        assert_eq!(overview.len(), 1);
+        assert_eq!(overview[0].label, "Dead by Daylight");
+        assert_eq!(overview[0].start, "2026-07-28T12:36:00+00:00");
+        assert_eq!(overview[0].end, "2026-07-28T12:41:00+00:00");
+        assert_eq!(overview[0].duration_seconds, 240);
+        assert_eq!(overview[0].sample_count, 3);
+        assert!(overview[0].biggest_distraction);
+    }
+
+    #[test]
+    fn overview_keeps_separate_sessions_after_a_long_gap() {
+        let blocks = vec![
+            timeline_test_block(
+                "Dead by Daylight",
+                "2026-07-28T12:36:00Z",
+                60,
+                "distraction",
+                "distracting",
+            ),
+            timeline_test_block(
+                "Dead by Daylight",
+                "2026-07-28T12:40:00Z",
+                60,
+                "distraction",
+                "distracting",
+            ),
+        ];
+
+        assert_eq!(
+            join_same_activity_across_tracking_gaps(&blocks, 90).len(),
+            2
+        );
+    }
+
+    #[test]
+    fn overview_does_not_join_across_an_observed_app_switch() {
+        let blocks = vec![
+            timeline_test_block(
+                "Dead by Daylight",
+                "2026-07-28T12:36:00Z",
+                60,
+                "distraction",
+                "distracting",
+            ),
+            timeline_test_block(
+                "Telegram",
+                "2026-07-28T12:37:00Z",
+                60,
+                "distraction",
+                "distracting",
+            ),
+            timeline_test_block(
+                "Dead by Daylight",
+                "2026-07-28T12:38:00Z",
+                60,
+                "distraction",
+                "distracting",
+            ),
+        ];
+
+        assert_eq!(
+            join_same_activity_across_tracking_gaps(&blocks, 90).len(),
+            3
+        );
     }
 
     #[test]

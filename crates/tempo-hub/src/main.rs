@@ -244,11 +244,13 @@ fn api_route(
             };
             let mut stored = 0i64;
             let mut duplicates = 0i64;
+            let mut failed = 0i64;
             for e in &batch.events {
                 match events::ingest_event(&conn, &device_id, e) {
                     Ok(true) => stored += 1,
                     Ok(false) => duplicates += 1,
                     Err(err) => {
+                        failed += 1;
                         let _ = conn.execute(
                             "INSERT INTO sync_errors (timestamp, context, message) VALUES (?1, 'ingest', ?2)",
                             params![chrono::Utc::now().to_rfc3339(), err.to_string()],
@@ -256,10 +258,26 @@ fn api_route(
                     }
                 }
             }
-            (
-                200,
-                json!({"ok": true, "stored": stored, "duplicates": duplicates}).to_string(),
-            )
+            if failed > 0 {
+                (
+                    500,
+                    json!({
+                        "ok": false,
+                        "stored": stored,
+                        "duplicates": duplicates,
+                        "failed": failed,
+                        "classificationVersion": 2,
+                        "error": "one or more events could not be applied"
+                    })
+                    .to_string(),
+                )
+            } else {
+                (
+                    200,
+                    json!({"ok": true, "stored": stored, "duplicates": duplicates, "failed": 0, "classificationVersion": 2})
+                        .to_string(),
+                )
+            }
         }
 
         // ---- web dashboard transport (pairing secret as web token) ----

@@ -1,5 +1,12 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
-import { getSyncStatus, importHistoryToHub, onSyncStatus, pairWithHub, setAppMode } from "../api";
+import {
+  getSyncStatus,
+  importHistoryToHub,
+  onSyncStatus,
+  pairWithHub,
+  setAppMode,
+  syncConfigurationNow,
+} from "../api";
 import type { SyncStatus } from "../types";
 
 export default function SyncSettings() {
@@ -56,12 +63,31 @@ export default function SyncSettings() {
   }
 
   async function importHistory() {
+    setBusy(true);
+    setError(null);
     try {
       await importHistoryToHub();
-      setMsg("Re-queued local history for upload.");
+      setMsg("Re-queued local history and configuration for upload.");
       await load();
     } catch (err) {
       setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function syncConfiguration() {
+    setBusy(true);
+    setError(null);
+    setMsg(null);
+    try {
+      await syncConfigurationNow();
+      setMsg("Projects, categories and matching rules synced to the Hub.");
+      await load();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -123,9 +149,14 @@ export default function SyncSettings() {
             {busy ? "Pairing…" : "Pair this device"}
           </button>
           {hub && status?.paired && (
-            <button type="button" className="btn" onClick={importHistory}>
-              Import history
-            </button>
+            <>
+              <button type="button" className="btn" onClick={syncConfiguration} disabled={busy}>
+                Sync projects &amp; rules now
+              </button>
+              <button type="button" className="btn" onClick={importHistory} disabled={busy}>
+                Import history
+              </button>
+            </>
           )}
         </div>
       </form>

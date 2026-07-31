@@ -22,6 +22,7 @@ const HUB_TOKEN: &str = "hub_device_token";
 const HUB_DEVICE_ID: &str = "hub_device_id";
 const SYNC_LAST_AT: &str = "sync_last_at";
 const SYNC_CONNECTED: &str = "sync_connected";
+const CLASSIFICATION_SNAP_KEY: &str = "sync_snap_classification_bundle";
 
 fn normalize_hub_url(raw: &str) -> Result<String, String> {
     let raw = raw.trim();
@@ -248,8 +249,7 @@ fn sync_checkin_definitions(
     n
 }
 
-/// Keep classification configuration identical on the desktop and Hub.
-fn sync_classification_bundle(conn: &Connection, day: &str, now_ms: i64) -> i64 {
+fn classification_bundle(conn: &Connection) -> serde_json::Value {
     let mut app_rules = Vec::new();
     if let Ok(mut stmt) =
         conn.prepare("SELECT app_name, category, ai_review FROM category_rules ORDER BY app_name")
@@ -276,15 +276,42 @@ fn sync_classification_bundle(conn: &Connection, day: &str, now_ms: i64) -> i64 
             domain_rules = rows.filter_map(Result::ok).collect();
         }
     }
-    let bundle = serde_json::json!({
-        "version": 1, "appRules": app_rules, "domainRules": domain_rules,
+    serde_json::json!({
+        "version": 2, "appRules": app_rules, "domainRules": domain_rules,
         "categories": crate::models::list_category_definitions(conn).unwrap_or_default(),
         "projects": crate::projects::list_projects(conn).unwrap_or_default(),
         "policies": crate::semantic::load(conn),
+    })
+}
+
+fn has_pending_classification_bundle(conn: &Connection, snapshot: &str) -> bool {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT payload_json FROM sync_queue
+         WHERE status = 'pending' AND event_id LIKE 'classification_bundle:%'",
+    ) else {
+        return false;
+    };
+    let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) else {
+        return false;
+    };
+    let found = rows.filter_map(Result::ok).any(|payload| {
+        serde_json::from_str::<SyncEvent>(&payload)
+            .ok()
+            .and_then(|event| event.metadata)
+            .map(|metadata| metadata.to_string() == snapshot)
+            .unwrap_or(false)
     });
+    found
+}
+
+/// Keep classification configuration identical on the desktop and Hub.
+/// The snapshot is acknowledged only after a successful HTTP upload.
+fn sync_classification_bundle(conn: &Connection, day: &str, now_ms: i64) -> i64 {
+    let bundle = classification_bundle(conn);
     let snapshot = bundle.to_string();
-    const SNAP_KEY: &str = "sync_snap_classification_bundle";
-    if settings::get_setting(conn, SNAP_KEY).as_deref() == Some(snapshot.as_str()) {
+    if settings::get_setting(conn, CLASSIFICATION_SNAP_KEY).as_deref() == Some(snapshot.as_str())
+        || has_pending_classification_bundle(conn, &snapshot)
+    {
         return 0;
     }
     enqueue(
@@ -304,7 +331,6 @@ fn sync_classification_bundle(conn: &Connection, day: &str, now_ms: i64) -> i64 
             metadata: Some(bundle),
         },
     );
-    let _ = settings::set_setting(conn, SNAP_KEY, &snapshot);
     1
 }
 fn watermark(conn: &Connection, table: &str) -> i64 {
@@ -762,14 +788,47 @@ pub fn record_failure(conn: &Connection, ids: &[String], msg: &str) {
 
 fn pending(conn: &Connection) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    if let Ok(mut stmt) =
-        conn.prepare("SELECT event_id, payload_json FROM sync_queue WHERE status = 'pending' ORDER BY rowid LIMIT ?1")
-    {
-        if let Ok(rows) = stmt.query_map([BATCH as i64], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) {
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT event_id, payload_json FROM sync_queue
+         WHERE status = 'pending'
+         ORDER BY CASE WHEN event_id LIKE 'classification_bundle:%' THEN 0 ELSE 1 END, rowid
+         LIMIT ?1",
+    ) {
+        if let Ok(rows) = stmt.query_map([BATCH as i64], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        }) {
             out = rows.filter_map(Result::ok).collect();
         }
     }
     out
+}
+
+fn acknowledge_classification_bundles(conn: &Connection, items: &[(String, String)]) {
+    for (_, payload) in items {
+        let Ok(event) = serde_json::from_str::<SyncEvent>(payload) else {
+            continue;
+        };
+        if event.event_type != "classification_bundle" {
+            continue;
+        }
+        if let Some(bundle) = event.metadata {
+            let _ = settings::set_setting(conn, CLASSIFICATION_SNAP_KEY, &bundle.to_string());
+        }
+    }
+}
+
+fn validate_configuration_ack(body: &serde_json::Value) -> Result<(), String> {
+    let version = body
+        .get("classificationVersion")
+        .and_then(|value| value.as_i64())
+        .unwrap_or(0);
+    if version < 2 {
+        return Err(
+            "Tempo Hub is too old for project sync. Update and rebuild the Hub, then try again."
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 /// Upload one batch. Returns Ok(count_sent) or Err on network/server failure.
@@ -786,6 +845,9 @@ fn drain_once(db: &Db, url: &str, token: &str, device_id: &str) -> Result<i64, S
         .iter()
         .filter_map(|(_, p)| serde_json::from_str(p).ok())
         .collect();
+    let requires_configuration_ack = events
+        .iter()
+        .any(|event| event.event_type == "classification_bundle");
     let batch = EventBatch {
         device_id: device_id.to_string(),
         events,
@@ -797,16 +859,26 @@ fn drain_once(db: &Db, url: &str, token: &str, device_id: &str) -> Result<i64, S
         .set("Authorization", &format!("Bearer {token}"))
         .send_json(body);
 
-    let ids: Vec<String> = items.into_iter().map(|(id, _)| id).collect();
+    let delivery = match result {
+        Ok(response) if requires_configuration_ack => response
+            .into_json::<serde_json::Value>()
+            .map_err(|error| format!("invalid Hub acknowledgement: {error}"))
+            .and_then(|body| validate_configuration_ack(&body)),
+        Ok(_) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    };
+
+    let ids: Vec<String> = items.iter().map(|(id, _)| id.clone()).collect();
     let conn = db.lock().map_err(|e| e.to_string())?;
-    match result {
+    match delivery {
         Ok(_) => {
+            acknowledge_classification_bundles(&conn, &items);
             mark_sent(&conn, &ids);
             Ok(ids.len() as i64)
         }
-        Err(e) => {
-            record_failure(&conn, &ids, &e.to_string());
-            Err(e.to_string())
+        Err(message) => {
+            record_failure(&conn, &ids, &message);
+            Err(message)
         }
     }
 }
@@ -915,32 +987,59 @@ pub fn pair_with_hub(
     settings::set_setting(&conn, HUB_TOKEN, token).map_err(|e| e.to_string())?;
     settings::set_setting(&conn, HUB_DEVICE_ID, device_id).map_err(|e| e.to_string())?;
     settings::set_setting(&conn, APP_MODE, "hub").map_err(|e| e.to_string())?;
+    settings::set_setting(&conn, CLASSIFICATION_SNAP_KEY, "").map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn reset_sync_state(conn: &Connection, include_history: bool) {
+    if include_history {
+        for table in [
+            "activity_log",
+            "browser_activity",
+            "output_events",
+            "focus_sessions",
+        ] {
+            set_watermark(conn, table, 0);
+        }
+    }
+    for key in [
+        "sync_snap_checkin",
+        "sync_snap_checkin_defs",
+        "sync_snap_note",
+        "sync_snap_goals",
+        CLASSIFICATION_SNAP_KEY,
+    ] {
+        let _ = settings::set_setting(conn, key, "");
+    }
 }
 
 /// Re-send all local history to the hub once (resets the upload watermarks).
 #[tauri::command]
 pub fn import_history_to_hub(db: State<'_, Db>) -> Result<(), String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
-    for table in [
-        "activity_log",
-        "browser_activity",
-        "output_events",
-        "focus_sessions",
-    ] {
-        set_watermark(&conn, table, 0);
-    }
-    // Force today's mutable state (check-ins / definitions / note / goals) to
-    // re-send as well.
-    for key in [
-        "sync_snap_checkin",
-        "sync_snap_checkin_defs",
-        "sync_snap_note",
-        "sync_snap_goals",
-    ] {
-        let _ = settings::set_setting(&conn, key, "");
-    }
+    reset_sync_state(&conn, true);
     Ok(())
+}
+
+/// Force projects, categories and matching rules to the Hub immediately.
+#[tauri::command]
+pub fn sync_configuration_now(db: State<'_, Db>) -> Result<i64, String> {
+    let (url, token, device_id) = {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        let target =
+            sync_target(&conn).ok_or("Connect and pair this desktop with Tempo Hub first.")?;
+        reset_sync_state(&conn, false);
+        let day = chrono::Local::now().format("%Y-%m-%d").to_string();
+        sync_classification_bundle(&conn, &day, chrono::Utc::now().timestamp_millis());
+        target
+    };
+
+    let sent = drain_once(db.inner(), &url, &token, &device_id)?;
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    settings::set_setting(&conn, SYNC_CONNECTED, "1").map_err(|e| e.to_string())?;
+    settings::set_setting(&conn, SYNC_LAST_AT, &chrono::Utc::now().to_rfc3339())
+        .map_err(|e| e.to_string())?;
+    Ok(sent)
 }
 
 fn hostname() -> String {
@@ -983,6 +1082,17 @@ mod tests {
         assert!(normalize_hub_url("https://tempo-hub.example.ts.net/api/health").is_err());
     }
     #[test]
+    fn configuration_ack_requires_current_hub() {
+        assert!(
+            validate_configuration_ack(&serde_json::json!({"classificationVersion": 2})).is_ok()
+        );
+        assert!(
+            validate_configuration_ack(&serde_json::json!({"classificationVersion": 1})).is_err()
+        );
+        assert!(validate_configuration_ack(&serde_json::json!({})).is_err());
+    }
+
+    #[test]
     fn local_mode_has_no_sync_target() {
         let conn = db::test_conn();
         // default: no app_mode → None
@@ -1003,6 +1113,31 @@ mod tests {
     fn prime(conn: &Connection) {
         assert!(scan_and_enqueue(conn) > 0); // the seeded check-in definitions
         assert_eq!(scan_and_enqueue(conn), 0);
+    }
+
+    #[test]
+    fn classification_bundle_is_acknowledged_only_after_delivery() {
+        let conn = db::test_conn();
+        let day = "2026-07-30";
+
+        assert_eq!(sync_classification_bundle(&conn, day, 1), 1);
+        assert!(settings::get_setting(&conn, CLASSIFICATION_SNAP_KEY).is_none());
+        assert_eq!(sync_classification_bundle(&conn, day, 2), 0);
+
+        let items = pending(&conn);
+        assert_eq!(items.len(), 1);
+        acknowledge_classification_bundles(&conn, &items);
+        mark_sent(&conn, &[items[0].0.clone()]);
+
+        let expected = classification_bundle(&conn).to_string();
+        assert_eq!(
+            settings::get_setting(&conn, CLASSIFICATION_SNAP_KEY).as_deref(),
+            Some(expected.as_str())
+        );
+        assert_eq!(sync_classification_bundle(&conn, day, 3), 0);
+
+        reset_sync_state(&conn, false);
+        assert_eq!(sync_classification_bundle(&conn, day, 4), 1);
     }
 
     #[test]
@@ -1030,7 +1165,8 @@ mod tests {
         conn.execute("DELETE FROM sync_queue", []).unwrap(); // drop the def events
         seed_activity(&conn, 2);
         scan_and_enqueue(&conn);
-        let ids: Vec<String> = vec!["activity_log:1".into(), "activity_log:2".into()];
+        let ids: Vec<String> = pending(&conn).into_iter().map(|(id, _)| id).collect();
+        assert_eq!(ids.len(), 3); // two samples plus the unacknowledged config bundle
 
         // Simulate a failed upload: queue stays pending, error logged.
         record_failure(&conn, &ids, "connection refused");
@@ -1041,7 +1177,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(pend, 2);
+        assert_eq!(pend, 3);
         let errs: i64 = conn
             .query_row("SELECT COUNT(*) FROM sync_errors", [], |r| r.get(0))
             .unwrap();

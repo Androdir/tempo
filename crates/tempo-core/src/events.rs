@@ -64,8 +64,11 @@ impl SyncEvent {
 /// genuinely new, project it into the matching domain table. Returns whether the
 /// event was newly stored (false = duplicate, ignored).
 pub fn ingest_event(conn: &Connection, device_id: &str, e: &SyncEvent) -> rusqlite::Result<bool> {
+    // Keep the dedup ledger and projected rows atomic. A projection failure must
+    // not make every later retry look like an already-applied duplicate.
+    let tx = conn.unchecked_transaction()?;
     let meta = e.metadata.as_ref().map(|m| m.to_string());
-    let changed = conn.execute(
+    let changed = tx.execute(
         "INSERT OR IGNORE INTO synced_events
            (device_id, event_id, event_type, source, timestamp, day, app_name, domain, title,
             duration_seconds, category, project, metadata_json, created_at)
@@ -90,7 +93,8 @@ pub fn ingest_event(conn: &Connection, device_id: &str, e: &SyncEvent) -> rusqli
     if changed == 0 {
         return Ok(false); // duplicate upload — never double-counted
     }
-    apply_to_domain(conn, e)?;
+    apply_to_domain(&tx, e)?;
+    tx.commit()?;
     Ok(true)
 }
 
@@ -523,5 +527,27 @@ mod tests {
             })
             .unwrap();
         assert_eq!(done2, 1);
+    }
+
+    #[test]
+    fn failed_projection_does_not_poison_event_deduplication() {
+        let conn = db::test_conn();
+        conn.execute_batch(
+            "CREATE TRIGGER reject_activity BEFORE INSERT ON activity_log
+             BEGIN SELECT RAISE(ABORT, 'reject test event'); END;",
+        )
+        .unwrap();
+        let mut event = ev("activity_log:retry", "app_sample");
+        event.app_name = Some("DaVinci Resolve".into());
+        event.duration_seconds = Some(10);
+
+        assert!(ingest_event(&conn, "desktop", &event).is_err());
+        let ledger: i64 = conn
+            .query_row("SELECT COUNT(*) FROM synced_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ledger, 0);
+
+        conn.execute("DROP TRIGGER reject_activity", []).unwrap();
+        assert!(ingest_event(&conn, "desktop", &event).unwrap());
     }
 }

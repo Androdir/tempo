@@ -303,7 +303,7 @@ export default function Timeline() {
           <h1 className="page-title">Activity</h1>
           <div className="page-subtitle">
             {viewMode === "overview"
-              ? "Meaningful runs of work, without a one-sample accidental switch breaking your flow."
+              ? "Complete activity sessions, without brief tracking gaps or accidental switches splitting them up."
               : "Every captured app and website switch, with full classification details."}
           </div>
         </div>
@@ -338,7 +338,7 @@ export default function Timeline() {
         <>
           {viewMode === "overview" && (
             <div className="tl-mode-note" role="note">
-              Overview joins brief A → B → A detours back into the surrounding activity, then applies your minimum-duration filter. Hidden rows never change tracked totals and remain available in Exact.
+              Overview reconnects the same activity across brief missing samples and joins quick A → B → A detours, then applies your minimum-duration filter. Exact always keeps the original captured boundaries.
             </div>
           )}
           {viewMode === "exact" && (
