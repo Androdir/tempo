@@ -41,7 +41,14 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (prefs.isPaired()) updateStatusBar() else refreshStatus()
+        if (prefs.isPaired()) {
+            // Opening Tempo is the natural moment to show what the user just did.
+            // Request an immediate upload instead of waiting for the 15-minute job.
+            TempoApp.syncNow(this)
+            updateStatusBar()
+        } else {
+            refreshStatus()
+        }
     }
 
     // ----------------------------------------------------------------- setup

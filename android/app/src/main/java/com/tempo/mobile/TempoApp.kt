@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Context
 import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
@@ -20,6 +21,7 @@ class TempoApp : Application() {
 
     companion object {
         const val SYNC_WORK = "tempo_sync"
+        private const val SYNC_NOW_WORK = "tempo_sync_now"
 
         private fun netConstraints() = Constraints.Builder()
             .setRequiredNetworkType(NetworkType.CONNECTED)
@@ -39,7 +41,8 @@ class TempoApp : Application() {
             val request = OneTimeWorkRequestBuilder<SyncWorker>()
                 .setConstraints(netConstraints())
                 .build()
-            WorkManager.getInstance(ctx).enqueue(request)
+            WorkManager.getInstance(ctx)
+                .enqueueUniqueWork(SYNC_NOW_WORK, ExistingWorkPolicy.REPLACE, request)
         }
     }
 }

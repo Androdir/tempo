@@ -170,6 +170,20 @@ fn build_response(
     )
 }
 
+fn device_read_allowed(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "get_today_summary"
+            | "get_timeline_for_day"
+            | "get_daily_score"
+            | "get_streaks"
+            | "get_weekly_review"
+            | "get_tracked_apps"
+            | "get_tracked_domains"
+            | "get_device_breakdown"
+    )
+}
+
 fn api_route(
     db: &Db,
     cfg: &Config,
@@ -277,6 +291,35 @@ fn api_route(
                     json!({"ok": true, "stored": stored, "duplicates": duplicates, "failed": 0, "classificationVersion": 2})
                         .to_string(),
                 )
+            }
+        }
+
+        // ---- shared dashboard reads (paired device token) ----
+        // A paired desktop may read the Hub's combined activity without receiving
+        // the all-powerful pairing secret. Mutating/admin commands stay unavailable.
+        (Method::Post, "/api/device/invoke") => {
+            let Some(token) = bearer(req) else {
+                return (401, err("missing device token"));
+            };
+            let body = read_body(req);
+            let v: Value = match serde_json::from_str(&body) {
+                Ok(v) => v,
+                Err(e) => return (400, err(&format!("bad json: {e}"))),
+            };
+            let cmd = v.get("cmd").and_then(|x| x.as_str()).unwrap_or("");
+            if !device_read_allowed(cmd) {
+                return (403, err("command is not available to paired devices"));
+            }
+            let args = v.get("args").cloned().unwrap_or(Value::Null);
+            let Ok(conn) = db.lock() else {
+                return (500, err("db lock"));
+            };
+            if auth::device_for_token(&conn, &token).is_none() {
+                return (401, err("unknown or revoked device"));
+            }
+            match dispatch(&conn, cmd, &args) {
+                Ok(val) => (200, val.to_string()),
+                Err(e) => (400, err(&e)),
             }
         }
 
@@ -1517,6 +1560,15 @@ mod tests {
         assert!(auth::device_for_token(&conn, "not-a-real-token").is_none()); // invalid token
         auth::revoke_device(&conn, &id).unwrap();
         assert!(auth::device_for_token(&conn, &token).is_none()); // revoked device rejected
+    }
+
+    #[test]
+    fn paired_devices_only_receive_shared_read_commands() {
+        assert!(device_read_allowed("get_today_summary"));
+        assert!(device_read_allowed("get_timeline_for_day"));
+        assert!(device_read_allowed("get_tracked_apps"));
+        assert!(!device_read_allowed("set_category_rule"));
+        assert!(!device_read_allowed("delete_project"));
     }
 
     #[test]

@@ -112,9 +112,35 @@ async function remoteInvoke<T>(cmd: string, args: Record<string, unknown> = {}):
   return (await res.json()) as T;
 }
 
-/** Route a command to Tauri (desktop) or the hub (remote). */
+const SHARED_HUB_READ_COMMANDS = new Set([
+  "get_today_summary",
+  "get_timeline_for_day",
+  "get_daily_score",
+  "get_streaks",
+  "get_weekly_review",
+  "get_tracked_apps",
+  "get_tracked_domains",
+  "get_device_breakdown",
+]);
+
+type HubReadResult<T> = { active: boolean; value: T | null };
+
+/**
+ * Route shared activity reads through the Hub while paired, so the installed
+ * desktop app sees phone + computer activity. Local reads remain the offline
+ * fallback, and configuration/writes continue through the local-first sync path.
+ */
 async function callBackend<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
-  return isTauri() ? invoke<T>(cmd, args) : remoteInvoke<T>(cmd, args);
+  if (!isTauri()) return remoteInvoke<T>(cmd, args);
+  if (SHARED_HUB_READ_COMMANDS.has(cmd)) {
+    try {
+      const shared = await invoke<HubReadResult<T>>("read_from_hub", { cmd, args });
+      if (shared.active) return shared.value as T;
+    } catch (error) {
+      console.warn(`Tempo Hub read failed for ${cmd}; using this device's local data.`, error);
+    }
+  }
+  return invoke<T>(cmd, args);
 }
 
 // ---------------------------------------------------------------------------
@@ -311,12 +337,11 @@ export async function getStreaks(): Promise<Streak[]> {
 }
 
 /**
- * Per-device active time today. Only the hub has the multi-device ledger, so this
- * is a remote-only view: the desktop app is a single device and returns nothing.
+ * Per-device active time today. A paired desktop reads the Hub's multi-device
+ * ledger; local and preview modes return no synthetic device breakdown.
  */
 export async function getDeviceBreakdown(day: string): Promise<DeviceUsage[]> {
-  if (isRemote()) return callBackend<DeviceUsage[]>("get_device_breakdown", { day });
-  if (isTauri()) return []; // desktop is one device — the hub serves this view
+  if (isTauri() || isRemote()) return callBackend<DeviceUsage[]>("get_device_breakdown", { day });
   return mockDeviceBreakdown();
 }
 

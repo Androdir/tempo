@@ -805,8 +805,10 @@ Pick your level — each builds on the last:
    **Pair & start tracking**.
 
 Open the private HTTPS URL from any tailnet-connected browser to see the combined Hub dashboard.
-The desktop keeps its local dashboard as well. Android can contribute per-app foreground time;
-iOS can use the web dashboard but cannot contribute per-app tracking.
+When the Windows app is paired, its Today totals, Activity timeline, scores, reviews, app/site
+lists, and device breakdown also read the combined Hub activity, with local data as an offline
+fallback. Android can contribute per-app foreground time; iOS can use the web dashboard but
+cannot contribute per-app tracking.
 
 ### Architecture
 

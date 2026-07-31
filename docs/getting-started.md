@@ -155,6 +155,8 @@ the desktop's projects, categories, app and website rules, and classification
 policies immediately. **Import history** also resets configuration sync, but is
 intended for copying historical activity. Project configuration flows from the
 Windows desktop to the Hub; edits made only in the mobile/Hub dashboard do not copy back.
+When paired, the Windows app reads shared activity aggregates from the Hub (including phone
+apps) and falls back to its local database while the Hub is unavailable.
 
 ## Pause and protect private context
 

@@ -20,10 +20,10 @@ import android.os.Process
 object UsageTracker {
 
     /**
-     * Completed events in the window, plus the start time of any *still-open*
-     * foreground app. The caller sets the watermark to that start and re-scans it
-     * next run, so a session straddling two scans is neither lost nor double-counted
-     * (event ids are deterministic, so the hub dedupes any re-emission).
+     * Completed events in the window, including the elapsed portion of any app
+     * that is still open. The next scan starts at that boundary, so long sessions
+     * become visible without waiting for an app switch while deterministic ids
+     * still make retries safe.
      */
     data class Scan(val events: List<Event>, val openStart: Long?)
 
@@ -45,8 +45,9 @@ object UsageTracker {
 
     fun collect(ctx: Context, since: Long, now: Long): Scan {
         val usm = ctx.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
-        // Look back so an app already foreground at `since` is still discoverable.
-        val lookback = (since - 60L * 60L * 1000L).coerceAtLeast(0L)
+        // Look back far enough to discover an app that has stayed foreground for
+        // several hours while Android delayed background work.
+        val lookback = (since - 24L * 60L * 60L * 1000L).coerceAtLeast(0L)
         val events = usm.queryEvents(lookback, now)
 
         val out = ArrayList<Event>()
@@ -71,9 +72,11 @@ object UsageTracker {
                 }
             }
         }
-        // Whatever is still open at `now` is provisional — report its start, don't emit.
-        val openStart = if (curPkg != null) curStart else null
-        return Scan(out, openStart)
+        // Upload the completed portion of a still-open session. `emit` clips its
+        // start to the previous watermark, so later scans append rather than overlap.
+        val openPackage = curPkg
+        if (openPackage != null) emit(ctx, out, openPackage, curStart, now, since)
+        return Scan(out, null)
     }
 
     private fun emit(

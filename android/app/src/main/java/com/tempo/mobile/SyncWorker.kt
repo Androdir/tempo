@@ -28,7 +28,8 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             if (scan.events.isNotEmpty()) {
                 HubClient.postEvents(prefs.hubUrl(), prefs.token(), prefs.deviceId(), scan.events)
             }
-            // Re-examine the still-open app next time; otherwise advance to now.
+            // The collector includes the completed portion of the currently open
+            // app, so the next scan can always continue from `now`.
             prefs.setWatermark(scan.openStart ?: now)
             prefs.setLastSync(now)
             Result.success()

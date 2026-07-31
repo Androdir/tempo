@@ -78,16 +78,17 @@ buffering through any hub downtime. To re-pair against a different hub, clear th
 ## How it works (for the next dev)
 
 - `UsageTracker` reconstructs foreground intervals from `UsageStatsManager.queryEvents` and
-  emits one `app_sample` event per completed interval. Event ids are deterministic
-  (`android:<package>:<startMillis>`), so retries/overlapping scans **dedupe on the hub** and
-  never double-count. A still-open app isn't emitted until it backgrounds; its start becomes
-  the next watermark.
+  emits `app_sample` events for completed intervals and for the elapsed portion of an app that
+  is still open. Event ids are deterministic (`android:<package>:<startMillis>`), so retries
+  **dedupe on the hub** and never double-count. Each successful scan advances the watermark;
+  adjacent pieces of a long phone session are merged by the Hub timeline.
 - `HubClient` pairs (`POST /api/pair`) and uploads (`POST /api/events`) with the device token,
   using the **same wire format** as the desktop sync (`tempo_core::events::SyncEvent`). No new
   hub code was needed — phone events flow through the existing ingest → `activity_log` →
   aggregation, including the cross-device focus summary.
 - `SyncWorker` (WorkManager, every 15 min, network-constrained) scans since the watermark,
-  uploads, and advances the watermark only on success.
+  uploads, and advances the watermark only on success. Opening Tempo also requests one immediate,
+  deduplicated sync so the dashboard can show the app you were just using without a long wait.
 - `MainActivity` shows setup when unpaired, then opens the same-origin hub dashboard. It passes
   the pairing secret once in the URL fragment; the web app stores it locally and immediately
   removes the fragment from the address. External origins open in the phone's normal browser.

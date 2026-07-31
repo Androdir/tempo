@@ -74,6 +74,20 @@ fn sync_target(conn: &Connection) -> Option<(String, String, String)> {
     Some((url.trim_end_matches('/').to_string(), token, device))
 }
 
+fn hub_read_allowed(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "get_today_summary"
+            | "get_timeline_for_day"
+            | "get_daily_score"
+            | "get_streaks"
+            | "get_weekly_review"
+            | "get_tracked_apps"
+            | "get_tracked_domains"
+            | "get_device_breakdown"
+    )
+}
+
 // ------------------------------------------------------ build events from rows
 
 fn enqueue(conn: &Connection, e: &SyncEvent) {
@@ -930,6 +944,55 @@ pub struct SyncStatus {
     pub paired: bool,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubReadResult {
+    pub active: bool,
+    pub value: Option<serde_json::Value>,
+}
+
+/// Read a shared aggregate from the Hub when this desktop is paired. The Hub
+/// endpoint only accepts an explicit read-only command list, so the per-device
+/// token cannot perform administrative or arbitrary writes.
+#[tauri::command]
+pub fn read_from_hub(
+    db: State<'_, Db>,
+    cmd: String,
+    args: serde_json::Value,
+) -> Result<HubReadResult, String> {
+    if !hub_read_allowed(&cmd) {
+        return Err(format!("Hub read is not allowed for command: {cmd}"));
+    }
+    let target = {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        sync_target(&conn)
+    };
+    let Some((url, token, _)) = target else {
+        return Ok(HubReadResult {
+            active: false,
+            value: None,
+        });
+    };
+    let response = ureq::post(&format!("{url}/api/device/invoke"))
+        .timeout(Duration::from_secs(15))
+        .set("Authorization", &format!("Bearer {token}"))
+        .send_json(serde_json::json!({ "cmd": cmd, "args": args }))
+        .map_err(|error| format!("Hub read failed: {error}"))?;
+    let value = response
+        .into_json::<serde_json::Value>()
+        .map_err(|error| format!("Hub returned invalid data: {error}"))?;
+    Ok(HubReadResult {
+        active: true,
+        value: Some(value),
+    })
+}
+
+/// A local-only desktop has no multi-device ledger. This command is also the
+/// offline fallback when a paired Hub cannot answer a shared read.
+#[tauri::command]
+pub fn get_device_breakdown() -> Vec<serde_json::Value> {
+    Vec::new()
+}
 #[tauri::command]
 pub fn get_sync_status(db: State<'_, Db>) -> Result<SyncStatus, String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
@@ -1066,6 +1129,14 @@ mod tests {
         }
     }
 
+    #[test]
+    fn paired_device_bridge_only_allows_shared_reads() {
+        assert!(hub_read_allowed("get_timeline_for_day"));
+        assert!(hub_read_allowed("get_tracked_apps"));
+        assert!(hub_read_allowed("get_device_breakdown"));
+        assert!(!hub_read_allowed("set_category_rule"));
+        assert!(!hub_read_allowed("reset_database"));
+    }
     #[test]
     fn hub_urls_are_normalized_and_limited_to_http() {
         assert_eq!(
