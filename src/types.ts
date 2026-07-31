@@ -54,6 +54,19 @@ export interface TodaySummary {
   perBucket: BucketUsage[];
 }
 
+
+export interface TimeBreakdown {
+  startDate: string;
+  endDate: string;
+  dayCount: number;
+  totalActiveSeconds: number;
+  totalIdleSeconds: number;
+  totalBrowserSeconds: number;
+  perApp: AppUsage[];
+  perWebsite: WebsiteUsage[];
+  perCategory: CategoryUsage[];
+  perBucket: BucketUsage[];
+}
 /** Active time one device contributed today (hub view; idle excluded). */
 export interface DeviceUsage {
   deviceId: string;

@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use chrono::{Datelike, Duration, Local, Utc};
+use chrono::{Datelike, Duration, Local, NaiveDate, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::llm;
@@ -444,7 +444,10 @@ pub fn summary_for_day(conn: &Connection, day: &str) -> Result<TodaySummary, Str
             entry.0 += block.duration_seconds;
             entry.1 += block.sample_count;
             entry.2 = block.category.clone();
-        } else if block.source == "desktop" {
+        } else {
+            // Smart Tracking screen observations replace overlapping desktop
+            // samples in the canonical timeline. They still represent app time
+            // and must not disappear from the per-app ranking.
             let entry = app_secs
                 .entry(block.label.clone())
                 .or_insert((0, block.category.clone()));
@@ -490,6 +493,119 @@ pub fn summary_for_day(conn: &Connection, day: &str) -> Result<TodaySummary, Str
             seconds,
         }),
         per_bucket: sorted_desc(per_bucket, |bucket, seconds| BucketUsage {
+            bucket,
+            seconds,
+        }),
+    })
+}
+
+/// Reconciled app/site totals across an inclusive date range. Each day is built
+/// from the same canonical timeline as Today and Activity, so rankings cannot
+/// silently disagree with the timeline when browser or Smart Tracking samples
+/// replace overlapping desktop samples.
+pub fn time_breakdown(
+    conn: &Connection,
+    start_date: &str,
+    end_date: &str,
+) -> Result<TimeBreakdown, String> {
+    let start = NaiveDate::parse_from_str(start_date, "%Y-%m-%d")
+        .map_err(|_| "Start date must be YYYY-MM-DD".to_string())?;
+    let end = NaiveDate::parse_from_str(end_date, "%Y-%m-%d")
+        .map_err(|_| "End date must be YYYY-MM-DD".to_string())?;
+    if end < start {
+        return Err("End date must be on or after start date".into());
+    }
+    let day_count = (end - start).num_days() + 1;
+    if day_count > 366 {
+        return Err("Choose a range of 366 days or fewer".into());
+    }
+
+    let mut app_totals: HashMap<String, (i64, HashMap<String, i64>)> = HashMap::new();
+    let mut site_totals: HashMap<String, (i64, i64, HashMap<String, i64>)> = HashMap::new();
+    let mut category_totals: HashMap<String, i64> = HashMap::new();
+    let mut bucket_totals: HashMap<String, i64> = HashMap::new();
+    let mut total_active = 0i64;
+    let mut total_idle = 0i64;
+    let mut total_browser = 0i64;
+
+    for offset in 0..day_count {
+        let day = (start + Duration::days(offset))
+            .format("%Y-%m-%d")
+            .to_string();
+        let summary = summary_for_day(conn, &day)?;
+        total_active += summary.total_active_seconds;
+        total_idle += summary.total_idle_seconds;
+        total_browser += summary.total_browser_seconds;
+        for app in summary.per_app {
+            let category = app.category.unwrap_or_else(|| "uncategorized".into());
+            let entry = app_totals.entry(app.app_name).or_default();
+            entry.0 += app.seconds;
+            *entry.1.entry(category).or_insert(0) += app.seconds;
+        }
+        for site in summary.per_website {
+            let category = site.category.unwrap_or_else(|| "uncategorized".into());
+            let entry = site_totals.entry(site.domain).or_default();
+            entry.0 += site.seconds;
+            entry.1 += site.page_views;
+            *entry.2.entry(category).or_insert(0) += site.seconds;
+        }
+        for category in summary.per_category {
+            *category_totals.entry(category.category).or_insert(0) += category.seconds;
+        }
+        for bucket in summary.per_bucket {
+            *bucket_totals.entry(bucket.bucket).or_insert(0) += bucket.seconds;
+        }
+    }
+
+    let dominant = |categories: HashMap<String, i64>| {
+        categories
+            .into_iter()
+            .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
+            .and_then(|(category, _)| (category != "uncategorized").then_some(category))
+    };
+    let mut per_app: Vec<AppUsage> = app_totals
+        .into_iter()
+        .map(|(app_name, (seconds, categories))| AppUsage {
+            app_name,
+            seconds,
+            category: dominant(categories),
+        })
+        .collect();
+    per_app.sort_by(|a, b| {
+        b.seconds
+            .cmp(&a.seconds)
+            .then_with(|| a.app_name.cmp(&b.app_name))
+    });
+
+    let mut per_website: Vec<WebsiteUsage> = site_totals
+        .into_iter()
+        .map(|(domain, (seconds, page_views, categories))| WebsiteUsage {
+            domain,
+            seconds,
+            category: dominant(categories),
+            page_views,
+        })
+        .collect();
+    per_website.sort_by(|a, b| {
+        b.seconds
+            .cmp(&a.seconds)
+            .then_with(|| a.domain.cmp(&b.domain))
+    });
+
+    Ok(TimeBreakdown {
+        start_date: start_date.to_string(),
+        end_date: end_date.to_string(),
+        day_count,
+        total_active_seconds: total_active,
+        total_idle_seconds: total_idle,
+        total_browser_seconds: total_browser,
+        per_app,
+        per_website,
+        per_category: sorted_desc(category_totals, |category, seconds| CategoryUsage {
+            category,
+            seconds,
+        }),
+        per_bucket: sorted_desc(bucket_totals, |bucket, seconds| BucketUsage {
             bucket,
             seconds,
         }),
@@ -3262,5 +3378,54 @@ mod tests {
         assert_eq!(tempo[0].source, "screen");
         assert_eq!(tempo[0].category, "neutral");
         assert!(tempo[0].project.is_none());
+
+        let summary = summary_for_day(&conn, day).unwrap();
+        let ranked_tempo = summary
+            .per_app
+            .iter()
+            .find(|app| app.app_name == "Tempo")
+            .expect("screen-backed app appears in the ranking");
+        assert_eq!(ranked_tempo.seconds, timeline.active_seconds);
+        assert_eq!(
+            summary.per_app.iter().map(|app| app.seconds).sum::<i64>()
+                + summary
+                    .per_website
+                    .iter()
+                    .map(|site| site.seconds)
+                    .sum::<i64>(),
+            summary.total_active_seconds
+        );
+    }
+
+    #[test]
+    fn time_breakdown_sums_the_same_reconciled_daily_rankings() {
+        let conn = crate::db::test_conn();
+        crate::settings::ensure_defaults(&conn).unwrap();
+        for (day, seconds) in [("2026-07-27", 600), ("2026-07-28", 300)] {
+            conn.execute(
+                "INSERT INTO activity_log
+                   (timestamp, day, app_name, window_title, duration_seconds, is_idle)
+                 VALUES (?1, ?2, 'DaVinci Resolve', 'Edit', ?3, 0)",
+                params![format!("{day}T12:00:00Z"), day, seconds],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO browser_activity
+               (timestamp, day, domain, url, page_title, duration_seconds, is_idle)
+             VALUES ('2026-07-28T13:00:00Z', '2026-07-28', 'youtube.com',
+                     'https://youtube.com/', 'YouTube', 120, 0)",
+            [],
+        )
+        .unwrap();
+
+        let report = time_breakdown(&conn, "2026-07-27", "2026-07-28").unwrap();
+        assert_eq!(report.day_count, 2);
+        assert_eq!(report.total_active_seconds, 1020);
+        assert_eq!(report.per_app[0].app_name, "DaVinci Resolve");
+        assert_eq!(report.per_app[0].seconds, 900);
+        assert_eq!(report.per_website[0].domain, "youtube.com");
+        assert_eq!(report.per_website[0].seconds, 120);
+        assert!(time_breakdown(&conn, "2026-07-28", "2026-07-27").is_err());
     }
 }

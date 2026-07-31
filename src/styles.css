@@ -4965,3 +4965,32 @@ tr.row-dim .tick.off {
   .activity-context-row { grid-template-columns: auto minmax(0, 1fr); }
   .activity-context-row > .muted-num { grid-column: 2; }
 }
+
+/* Time breakdown ---------------------------------------------------------- */
+.breakdown-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; }
+.breakdown-truth { flex-basis: 100%; margin: 0; }
+.breakdown-dates { display: flex; gap: 10px; }
+.breakdown-dates label { display: grid; gap: 5px; color: var(--text-muted); font-size: 12px; font-weight: 700; }
+.breakdown-filter-row { display: grid; grid-template-columns: auto minmax(170px, 220px) minmax(200px, 1fr); gap: 12px; align-items: center; }
+.breakdown-heading { display: flex; justify-content: space-between; align-items: end; margin-top: 22px; }
+.breakdown-heading .card-hint { margin-bottom: 0; }
+.breakdown-list { display: grid; margin-top: 6px; }
+.breakdown-row { display: grid; grid-template-columns: 28px 30px minmax(180px, 1fr) minmax(120px, 1.25fr) 78px; gap: 12px; align-items: center; min-height: 64px; border-top: 1px solid var(--border); }
+.breakdown-rank { color: var(--text-faint); font-variant-numeric: tabular-nums; text-align: center; font-weight: 700; }
+.breakdown-name { min-width: 0; display: grid; gap: 5px; }
+.breakdown-name > strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.breakdown-name > span { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; color: var(--text-muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+.breakdown-bar { height: 8px; border-radius: 999px; overflow: hidden; background: var(--surface-2); }
+.breakdown-bar > span { display: block; height: 100%; border-radius: inherit; }
+.breakdown-duration { text-align: right; font-variant-numeric: tabular-nums; }
+.breakdown-legend { margin-top: 14px; }
+.breakdown-legend .legend-item b { margin-left: 4px; }
+@media (max-width: 720px) {
+  .breakdown-filter-row { grid-template-columns: 1fr; }
+  .breakdown-filter-row .segmented { overflow-x: auto; }
+  .breakdown-dates { width: 100%; }
+  .breakdown-dates label { flex: 1; min-width: 0; }
+  .breakdown-row { grid-template-columns: 24px 30px minmax(0, 1fr) auto; gap: 9px; }
+  .breakdown-bar { display: none; }
+  .breakdown-duration { font-size: 13px; }
+}

@@ -41,6 +41,7 @@ import type {
   SyncStatus,
   StreakDefinition,
   TimelineBlock,
+  TimeBreakdown,
   TimelineDay,
   TodaySummary,
   TrackingHealth,
@@ -114,6 +115,7 @@ async function remoteInvoke<T>(cmd: string, args: Record<string, unknown> = {}):
 
 const SHARED_HUB_READ_COMMANDS = new Set([
   "get_today_summary",
+  "get_time_breakdown",
   "get_timeline_for_day",
   "get_daily_score",
   "get_streaks",
@@ -150,6 +152,22 @@ async function callBackend<T>(cmd: string, args: Record<string, unknown> = {}): 
 export async function getTodaySummary(): Promise<TodaySummary> {
   if (isTauri() || isRemote()) return callBackend<TodaySummary>("get_today_summary");
   return mockSummary();
+}
+
+export async function getTimeBreakdown(startDate: string, endDate: string): Promise<TimeBreakdown> {
+  if (isTauri() || isRemote()) {
+    return callBackend<TimeBreakdown>("get_time_breakdown", { startDate, endDate });
+  }
+  const summary = mockSummary();
+  const parsedDays = Math.round((Date.parse(endDate) - Date.parse(startDate)) / 86_400_000) + 1;
+  return {
+    startDate, endDate, dayCount: Math.max(1, parsedDays),
+    totalActiveSeconds: summary.totalActiveSeconds,
+    totalIdleSeconds: summary.totalIdleSeconds,
+    totalBrowserSeconds: summary.totalBrowserSeconds,
+    perApp: summary.perApp, perWebsite: summary.perWebsite,
+    perCategory: summary.perCategory, perBucket: summary.perBucket,
+  };
 }
 
 export async function getTrackedApps(): Promise<TrackedApp[]> {

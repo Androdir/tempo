@@ -174,6 +174,7 @@ fn device_read_allowed(cmd: &str) -> bool {
     matches!(
         cmd,
         "get_today_summary"
+            | "get_time_breakdown"
             | "get_timeline_for_day"
             | "get_daily_score"
             | "get_streaks"
@@ -673,6 +674,17 @@ fn dispatch(conn: &Connection, cmd: &str, args: &Value) -> Result<Value, String>
     match cmd {
         "get_today_summary" => {
             Ok(serde_json::to_value(aggregate::summary_for_day(conn, &day)?).unwrap())
+        }
+        "get_time_breakdown" => {
+            let start = args
+                .get("startDate")
+                .and_then(|value| value.as_str())
+                .ok_or("missing start date")?;
+            let end = args
+                .get("endDate")
+                .and_then(|value| value.as_str())
+                .ok_or("missing end date")?;
+            Ok(serde_json::to_value(aggregate::time_breakdown(conn, start, end)?).unwrap())
         }
         "get_timeline_for_day" => {
             let gap = args
@@ -1565,6 +1577,7 @@ mod tests {
     #[test]
     fn paired_devices_only_receive_shared_read_commands() {
         assert!(device_read_allowed("get_today_summary"));
+        assert!(device_read_allowed("get_time_breakdown"));
         assert!(device_read_allowed("get_timeline_for_day"));
         assert!(device_read_allowed("get_tracked_apps"));
         assert!(!device_read_allowed("set_category_rule"));

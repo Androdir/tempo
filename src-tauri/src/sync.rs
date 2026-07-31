@@ -78,6 +78,7 @@ fn hub_read_allowed(cmd: &str) -> bool {
     matches!(
         cmd,
         "get_today_summary"
+            | "get_time_breakdown"
             | "get_timeline_for_day"
             | "get_daily_score"
             | "get_streaks"
@@ -1131,6 +1132,7 @@ mod tests {
 
     #[test]
     fn paired_device_bridge_only_allows_shared_reads() {
+        assert!(hub_read_allowed("get_time_breakdown"));
         assert!(hub_read_allowed("get_timeline_for_day"));
         assert!(hub_read_allowed("get_tracked_apps"));
         assert!(hub_read_allowed("get_device_breakdown"));

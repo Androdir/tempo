@@ -294,6 +294,21 @@ pub struct TodaySummary {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TimeBreakdown {
+    pub start_date: String,
+    pub end_date: String,
+    pub day_count: i64,
+    pub total_active_seconds: i64,
+    pub total_idle_seconds: i64,
+    pub total_browser_seconds: i64,
+    pub per_app: Vec<AppUsage>,
+    pub per_website: Vec<WebsiteUsage>,
+    pub per_category: Vec<CategoryUsage>,
+    pub per_bucket: Vec<BucketUsage>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TrackedApp {
     pub app_name: String,
     pub total_seconds: i64,

@@ -6,6 +6,7 @@ import Goals from "./pages/Goals";
 import Focus from "./pages/Focus";
 import DailyScore from "./pages/DailyScore";
 import Timeline from "./pages/Timeline";
+import TimeBreakdown from "./pages/TimeBreakdown";
 import ActivityLog from "./pages/ActivityLog";
 import BrowserActivity from "./pages/BrowserActivity";
 import OutputEvents from "./pages/OutputEvents";
@@ -114,6 +115,7 @@ export default function App() {
         {page === "goals" && <Goals />}
         {page === "focus" && <Focus />}
         {page === "score" && <DailyScore />}
+        {page === "breakdown" && <TimeBreakdown />}
         {page === "timeline" && <Timeline />}
         {page === "activity" && <ActivityLog />}
         {page === "browser" && <BrowserActivity />}

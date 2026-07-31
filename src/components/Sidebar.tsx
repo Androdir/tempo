@@ -4,6 +4,7 @@ export type Page =
   | "focus"
   | "score"
   | "timeline"
+  | "breakdown"
   | "activity"
   | "browser"
   | "outputs"
@@ -66,6 +67,7 @@ export const NAV_SECTIONS: NavSection[] = [
       { id: "score", label: "Daily Score" },
       { id: "review", label: "Daily Review" },
       { id: "weekly", label: "Weekly Review" },
+      { id: "breakdown", label: "Time Breakdown" },
       { id: "streaks", label: "Streaks" },
     ],
   },

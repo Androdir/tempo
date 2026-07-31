@@ -233,6 +233,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_today_summary,
+            commands::get_time_breakdown,
             commands::show_native_notification,
             commands::get_launch_at_login,
             commands::set_launch_at_login,

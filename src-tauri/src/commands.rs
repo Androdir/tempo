@@ -69,6 +69,16 @@ pub fn get_today_summary(db: State<'_, Db>) -> Result<TodaySummary, String> {
 }
 
 #[tauri::command]
+pub fn get_time_breakdown(
+    db: State<'_, Db>,
+    start_date: String,
+    end_date: String,
+) -> Result<TimeBreakdown, String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    time_breakdown(&conn, &start_date, &end_date)
+}
+
+#[tauri::command]
 pub fn get_tracked_apps(db: State<'_, Db>) -> Result<Vec<TrackedApp>, String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
