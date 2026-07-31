@@ -1050,7 +1050,7 @@ fn blocks_are_close(a: &TimelineBlock, b: &TimelineBlock, tolerance_seconds: i64
     match (parse_utc(&a.end), parse_utc(&b.start)) {
         (Some(a_end), Some(b_start)) => {
             let gap = (b_start - a_end).num_seconds();
-            (-5..=tolerance_seconds).contains(&gap)
+            gap <= tolerance_seconds
         }
         _ => false,
     }
@@ -1631,11 +1631,11 @@ pub fn timeline_for_day(conn: &Connection, day: &str, max_gap: i64) -> Result<Ti
         }
     }
 
-    // Full-screen apps can occasionally leave short gaps in desktop samples.
-    // Overview treats up to 90 seconds between otherwise identical adjacent
-    // blocks as one session. Exact retains the original evidence.
+    // Overview reconnects brief tracking gaps and short A → B → A detours.
+    // This keeps a game or work session intact across a quick browser switch.
+    // Exact retains the original evidence and summary totals remain unchanged.
     let overview_runs = join_same_activity_across_tracking_gaps(&blocks, 90);
-    let overview_blocks = smooth_brief_interruptions(&overview_runs, 20);
+    let overview_blocks = smooth_brief_interruptions(&overview_runs, 90);
 
     let outputs: Vec<CheckinValue> = checkin_values_for_day(conn, day)
         .into_iter()
@@ -2894,6 +2894,60 @@ mod tests {
     }
 
     #[test]
+    fn overview_absorbs_one_minute_browser_detours_inside_game_session() {
+        let mut blocks = vec![
+            timeline_test_block(
+                "Dead by Daylight",
+                "2026-07-28T12:59:00Z",
+                60,
+                "distraction",
+                "distracting",
+            ),
+            timeline_test_block(
+                "google.com",
+                "2026-07-28T12:59:30Z",
+                60,
+                "distraction",
+                "distracting",
+            ),
+            timeline_test_block(
+                "Dead by Daylight",
+                "2026-07-28T13:00:30Z",
+                90,
+                "distraction",
+                "distracting",
+            ),
+            timeline_test_block(
+                "chatgpt.com",
+                "2026-07-28T13:02:00Z",
+                60,
+                "distraction",
+                "distracting",
+            ),
+            timeline_test_block(
+                "Dead by Daylight",
+                "2026-07-28T13:03:00Z",
+                120,
+                "distraction",
+                "distracting",
+            ),
+        ];
+        for index in [1usize, 3] {
+            blocks[index].source = "browser".to_string();
+            blocks[index].is_web = true;
+        }
+
+        let overview = smooth_brief_interruptions(&blocks, 90);
+
+        assert_eq!(overview.len(), 1);
+        assert_eq!(overview[0].label, "Dead by Daylight");
+        assert_eq!(overview[0].start, "2026-07-28T12:59:00+00:00");
+        assert_eq!(overview[0].end, "2026-07-28T13:05:00+00:00");
+        assert_eq!(overview[0].absorbed_seconds, 120);
+        assert_eq!(overview[0].absorbed_count, 2);
+    }
+
+    #[test]
     fn overview_joins_same_app_across_short_tracking_gaps() {
         let blocks = vec![
             timeline_test_block(
@@ -3000,20 +3054,20 @@ mod tests {
             timeline_test_block(
                 "Telegram",
                 "2026-07-28T12:15:00Z",
-                60,
+                180,
                 "distraction",
                 "distracting",
             ),
             timeline_test_block(
                 "DaVinci Resolve",
-                "2026-07-28T12:16:00Z",
+                "2026-07-28T12:18:00Z",
                 900,
                 "business",
                 "productive",
             ),
         ];
 
-        assert_eq!(smooth_brief_interruptions(&blocks, 20).len(), 3);
+        assert_eq!(smooth_brief_interruptions(&blocks, 90).len(), 3);
     }
 
     #[test]
