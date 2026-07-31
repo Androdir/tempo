@@ -153,7 +153,7 @@ export function LockinPlanCard({ day, onCopied }: { day?: string; onCopied?: () 
       ) : (
         <>
           <div className="lockin-main">
-            <span className="lockin-tag main">Main</span>
+            <span className="lockin-tag primary">Main</span>
             <span>{plan.mainMission}</span>
           </div>
           {plan.secondaryMissions.length > 0 && (

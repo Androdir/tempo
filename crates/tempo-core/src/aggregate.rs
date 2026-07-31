@@ -1034,16 +1034,20 @@ fn merge_samples(mut samples: Vec<TlSample>, max_gap: i64) -> Vec<TimelineBlock>
     out
 }
 
-/// Whether two blocks represent the same meaningful activity for the simplified
-/// overview. Titles may change inside an app, but source, label, project,
-/// category and idle state must still agree.
+/// Whether two blocks represent the same activity identity for the simplified
+/// overview. Titles, tracking source, project and classification may change
+/// inside one app session without creating a duplicate row.
 fn same_overview_activity(a: &TimelineBlock, b: &TimelineBlock) -> bool {
-    a.source == b.source
-        && a.label.eq_ignore_ascii_case(&b.label)
-        && a.category == b.category
-        && a.project == b.project
-        && a.idle == b.idle
-        && a.is_web == b.is_web
+    a.label.eq_ignore_ascii_case(&b.label) && a.idle == b.idle && a.is_web == b.is_web
+}
+
+fn classifier_rank(classifier: &str) -> u8 {
+    match classifier {
+        "manual" => 3,
+        "rule" => 2,
+        "llm" => 1,
+        _ => 0,
+    }
 }
 
 fn blocks_are_close(a: &TimelineBlock, b: &TimelineBlock, tolerance_seconds: i64) -> bool {
@@ -1084,6 +1088,23 @@ fn join_same_activity_across_tracking_gaps(
         }
 
         let previous = overview.last_mut().expect("checked above");
+        let replace_classification = classifier_rank(&block.classifier)
+            > classifier_rank(&previous.classifier)
+            || (classifier_rank(&block.classifier) == classifier_rank(&previous.classifier)
+                && block.duration_seconds > previous.duration_seconds);
+        if replace_classification {
+            previous.category = block.category.clone();
+            previous.bucket = block.bucket.clone();
+            previous.confidence = block.confidence;
+            previous.classifier = block.classifier.clone();
+        }
+        if block.project_confidence > previous.project_confidence
+            || (previous.project.is_none() && block.project.is_some())
+        {
+            previous.project = block.project.clone();
+            previous.project_confidence = block.project_confidence;
+        }
+
         previous.end = block.end.clone();
         previous.duration_seconds += block.duration_seconds;
         previous.title = block.title.clone();
@@ -1091,15 +1112,6 @@ fn join_same_activity_across_tracking_gaps(
         previous.sample_count += block.sample_count;
         previous.absorbed_seconds += block.absorbed_seconds;
         previous.absorbed_count += block.absorbed_count;
-        previous.confidence = previous.confidence.min(block.confidence);
-        previous.project_confidence = previous.project_confidence.min(block.project_confidence);
-        previous.classifier = if previous.classifier == "manual" || block.classifier == "manual" {
-            "manual".to_string()
-        } else if previous.classifier == "llm" || block.classifier == "llm" {
-            "llm".to_string()
-        } else {
-            "rule".to_string()
-        };
         previous.goal_related |= block.goal_related;
         previous.output_linked |= block.output_linked;
         previous.longest_productive = false;
@@ -2982,6 +2994,59 @@ mod tests {
         assert_eq!(overview[0].duration_seconds, 240);
         assert_eq!(overview[0].sample_count, 3);
         assert!(overview[0].biggest_distraction);
+    }
+
+    #[test]
+    fn overview_joins_same_app_across_tracking_sources() {
+        let mut blocks = vec![
+            timeline_test_block(
+                "Discord",
+                "2026-07-28T14:52:00Z",
+                40,
+                "distraction",
+                "distracting",
+            ),
+            timeline_test_block(
+                "Discord",
+                "2026-07-28T14:52:40Z",
+                60,
+                "distraction",
+                "distracting",
+            ),
+        ];
+        blocks[1].source = "screen".to_string();
+
+        let overview = join_same_activity_across_tracking_gaps(&blocks, 90);
+
+        assert_eq!(overview.len(), 1);
+        assert_eq!(overview[0].label, "Discord");
+        assert_eq!(overview[0].duration_seconds, 100);
+    }
+
+    #[test]
+    fn overview_uses_stronger_classification_for_same_app_session() {
+        let mut blocks = vec![
+            timeline_test_block(
+                "Codex",
+                "2026-07-28T14:50:00Z",
+                30,
+                "distraction",
+                "distracting",
+            ),
+            timeline_test_block("Codex", "2026-07-28T14:50:30Z", 60, "neutral", "neutral"),
+        ];
+        blocks[0].classifier = "llm".to_string();
+        blocks[0].confidence = 0.55;
+        blocks[1].classifier = "rule".to_string();
+        blocks[1].confidence = 0.9;
+
+        let overview = join_same_activity_across_tracking_gaps(&blocks, 90);
+
+        assert_eq!(overview.len(), 1);
+        assert_eq!(overview[0].category, "neutral");
+        assert_eq!(overview[0].bucket, "neutral");
+        assert_eq!(overview[0].classifier, "rule");
+        assert_eq!(overview[0].duration_seconds, 90);
     }
 
     #[test]

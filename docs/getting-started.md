@@ -38,7 +38,7 @@ is useful for exploring the interface, but it cannot track your computer.
 Open **Today**. The tracking-health strip should show a recent desktop sample and a verified database. If it turns amber, follow the specific stale tracker, browser extension, sync queue, or database warning. Use a few normal apps for about a minute.
 
 Then open **Activity → Timeline**. The default **Overview** shows meaningful runs
-of work and absorbs only a brief (20 seconds or less) A → B → A switch when the
+of work and absorbs only a brief (90 seconds or less) A → B → A switch when the
 same activity immediately resumes. Choose **Exact** whenever you want every
 captured switch, full classifier details, or inline corrections. Exact data is
 always retained and the totals remain exact.

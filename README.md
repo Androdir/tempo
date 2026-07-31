@@ -29,7 +29,7 @@ A local-first desktop productivity tracker. It samples your **active window** ev
 - **Today dashboard** — total tracked time, idle time, time per app, time per category, and a
   productive / neutral / distracting split.
 - **Activity Overview + Exact Timeline** — Overview shows meaningful runs and absorbs only a
-  brief (≤20s) A → B → A switch when the same activity resumes immediately; Exact preserves every
+  brief (≤90s) A → B → A switch when the same activity resumes immediately; Exact preserves every
   captured switch, classifier detail, and inline correction. Exact data and totals are always kept.
 - **Proof-of-Output detection** — a local folder watcher records actual outputs (video exports,
   code changes, documents, downloads), links them to the activity around them, and feeds your

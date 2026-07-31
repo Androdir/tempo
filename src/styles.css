@@ -3713,7 +3713,7 @@ tr.row-dim .tick.off {
   background: var(--bg);
   color: var(--text-muted);
 }
-.lockin-tag.main {
+.lockin-tag.primary {
   background: var(--accent);
   color: #fff;
 }

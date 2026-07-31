@@ -421,7 +421,7 @@ function TodaysPlanCard({ onNavigate }: { onNavigate: (p: Page) => void }) {
         <button className="link-btn" onClick={() => onNavigate("review")}>Full plan →</button>
       </div>
       <div className="lockin-main">
-        <span className="lockin-tag main">Main</span>
+        <span className="lockin-tag primary">Main</span>
         <span>{plan.mainMission}</span>
       </div>
       {plan.firstBlock && <div className="muted-num" style={{ marginTop: 6 }}>⏰ {plan.firstBlock}</div>}
