@@ -27,6 +27,10 @@ screen inside it. So:
   is recorded as the **browser app** ("Chrome"), not the domain.
 
 This is an OS sandbox limit, identical for every usage-tracking app on the Play Store.
+Android package visibility is used only to translate packages returned by UsageStats
+(such as `com.google.android.youtube`) into their installed display labels. Tempo does
+not enumerate or upload an installed-app inventory.
+
 
 ---
 

@@ -6,6 +6,7 @@ import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import java.util.Locale
 import android.os.Process
 
 /**
@@ -118,11 +119,45 @@ object UsageTracker {
         return count
     }
 
-    /** Human label for a package (e.g. "YouTube"), falling back to the package name. */
-    private fun label(ctx: Context, pkg: String): String = try {
+    /** Human label for a package (e.g. "YouTube"). Android 11+ package
+     * visibility is declared in the manifest so this does not degrade to ids. */
+    private fun label(ctx: Context, pkg: String): String {
         val pm = ctx.packageManager
-        pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
-    } catch (e: PackageManager.NameNotFoundException) {
-        pkg
+        val installedLabel = try {
+            pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString().trim()
+        } catch (_: PackageManager.NameNotFoundException) {
+            ""
+        } catch (_: SecurityException) {
+            ""
+        }
+        if (installedLabel.isNotEmpty() && installedLabel != pkg) return installedLabel
+        KNOWN_LABELS[pkg]?.let { return it }
+
+        // Last-resort readability for an unusual package that disappeared
+        // between UsageStats collection and label resolution.
+        return pkg.substringAfterLast('.')
+            .replace('_', ' ')
+            .replaceFirstChar { char ->
+                if (char.isLowerCase()) char.titlecase(Locale.getDefault()) else char.toString()
+            }
     }
+
+    private val KNOWN_LABELS = mapOf(
+        "com.google.android.youtube" to "YouTube",
+        "com.google.android.apps.youtube.music" to "YouTube Music",
+        "com.android.chrome" to "Google Chrome",
+        "com.google.android.gm" to "Gmail",
+        "com.instagram.android" to "Instagram",
+        "com.facebook.katana" to "Facebook",
+        "com.facebook.orca" to "Messenger",
+        "com.whatsapp" to "WhatsApp",
+        "org.telegram.messenger" to "Telegram",
+        "com.zhiliaoapp.musically" to "TikTok",
+        "com.discord" to "Discord",
+        "com.reddit.frontpage" to "Reddit",
+        "com.twitter.android" to "X",
+        "com.spotify.music" to "Spotify",
+        "com.netflix.mediaclient" to "Netflix",
+        "com.snapchat.android" to "Snapchat",
+    )
 }

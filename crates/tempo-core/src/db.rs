@@ -678,8 +678,35 @@ fn migrate(conn: &Connection) {
         "ALTER TABLE streak_definitions ADD COLUMN days_per_week INTEGER NOT NULL DEFAULT 0",
         [],
     );
+    migrate_android_app_labels(conn);
     migrate_legacy_checkins(conn);
     invalidate_unsafe_llm_cache(conn);
+}
+
+/// Repair package identifiers produced by Android versions that could not see
+/// other apps' display labels. Exact known-package matches keep this migration
+/// conservative, while the updated phone app resolves all installed labels.
+fn migrate_android_app_labels(conn: &Connection) {
+    for (package, label) in crate::android_apps::KNOWN_ANDROID_APPS {
+        let _ = conn.execute(
+            "UPDATE activity_log SET app_name = ?1 WHERE app_name = ?2",
+            [*label, *package],
+        );
+        let _ = conn.execute(
+            "UPDATE synced_events SET app_name = ?1
+             WHERE source = 'android' AND app_name = ?2",
+            [*label, *package],
+        );
+        // Preserve a correction the user may already have made against the
+        // package id. If a readable-label rule already exists, it wins.
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO category_rules(app_name, category, ai_review, updated_at)
+             SELECT ?1, category, ai_review, updated_at
+             FROM category_rules WHERE app_name = ?2",
+            [*label, *package],
+        );
+        let _ = conn.execute("DELETE FROM category_rules WHERE app_name = ?1", [*package]);
+    }
 }
 
 /// Cached LLM rows are derived data. Refresh today's pre-guardrail verdicts once
@@ -781,6 +808,35 @@ pub fn prune(conn: &Connection, days: i64) -> rusqlite::Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn migration_repairs_existing_android_package_labels_and_rules() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        conn.execute_batch(
+            "INSERT INTO activity_log
+                (timestamp, day, app_name, window_title, duration_seconds, is_idle)
+             VALUES ('2026-08-01T10:00:00Z', '2026-08-01',
+                     'com.google.android.youtube', '', 60, 0);
+             INSERT INTO synced_events
+                (device_id, event_id, event_type, source, app_name)
+             VALUES ('phone', 'android:youtube:1', 'app_sample', 'android',
+                     'com.google.android.youtube');
+             INSERT INTO category_rules(app_name, category, ai_review, updated_at)
+             VALUES ('com.google.android.youtube', 'distraction', 0, 'now');",
+        )
+        .unwrap();
+
+        migrate_android_app_labels(&conn);
+
+        for table in ["activity_log", "synced_events", "category_rules"] {
+            let name: String = conn
+                .query_row(&format!("SELECT app_name FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(name, "YouTube");
+        }
+    }
 
     #[test]
     fn verified_backup_can_restore_previous_database_state() {

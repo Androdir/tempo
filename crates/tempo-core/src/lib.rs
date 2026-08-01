@@ -5,6 +5,7 @@
 //!
 //! Nothing here depends on `tauri`, `active-win-pos-rs`, or any windowing stack,
 //! so it cross-compiles cleanly for a headless Raspberry Pi / Docker server.
+pub mod android_apps;
 
 pub mod accountability_export;
 pub mod aggregate;

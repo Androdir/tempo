@@ -9,6 +9,12 @@
     <uses-permission
         android:name="android.permission.PACKAGE_USAGE_STATS"
         tools:ignore="ProtectedPermissions" />
+    <!-- Android 11+ otherwise hides many installed app labels. Tempo only uses
+         this visibility to turn UsageStats package ids into readable names; it
+         does not upload an installed-app inventory. -->
+    <uses-permission
+        android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
     <!-- Android 13+ wants this to show the (optional) sync notification. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 

@@ -60,6 +60,68 @@ impl SyncEvent {
     }
 }
 
+fn normalized_app_name(e: &SyncEvent) -> Option<String> {
+    let received = e.app_name.as_deref()?.trim();
+    if e.source.as_deref() != Some("android")
+        || !crate::android_apps::looks_like_package_id(received)
+    {
+        return Some(received.to_string());
+    }
+    let package = e
+        .m_str("package")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| received.to_string());
+    Some(
+        crate::android_apps::known_android_label(&package)
+            .or_else(|| crate::android_apps::known_android_label(received))
+            .unwrap_or(received)
+            .to_string(),
+    )
+}
+
+fn repair_android_alias(
+    conn: &Connection,
+    e: &SyncEvent,
+    normalized: Option<&str>,
+) -> rusqlite::Result<()> {
+    if e.source.as_deref() != Some("android") {
+        return Ok(());
+    }
+    let Some(package) = e.m_str("package") else {
+        return Ok(());
+    };
+    let Some(label) = normalized else {
+        return Ok(());
+    };
+    if !crate::android_apps::looks_like_package_id(&package)
+        || label.eq_ignore_ascii_case(&package)
+        || crate::android_apps::looks_like_package_id(label)
+    {
+        return Ok(());
+    }
+
+    conn.execute(
+        "UPDATE activity_log SET app_name = ?1 WHERE app_name = ?2",
+        params![label, package],
+    )?;
+    conn.execute(
+        "UPDATE synced_events SET app_name = ?1
+         WHERE source = 'android' AND app_name = ?2",
+        params![label, package],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO category_rules(app_name, category, ai_review, updated_at)
+         SELECT ?1, category, ai_review, updated_at
+         FROM category_rules WHERE app_name = ?2",
+        params![label, package],
+    )?;
+    conn.execute(
+        "DELETE FROM category_rules WHERE app_name = ?1",
+        params![package],
+    )?;
+    Ok(())
+}
+
 /// Store one event on the hub: append to the dedup ledger, and only if it is
 /// genuinely new, project it into the matching domain table. Returns whether the
 /// event was newly stored (false = duplicate, ignored).
@@ -68,6 +130,8 @@ pub fn ingest_event(conn: &Connection, device_id: &str, e: &SyncEvent) -> rusqli
     // not make every later retry look like an already-applied duplicate.
     let tx = conn.unchecked_transaction()?;
     let meta = e.metadata.as_ref().map(|m| m.to_string());
+    let app_name = normalized_app_name(e);
+    repair_android_alias(&tx, e, app_name.as_deref())?;
     let changed = tx.execute(
         "INSERT OR IGNORE INTO synced_events
            (device_id, event_id, event_type, source, timestamp, day, app_name, domain, title,
@@ -80,7 +144,7 @@ pub fn ingest_event(conn: &Connection, device_id: &str, e: &SyncEvent) -> rusqli
             e.source,
             e.timestamp,
             e.day,
-            e.app_name,
+            app_name,
             e.domain,
             e.title,
             e.duration_seconds,
@@ -91,6 +155,7 @@ pub fn ingest_event(conn: &Connection, device_id: &str, e: &SyncEvent) -> rusqli
         ],
     )?;
     if changed == 0 {
+        tx.commit()?;
         return Ok(false); // duplicate upload — never double-counted
     }
     apply_to_domain(&tx, e)?;
@@ -138,13 +203,14 @@ fn register_checkin_from_event(conn: &Connection, e: &SyncEvent, id: &str) {
 fn apply_to_domain(conn: &Connection, e: &SyncEvent) -> rusqlite::Result<()> {
     match e.event_type.as_str() {
         "app_sample" => {
+            let app_name = normalized_app_name(e).unwrap_or_default();
             conn.execute(
                 "INSERT INTO activity_log (timestamp, day, app_name, window_title, executable_path, duration_seconds, is_idle)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     e.timestamp,
                     e.day,
-                    e.app_name.clone().unwrap_or_default(),
+                    app_name,
                     e.title.clone().unwrap_or_default(),
                     e.m_str("executablePath"),
                     e.duration_seconds.unwrap_or(0),
@@ -435,6 +501,77 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM activity_log", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 2); // different devices, same local id → both real
+    }
+
+    #[test]
+    fn android_package_ids_use_human_labels() {
+        let conn = db::test_conn();
+        let mut event = ev("android:youtube:1", "app_sample");
+        event.source = Some("android".into());
+        event.app_name = Some("com.google.android.youtube".into());
+        event.metadata = Some(serde_json::json!({
+            "isIdle": false,
+            "package": "com.google.android.youtube"
+        }));
+
+        assert!(ingest_event(&conn, "phone", &event).unwrap());
+        let activity_name: String = conn
+            .query_row("SELECT app_name FROM activity_log", [], |row| row.get(0))
+            .unwrap();
+        let ledger_name: String = conn
+            .query_row("SELECT app_name FROM synced_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(activity_name, "YouTube");
+        assert_eq!(ledger_name, "YouTube");
+    }
+    #[test]
+
+    fn readable_android_labels_repair_unknown_historical_packages() {
+        let conn = db::test_conn();
+        conn.execute_batch(
+            "INSERT INTO activity_log
+                (timestamp, day, app_name, window_title, duration_seconds, is_idle)
+             VALUES ('2026-01-01T11:00:00Z', '2026-01-01',
+                     'com.example.obscureeditor', '', 60, 0);
+             INSERT INTO category_rules(app_name, category, ai_review, updated_at)
+             VALUES ('com.example.obscureeditor', 'productive', 0, 'now');",
+        )
+        .unwrap();
+
+        let mut event = ev("android:obscure:2", "app_sample");
+        event.source = Some("android".into());
+        event.app_name = Some("Obscure Editor".into());
+        event.metadata = Some(serde_json::json!({
+            "isIdle": false,
+            "package": "com.example.obscureeditor"
+        }));
+        assert!(ingest_event(&conn, "phone", &event).unwrap());
+
+        let old_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM activity_log
+                 WHERE app_name = 'com.example.obscureeditor'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let repaired_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM activity_log WHERE app_name = 'Obscure Editor'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let category: String = conn
+            .query_row(
+                "SELECT category FROM category_rules WHERE app_name = 'Obscure Editor'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_rows, 0);
+        assert_eq!(repaired_rows, 2);
+        assert_eq!(category, "productive");
     }
 
     #[test]
