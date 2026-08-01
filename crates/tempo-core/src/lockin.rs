@@ -4,6 +4,7 @@
 //! pure plan generation + prompt + parsing, all unit-tested.
 
 use crate::models::LockinPlan;
+use std::collections::HashSet;
 
 /// Everything the plan generator reads about the source day.
 #[derive(Default, Clone)]
@@ -16,6 +17,7 @@ pub struct PlanInputs {
     pub video_exports: i64,
     pub code_changes: i64,
     pub first_productive_min: Option<i64>,
+    pub projects: Vec<String>,
     pub recurring_goals: Vec<String>,
     pub notes: String,
 }
@@ -31,9 +33,10 @@ pub fn fallback_plan(day: &str, i: &PlanInputs) -> LockinPlan {
         format!("Finish what you ducked: {g}")
     } else if let Some(g) = i.recurring_goals.first() {
         g.clone()
+    } else if let Some(project) = i.projects.first() {
+        format!("Make concrete progress on {project}")
     } else {
-        "Ship one concrete output — a video, a shipped feature, or 60 focused min of study."
-            .to_string()
+        "Choose one concrete outcome for tomorrow and finish it.".to_string()
     };
 
     // Up to 2 secondary missions from remaining missed/recurring goals + a default.
@@ -52,11 +55,13 @@ pub fn fallback_plan(day: &str, i: &PlanInputs) -> LockinPlan {
             secondary.push(g.clone());
         }
     }
-    if secondary.is_empty() {
-        secondary.push("One 50-min deep-work block before noon.".to_string());
-    }
-    if secondary.len() < 2 {
-        secondary.push("Move your body — gym or training.".to_string());
+    for project in &i.projects {
+        if secondary.len() >= 2 {
+            break;
+        }
+        if !main_mission.contains(project) && !secondary.contains(project) {
+            secondary.push(format!("Complete one focused block on {project}"));
+        }
     }
 
     // First block: nudged earlier if yesterday started late.
@@ -64,8 +69,7 @@ pub fn fallback_plan(day: &str, i: &PlanInputs) -> LockinPlan {
         Some(m) if m > 11 * 60 => {
             format!("You didn't get going until {} yesterday — open your main project by 09:30, phone in another room.", clock(m))
         }
-        _ => "Open your main project first thing — a 50-min focus block before anything else."
-            .to_string(),
+        _ => "Choose your main mission, then spend 50 focused minutes on it.".to_string(),
     };
 
     // Distraction rule + avoid-trap from yesterday's biggest leak.
@@ -146,6 +150,11 @@ pub fn build_prompt(i: &PlanInputs) -> String {
     } else {
         i.recurring_goals.join("; ")
     };
+    let projects = if i.projects.is_empty() {
+        "none".to_string()
+    } else {
+        i.projects.join("; ")
+    };
     let notes = if i.notes.trim().is_empty() {
         "none".to_string()
     } else {
@@ -156,13 +165,17 @@ pub fn build_prompt(i: &PlanInputs) -> String {
         "You are a blunt, funny accountability coach. Make a concrete lock-in plan for TOMORROW \
 based on today. Today's score: {score}/100 ({verdict}). Completed goals: {done}. Missed goals: \
 {missed}. Biggest distraction: {leak}. Outputs detected: {videos} video export(s), {code} code \
-change(s). Recurring goals: {recurring}. User notes: {notes}.\n\n\
+change(s). Recurring goals: {recurring}. Active projects: {projects}. User notes: {notes}.\n\n\
 Reply ONLY with strict JSON, no prose, in exactly this shape:\n\
 {{\"main_mission\": \"one sentence\", \"secondary_missions\": [\"...\", \"...\"], \
 \"first_block\": \"what to do first and when\", \"distraction_rule\": \"one concrete rule\", \
 \"focus_mode_suggestion\": \"a focus session setup\", \"avoid_trap\": \"one trap to avoid\", \
 \"roast_line\": \"one short, funny, blunt line\"}}\n\
-Max 2 secondary missions. Keep every field under 25 words. Be specific, casual, and a little savage.",
+GROUNDING RULE: Every mission and the first block must directly use a missed goal, recurring goal, \
+active project, or explicit user note listed above. Never invent hobbies, workouts, writing targets, \
+sleep targets, deadlines, apps, or obligations. If evidence is sparse, use a focused block on an \
+active project rather than guessing. Max 2 secondary missions. Keep every field under 25 words. \
+Be specific, casual, and a little savage.",
         score = i.score,
         verdict = i.verdict,
         videos = i.video_exports,
@@ -217,13 +230,56 @@ pub fn parse_plan(day: &str, json: &str) -> Result<LockinPlan, String> {
     .non_empty_or_default())
 }
 
+fn grounding_tokens(text: &str) -> HashSet<String> {
+    const GENERIC: &[&str] = &[
+        "the", "and", "for", "with", "your", "one", "make", "finish", "complete", "work",
+        "progress", "tomorrow", "today", "minute", "minutes", "hour", "hours", "before", "after",
+        "first", "main", "mission", "project", "focused", "focus", "block", "start", "open",
+        "ship",
+    ];
+    text.to_ascii_lowercase()
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| token.len() >= 3 && !GENERIC.contains(token))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Reject model-authored actions that have no lexical evidence in the user's
+/// unfinished goals, recurring goals, active projects, or explicit notes.
+pub fn validate_grounded_plan(plan: LockinPlan, inputs: &PlanInputs) -> Result<LockinPlan, String> {
+    let evidence = inputs
+        .missed_goals
+        .iter()
+        .chain(inputs.recurring_goals.iter())
+        .chain(inputs.projects.iter())
+        .chain(std::iter::once(&inputs.notes))
+        .flat_map(|item| grounding_tokens(item))
+        .collect::<HashSet<_>>();
+    if evidence.is_empty() {
+        return Err("no grounded mission evidence was available".into());
+    }
+
+    for mission in std::iter::once(&plan.main_mission).chain(plan.secondary_missions.iter()) {
+        let tokens = grounding_tokens(mission);
+        if tokens.is_disjoint(&evidence) {
+            return Err(format!("invented mission without user evidence: {mission}"));
+        }
+    }
+
+    let first = plan.first_block.to_ascii_lowercase();
+    let first_is_generic = first.contains("main mission") || first.contains("main project");
+    if !first_is_generic && grounding_tokens(&plan.first_block).is_disjoint(&evidence) {
+        return Err(format!(
+            "invented first block without user evidence: {}",
+            plan.first_block
+        ));
+    }
+    Ok(plan)
+}
+
 impl LockinPlan {
     /// Fill any blank fields the model omitted with sane placeholders.
     fn non_empty_or_default(mut self) -> Self {
-        if self.secondary_missions.is_empty() {
-            self.secondary_missions
-                .push("One focused deep-work block before noon.".to_string());
-        }
         if self.first_block.is_empty() {
             self.first_block = "Open your main project first — 50 focused minutes.".to_string();
         }
@@ -259,7 +315,7 @@ mod tests {
         let p = fallback_plan("2026-04-01", &inputs);
         assert_eq!(p.source, "fallback");
         assert!(p.main_mission.contains("Post 1 video"));
-        assert!(!p.secondary_missions.is_empty());
+        assert!(p.secondary_missions.len() <= 2);
         assert!(p.distraction_rule.contains("instagram.com"));
         assert!(!p.focus_mode.is_empty());
         assert!(!p.roast_line.is_empty());
@@ -287,5 +343,32 @@ mod tests {
     #[test]
     fn parse_plan_rejects_missing_main() {
         assert!(parse_plan("d", r#"{"secondary_missions":[]}"#).is_err());
+    }
+    #[test]
+    fn rejects_invented_lockin_missions() {
+        let inputs = PlanInputs {
+            projects: vec!["Content Creation".into()],
+            ..Default::default()
+        };
+        let plan = parse_plan(
+            "d",
+            r#"{"main_mission":"Write 500 words of your novel","secondary_missions":["Do cardio before breakfast"],"first_block":"Wake at 6 and do push-ups","distraction_rule":"no games","focus_mode_suggestion":"use Forest","avoid_trap":"delay","roast_line":"go"}"#,
+        )
+        .unwrap();
+        assert!(validate_grounded_plan(plan, &inputs).is_err());
+    }
+
+    #[test]
+    fn accepts_plan_grounded_in_an_active_project() {
+        let inputs = PlanInputs {
+            projects: vec!["Content Creation".into()],
+            ..Default::default()
+        };
+        let plan = parse_plan(
+            "d",
+            r#"{"main_mission":"Finish the Content Creation edit","secondary_missions":[],"first_block":"Open Content Creation and edit","distraction_rule":"no games","focus_mode_suggestion":"50m focus","avoid_trap":"delay","roast_line":"go"}"#,
+        )
+        .unwrap();
+        assert!(validate_grounded_plan(plan, &inputs).is_ok());
     }
 }

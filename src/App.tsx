@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { preloadDefaultTimeBreakdown } from "./api";
 import Sidebar, { navSectionForPage, type Page } from "./components/Sidebar";
 import AccountabilityLayer from "./components/AccountabilityLayer";
 import Dashboard from "./pages/Dashboard";
@@ -54,6 +55,13 @@ export default function App() {
   const mainRef = useRef<HTMLElement | null>(null);
   const currentSection = navSectionForPage(page);
   const currentPageLabel = currentSection.pages.find((item) => item.id === page)?.label ?? currentSection.label;
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      preloadDefaultTimeBreakdown();
+    }, 1_250);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;

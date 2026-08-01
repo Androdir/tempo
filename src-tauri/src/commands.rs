@@ -12,6 +12,21 @@ use crate::models::*;
 use crate::projects::{self, Project};
 use crate::rules;
 use crate::scoring;
+fn file_backed_database_path(db: &Db, feature: &str) -> Result<String, String> {
+    let conn = db.lock().map_err(|error| error.to_string())?;
+    let path = conn
+        .query_row(
+            "SELECT file FROM pragma_database_list WHERE name = 'main'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if path.trim().is_empty() {
+        return Err(format!("{feature} needs a file-backed Tempo database"));
+    }
+    Ok(path)
+}
+
 use crate::settings;
 
 #[tauri::command]
@@ -69,13 +84,19 @@ pub fn get_today_summary(db: State<'_, Db>) -> Result<TodaySummary, String> {
 }
 
 #[tauri::command]
-pub fn get_time_breakdown(
+pub async fn get_time_breakdown(
     db: State<'_, Db>,
     start_date: String,
     end_date: String,
 ) -> Result<TimeBreakdown, String> {
-    let conn = db.lock().map_err(|e| e.to_string())?;
-    time_breakdown(&conn, &start_date, &end_date)
+    let database = db.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = file_backed_database_path(&database, "Time Breakdown")?;
+        let conn = Connection::open(path).map_err(|error| error.to_string())?;
+        time_breakdown(&conn, &start_date, &end_date)
+    })
+    .await
+    .map_err(|error| format!("time breakdown worker failed: {error}"))?
 }
 
 #[tauri::command]
@@ -984,8 +1005,13 @@ pub fn set_llm_setting(db: State<'_, Db>, key: String, value: String) -> Result<
 
 /// Test the Ollama connection with the given (possibly unsaved) URL + model.
 #[tauri::command]
-pub fn test_ollama_connection(url: String, model: String) -> OllamaTestResult {
-    llm::test_connection(url.trim(), model.trim())
+pub async fn test_ollama_connection(
+    url: String,
+    model: String,
+) -> Result<OllamaTestResult, String> {
+    tauri::async_runtime::spawn_blocking(move || llm::test_connection(url.trim(), model.trim()))
+        .await
+        .map_err(|error| format!("Ollama connection worker failed: {error}"))
 }
 
 #[tauri::command]
@@ -1687,9 +1713,15 @@ pub fn seed_default_streaks(db: State<'_, Db>) -> Result<i64, String> {
 // ----------------------------------------------------------- daily lock-in plan
 
 #[tauri::command]
-pub fn generate_lockin_plan(db: State<'_, Db>, day: String) -> Result<LockinPlan, String> {
-    let conn = db.lock().map_err(|e| e.to_string())?;
-    Ok(generate_plan_core(&conn, &day))
+pub async fn generate_lockin_plan(db: State<'_, Db>, day: String) -> Result<LockinPlan, String> {
+    let database = db.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = file_backed_database_path(&database, "Lock-In Plan")?;
+        let conn = Connection::open(path).map_err(|error| error.to_string())?;
+        Ok(generate_plan_core(&conn, &day))
+    })
+    .await
+    .map_err(|error| format!("Lock-In Plan worker failed: {error}"))?
 }
 
 #[tauri::command]

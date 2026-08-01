@@ -361,6 +361,26 @@ pub fn generate_json(cfg: &OllamaConfig, prompt: &str, temperature: f64) -> Resu
         .map(|s| s.to_string())
         .ok_or_else(|| "ollama response missing 'response' field".to_string())
 }
+/// Load the selected Ollama model without generating text. This runs only on
+/// the background worker and keeps the model warm for the first user action.
+pub fn warm_model(cfg: &OllamaConfig) -> Result<(), String> {
+    if !is_private_host(&cfg.url) {
+        return Err(format!("refusing non-local Ollama URL: {}", cfg.url));
+    }
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(3))
+        .timeout_read(Duration::from_secs(120))
+        .build();
+    agent
+        .post(&format!("{}/api/generate", cfg.url.trim_end_matches('/')))
+        .send_json(serde_json::json!({
+            "model": cfg.model,
+            "stream": false,
+            "keep_alive": "10m"
+        }))
+        .map_err(|error| format!("ollama warm-up failed: {error}"))?;
+    Ok(())
+}
 
 pub fn test_connection(url: &str, model: &str) -> OllamaTestResult {
     if !is_private_host(url) {
@@ -647,42 +667,54 @@ fn gather_work(db: &Db, max: usize) -> Result<Vec<(String, String, ClassifyReque
 }
 
 pub fn start(db: Db) {
-    std::thread::spawn(move || loop {
-        std::thread::sleep(WORKER_INTERVAL);
-
-        let cfg = match read_config(&db) {
-            Some(c) if c.enabled => c,
-            _ => continue,
-        };
-        if !is_private_host(&cfg.url) {
-            log_error(
-                &db,
-                None,
-                &format!("Refusing non-local Ollama URL: {}", cfg.url),
-            );
-            continue;
+    std::thread::spawn(move || {
+        // Give the webview and startup reads priority, then preload the model in
+        // the background so the first explicit AI action avoids Ollama's cold load.
+        std::thread::sleep(Duration::from_secs(5));
+        if let Some(cfg) = read_config(&db).filter(|config| config.enabled) {
+            let _ = warm_model(&OllamaConfig {
+                url: cfg.url,
+                model: cfg.model,
+            });
         }
 
-        let work = match gather_work(&db, MAX_PER_CYCLE) {
-            Ok(w) => w,
-            Err(e) => {
-                log_error(&db, None, &e);
+        loop {
+            std::thread::sleep(WORKER_INTERVAL);
+
+            let cfg = match read_config(&db) {
+                Some(c) if c.enabled => c,
+                _ => continue,
+            };
+            if !is_private_host(&cfg.url) {
+                log_error(
+                    &db,
+                    None,
+                    &format!("Refusing non-local Ollama URL: {}", cfg.url),
+                );
                 continue;
             }
-        };
 
-        let oc = OllamaConfig {
-            url: cfg.url.clone(),
-            model: cfg.model.clone(),
-        };
-        for (key, day, req) in work {
-            // On any error we simply don't cache => reads use rule-based.
-            match classify(&oc, &req) {
-                Ok(c) => {
-                    let guarded = apply_evidence_guardrails(&req, c);
-                    store_classification(&db, &key, &day, &guarded, &cfg.model);
+            let work = match gather_work(&db, MAX_PER_CYCLE) {
+                Ok(w) => w,
+                Err(e) => {
+                    log_error(&db, None, &e);
+                    continue;
                 }
-                Err(e) => log_error(&db, Some(&key), &e),
+            };
+
+            let oc = OllamaConfig {
+                url: cfg.url.clone(),
+                model: cfg.model.clone(),
+            };
+            for (key, day, req) in work {
+                // On any error we simply don't cache => reads use rule-based.
+                match classify(&oc, &req) {
+                    Ok(c) => {
+                        let guarded = apply_evidence_guardrails(&req, c);
+                        store_classification(&db, &key, &day, &guarded, &cfg.model);
+                    }
+                    Err(e) => log_error(&db, Some(&key), &e),
+                }
             }
         }
     });

@@ -956,7 +956,7 @@ pub struct HubReadResult {
 /// endpoint only accepts an explicit read-only command list, so the per-device
 /// token cannot perform administrative or arbitrary writes.
 #[tauri::command]
-pub fn read_from_hub(
+pub async fn read_from_hub(
     db: State<'_, Db>,
     cmd: String,
     args: serde_json::Value,
@@ -965,7 +965,7 @@ pub fn read_from_hub(
         return Err(format!("Hub read is not allowed for command: {cmd}"));
     }
     let target = {
-        let conn = db.lock().map_err(|e| e.to_string())?;
+        let conn = db.lock().map_err(|error| error.to_string())?;
         sync_target(&conn)
     };
     let Some((url, token, _)) = target else {
@@ -974,14 +974,20 @@ pub fn read_from_hub(
             value: None,
         });
     };
-    let response = ureq::post(&format!("{url}/api/device/invoke"))
-        .timeout(Duration::from_secs(15))
-        .set("Authorization", &format!("Bearer {token}"))
-        .send_json(serde_json::json!({ "cmd": cmd, "args": args }))
-        .map_err(|error| format!("Hub read failed: {error}"))?;
-    let value = response
-        .into_json::<serde_json::Value>()
-        .map_err(|error| format!("Hub returned invalid data: {error}"))?;
+
+    let value = tauri::async_runtime::spawn_blocking(move || {
+        let response = ureq::post(&format!("{url}/api/device/invoke"))
+            .timeout(Duration::from_secs(15))
+            .set("Authorization", &format!("Bearer {token}"))
+            .send_json(serde_json::json!({ "cmd": cmd, "args": args }))
+            .map_err(|error| format!("Hub read failed: {error}"))?;
+        response
+            .into_json::<serde_json::Value>()
+            .map_err(|error| format!("Hub returned invalid data: {error}"))
+    })
+    .await
+    .map_err(|error| format!("Hub read worker failed: {error}"))??;
+
     Ok(HubReadResult {
         active: true,
         value: Some(value),

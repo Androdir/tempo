@@ -170,12 +170,16 @@ pub fn run() {
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir).ok();
             let db_path = dir.join("productivity.db");
+            let database_existed = db_path.exists()
+                && std::fs::metadata(&db_path)
+                    .map(|metadata| metadata.len() > 0)
+                    .unwrap_or(false);
 
             let database =
                 db::init(&db_path).map_err(|e| format!("failed to open database: {e}"))?;
 
             // Seed defaults once and read the loopback endpoint config.
-            let (token, port) = {
+            let (token, port, retention) = {
                 let conn = database.lock().map_err(|e| e.to_string())?;
                 settings::ensure_defaults(&conn)
                     .map_err(|e| format!("failed to seed settings: {e}"))?;
@@ -194,17 +198,21 @@ pub fn run() {
                     let _ =
                         settings::set_setting(&conn, settings::LAUNCH_AT_LOGIN_INITIALIZED, "1");
                 }
-                // Enforce data retention once at startup.
+                // Maintenance uses a separate connection after the first paint.
                 let retention = settings::get_int(
                     &conn,
                     settings::RETENTION_DAYS,
                     settings::DEFAULT_RETENTION_DAYS,
                 );
-                let _ = db::prune(&conn, retention);
-                (settings::ingest_token(&conn), settings::ingest_port(&conn))
+                (
+                    settings::ingest_token(&conn),
+                    settings::ingest_port(&conn),
+                    retention,
+                )
             };
 
             app.manage(database.clone());
+            db::start_startup_maintenance(db_path, database_existed, retention);
 
             // Desktop window tracker + loopback ingest endpoint for the extension.
             tracker::start(database.clone(), app.handle().clone());

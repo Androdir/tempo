@@ -2018,6 +2018,13 @@ pub fn gather_plan_inputs(conn: &Connection, day: &str) -> lockin::PlanInputs {
         v
     };
 
+    let project_names = projects::list_projects(conn)
+        .unwrap_or_default()
+        .into_iter()
+        .take(20)
+        .map(|project| project.name)
+        .collect();
+
     let notes: String = conn
         .query_row(
             "SELECT notes FROM daily_checkin WHERE day = ?1",
@@ -2038,6 +2045,7 @@ pub fn gather_plan_inputs(conn: &Connection, day: &str) -> lockin::PlanInputs {
         code_changes: outputs.code_changes,
         first_productive_min: stats.first_productive_min,
         recurring_goals,
+        projects: project_names,
         notes,
     }
 }
@@ -2114,6 +2122,7 @@ pub fn generate_plan_core(conn: &Connection, day: &str) -> LockinPlan {
         let cfg = llm::OllamaConfig { url, model };
         match llm::generate_json(&cfg, &lockin::build_prompt(&inputs), 0.7)
             .and_then(|j| lockin::parse_plan(day, &j))
+            .and_then(|plan| lockin::validate_grounded_plan(plan, &inputs))
         {
             Ok(p) => p,
             Err(e) => {

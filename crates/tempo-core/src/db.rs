@@ -551,17 +551,30 @@ pub fn integrity_check(conn: &Connection) -> Result<String, String> {
 }
 
 pub fn init(path: &Path) -> Result<Db, String> {
-    let existed = path.exists()
-        && std::fs::metadata(path)
-            .map(|m| m.len() > 0)
-            .unwrap_or(false);
     let conn = Connection::open(path).map_err(|e| e.to_string())?;
-    if existed {
-        create_daily_startup_backup(&conn, path)?;
-    }
     conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
     migrate(&conn);
     Ok(Arc::new(Mutex::new(conn)))
+}
+
+/// Backup and retention are important, but neither should delay the first
+/// Windows paint. Use a separate SQLite connection after startup so reads,
+/// tracking, and the webview remain responsive while maintenance runs.
+pub fn start_startup_maintenance(path: PathBuf, backup_existing: bool, retention_days: i64) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(750));
+        let Ok(conn) = Connection::open(&path) else {
+            return;
+        };
+        if backup_existing {
+            if let Err(error) = create_daily_startup_backup(&conn, &path) {
+                eprintln!("[tempo][maintenance] startup backup failed: {error}");
+            }
+        }
+        if let Err(error) = prune(&conn, retention_days) {
+            eprintln!("[tempo][maintenance] retention cleanup failed: {error}");
+        }
+    });
 }
 
 /// Additive migrations for databases created by earlier versions. Each ADD
@@ -681,12 +694,26 @@ fn migrate(conn: &Connection) {
     migrate_android_app_labels(conn);
     migrate_legacy_checkins(conn);
     invalidate_unsafe_llm_cache(conn);
+    invalidate_ungrounded_lockin_plans(conn);
 }
 
 /// Repair package identifiers produced by Android versions that could not see
 /// other apps' display labels. Exact known-package matches keep this migration
 /// conservative, while the updated phone app resolves all installed labels.
 fn migrate_android_app_labels(conn: &Connection) {
+    const FLAG: &str = "android_app_labels_v1";
+    let done = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            [FLAG],
+            |row| row.get::<_, String>(0),
+        )
+        .map(|value| value == "1")
+        .unwrap_or(false);
+    if done {
+        return;
+    }
+
     for (package, label) in crate::android_apps::KNOWN_ANDROID_APPS {
         let _ = conn.execute(
             "UPDATE activity_log SET app_name = ?1 WHERE app_name = ?2",
@@ -707,6 +734,11 @@ fn migrate_android_app_labels(conn: &Connection) {
         );
         let _ = conn.execute("DELETE FROM category_rules WHERE app_name = ?1", [*package]);
     }
+    let _ = conn.execute(
+        "INSERT INTO app_settings(key, value) VALUES (?1, '1')
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [FLAG],
+    );
 }
 
 /// Cached LLM rows are derived data. Refresh today's pre-guardrail verdicts once
@@ -732,6 +764,30 @@ fn invalidate_unsafe_llm_cache(conn: &Connection) {
     let _ = conn.execute("UPDATE llm_classification SET project = NULL", []);
     let _ = conn.execute(
         "INSERT INTO app_settings (key, value) VALUES (?1, '1')
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [FLAG],
+    );
+}
+
+fn invalidate_ungrounded_lockin_plans(conn: &Connection) {
+    const FLAG: &str = "lockin_grounding_v1";
+    let done = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            [FLAG],
+            |row| row.get::<_, String>(0),
+        )
+        .map(|value| value == "1")
+        .unwrap_or(false);
+    if done {
+        return;
+    }
+    let _ = conn.execute(
+        "DELETE FROM lockin_plans WHERE source = 'llm' AND edited = 0",
+        [],
+    );
+    let _ = conn.execute(
+        "INSERT INTO app_settings(key, value) VALUES (?1, '1')
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         [FLAG],
     );

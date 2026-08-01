@@ -52,15 +52,22 @@ fn main() {
         eprintln!("[tempo-hub]    Keep it on a private LAN/VPN (Tailscale recommended). Never expose to the internet.");
     }
 
+    let database_existed = Path::new(&db_path).exists();
     let database = db::init(Path::new(&db_path)).expect("[tempo-hub] could not open database");
-    {
+    let retention_days = {
         let conn = database.lock().expect("db lock");
         let _ = settings::ensure_defaults(&conn);
         let _ = models::ensure_category_defaults(&conn);
         let _ = models::ensure_checkin_defaults(&conn);
         let _ = scoring::ensure_rule_defaults(&conn);
         apply_llm_env(&conn);
-    }
+        settings::get_int(
+            &conn,
+            settings::RETENTION_DAYS,
+            settings::DEFAULT_RETENTION_DAYS,
+        )
+    };
+    db::start_startup_maintenance(PathBuf::from(&db_path), database_existed, retention_days);
 
     let cfg = Config {
         pairing_secret,

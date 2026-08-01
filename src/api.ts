@@ -127,22 +127,49 @@ const SHARED_HUB_READ_COMMANDS = new Set([
 
 type HubReadResult<T> = { active: boolean; value: T | null };
 
-/**
- * Route shared activity reads through the Hub while paired, so the installed
- * desktop app sees phone + computer activity. Local reads remain the offline
- * fallback, and configuration/writes continue through the local-first sync path.
- */
-async function callBackend<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
+const SHARED_READ_TTL_MS = 10_000;
+const sharedReadCache = new Map<string, { storedAt: number; value: unknown }>();
+const sharedReadInflight = new Map<string, Promise<unknown>>();
+
+async function uncachedBackend<T>(cmd: string, args: Record<string, unknown>): Promise<T> {
   if (!isTauri()) return remoteInvoke<T>(cmd, args);
-  if (SHARED_HUB_READ_COMMANDS.has(cmd)) {
-    try {
-      const shared = await invoke<HubReadResult<T>>("read_from_hub", { cmd, args });
-      if (shared.active) return shared.value as T;
-    } catch (error) {
-      console.warn(`Tempo Hub read failed for ${cmd}; using this device's local data.`, error);
-    }
+  try {
+    const shared = await invoke<HubReadResult<T>>("read_from_hub", { cmd, args });
+    if (shared.active) return shared.value as T;
+  } catch (error) {
+    console.warn(`Tempo Hub read failed for ${cmd}; using this device's local data.`, error);
   }
   return invoke<T>(cmd, args);
+}
+
+/**
+ * Shared activity reads are cached briefly and identical in-flight requests are
+ * deduplicated. Navigating away no longer forces the same Pi/SQLite calculation
+ * again, while the ten-second TTL stays aligned with Tempo's tracking cadence.
+ */
+async function callBackend<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
+  if (!SHARED_HUB_READ_COMMANDS.has(cmd)) {
+    return isTauri() ? invoke<T>(cmd, args) : remoteInvoke<T>(cmd, args);
+  }
+
+  const key = `${cmd}:${JSON.stringify(args)}`;
+  const cached = sharedReadCache.get(key);
+  if (cached && Date.now() - cached.storedAt < SHARED_READ_TTL_MS) {
+    return cached.value as T;
+  }
+  const pending = sharedReadInflight.get(key);
+  if (pending) return pending as Promise<T>;
+
+  const request = uncachedBackend<T>(cmd, args)
+    .then((value) => {
+      sharedReadCache.set(key, { storedAt: Date.now(), value });
+      return value;
+    })
+    .finally(() => {
+      sharedReadInflight.delete(key);
+    });
+  sharedReadInflight.set(key, request);
+  return request;
 }
 
 // ---------------------------------------------------------------------------
@@ -154,20 +181,50 @@ export async function getTodaySummary(): Promise<TodaySummary> {
   return mockSummary();
 }
 
+const timeBreakdownRequests = new Map<string, Promise<TimeBreakdown>>();
+
 export async function getTimeBreakdown(startDate: string, endDate: string): Promise<TimeBreakdown> {
-  if (isTauri() || isRemote()) {
-    return callBackend<TimeBreakdown>("get_time_breakdown", { startDate, endDate });
-  }
-  const summary = mockSummary();
-  const parsedDays = Math.round((Date.parse(endDate) - Date.parse(startDate)) / 86_400_000) + 1;
-  return {
-    startDate, endDate, dayCount: Math.max(1, parsedDays),
-    totalActiveSeconds: summary.totalActiveSeconds,
-    totalIdleSeconds: summary.totalIdleSeconds,
-    totalBrowserSeconds: summary.totalBrowserSeconds,
-    perApp: summary.perApp, perWebsite: summary.perWebsite,
-    perCategory: summary.perCategory, perBucket: summary.perBucket,
-  };
+  const key = `${startDate}:${endDate}`;
+  const existing = timeBreakdownRequests.get(key);
+  if (existing) return existing;
+
+  const request = (async () => {
+    if (isTauri() || isRemote()) {
+      return callBackend<TimeBreakdown>("get_time_breakdown", { startDate, endDate });
+    }
+    const summary = mockSummary();
+    const parsedDays = Math.round((Date.parse(endDate) - Date.parse(startDate)) / 86_400_000) + 1;
+    return {
+      startDate, endDate, dayCount: Math.max(1, parsedDays),
+      totalActiveSeconds: summary.totalActiveSeconds,
+      totalIdleSeconds: summary.totalIdleSeconds,
+      totalBrowserSeconds: summary.totalBrowserSeconds,
+      perApp: summary.perApp, perWebsite: summary.perWebsite,
+      perCategory: summary.perCategory, perBucket: summary.perBucket,
+    };
+  })();
+
+  timeBreakdownRequests.set(key, request);
+  void request.then(
+    () => {
+      window.setTimeout(() => {
+        if (timeBreakdownRequests.get(key) === request) timeBreakdownRequests.delete(key);
+      }, 15_000);
+    },
+    () => {
+      if (timeBreakdownRequests.get(key) === request) timeBreakdownRequests.delete(key);
+    },
+  );
+  return request;
+}
+
+export function preloadDefaultTimeBreakdown(): void {
+  const end = new Date();
+  const start = new Date(end);
+  start.setDate(start.getDate() - 6);
+  const iso = (date: Date) =>
+    `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  void getTimeBreakdown(iso(start), iso(end)).catch(() => undefined);
 }
 
 export async function getTrackedApps(): Promise<TrackedApp[]> {
