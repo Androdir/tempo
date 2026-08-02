@@ -298,7 +298,11 @@ pub fn apply_evidence_guardrails(
 
 // --------------------------------------------------------------- ollama calls
 
-pub fn classify(cfg: &OllamaConfig, req: &ClassifyRequest) -> Result<LlmClassification, String> {
+fn classify_with_keep_alive(
+    cfg: &OllamaConfig,
+    req: &ClassifyRequest,
+    keep_alive: &str,
+) -> Result<LlmClassification, String> {
     if !is_private_host(&cfg.url) {
         return Err(format!("refusing non-local Ollama URL: {}", cfg.url));
     }
@@ -312,7 +316,8 @@ pub fn classify(cfg: &OllamaConfig, req: &ClassifyRequest) -> Result<LlmClassifi
         "prompt": build_prompt(req),
         "stream": false,
         "format": "json",
-        "options": { "temperature": 0.1 }
+        "options": { "temperature": 0.1 },
+        "keep_alive": keep_alive
     });
 
     let resp: serde_json::Value = agent
@@ -346,7 +351,8 @@ pub fn generate_json(cfg: &OllamaConfig, prompt: &str, temperature: f64) -> Resu
         "prompt": prompt,
         "stream": false,
         "format": "json",
-        "options": { "temperature": temperature }
+        "options": { "temperature": temperature },
+        "keep_alive": 0
     });
 
     let resp: serde_json::Value = agent
@@ -361,24 +367,24 @@ pub fn generate_json(cfg: &OllamaConfig, prompt: &str, temperature: f64) -> Resu
         .map(|s| s.to_string())
         .ok_or_else(|| "ollama response missing 'response' field".to_string())
 }
-/// Load the selected Ollama model without generating text. This runs only on
-/// the background worker and keeps the model warm for the first user action.
-pub fn warm_model(cfg: &OllamaConfig) -> Result<(), String> {
+/// Release the model after Tempo's background batch so it does not reserve GPU
+/// memory while games or other graphics-heavy applications are running.
+fn unload_model(cfg: &OllamaConfig) -> Result<(), String> {
     if !is_private_host(&cfg.url) {
         return Err(format!("refusing non-local Ollama URL: {}", cfg.url));
     }
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(3))
-        .timeout_read(Duration::from_secs(120))
+        .timeout_read(Duration::from_secs(15))
         .build();
     agent
         .post(&format!("{}/api/generate", cfg.url.trim_end_matches('/')))
         .send_json(serde_json::json!({
             "model": cfg.model,
             "stream": false,
-            "keep_alive": "10m"
+            "keep_alive": 0
         }))
-        .map_err(|error| format!("ollama warm-up failed: {error}"))?;
+        .map_err(|error| format!("ollama unload failed: {error}"))?;
     Ok(())
 }
 
@@ -609,6 +615,56 @@ fn load_manual_keys(conn: &Connection, day: &str) -> HashSet<String> {
     set
 }
 
+/// Treat a recently observed game as active even during a short alt-tab. This
+/// prevents the classifier from starting GPU-heavy work while the game is
+/// likely still running behind another foreground window.
+fn recent_game_active(db: &Db) -> bool {
+    let Ok(conn) = db.lock() else {
+        return false;
+    };
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT timestamp, app_name, window_title, executable_path
+         FROM activity_log
+         WHERE is_idle = 0
+         ORDER BY id DESC
+         LIMIT 8",
+    ) else {
+        return false;
+    };
+    let Ok(rows) = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    }) else {
+        return false;
+    };
+    let now = chrono::Utc::now();
+    let active = rows
+        .flatten()
+        .any(|(timestamp, app, title, executable_path)| {
+            let recent = chrono::DateTime::parse_from_rfc3339(&timestamp)
+                .map(|seen| {
+                    let age = now.signed_duration_since(seen.with_timezone(&chrono::Utc));
+                    age >= chrono::Duration::seconds(-5) && age <= chrono::Duration::seconds(75)
+                })
+                .unwrap_or(false);
+            recent
+                && semantic::detect_activity_kind(
+                    "desktop",
+                    &app,
+                    &title,
+                    executable_path.as_deref(),
+                    None,
+                    None,
+                    &[],
+                ) == "game"
+        });
+    active
+}
+
 fn gather_work(db: &Db, max: usize) -> Result<Vec<(String, String, ClassifyRequest)>, String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
     let day = chrono::Local::now().format("%Y-%m-%d").to_string();
@@ -668,16 +724,6 @@ fn gather_work(db: &Db, max: usize) -> Result<Vec<(String, String, ClassifyReque
 
 pub fn start(db: Db) {
     std::thread::spawn(move || {
-        // Give the webview and startup reads priority, then preload the model in
-        // the background so the first explicit AI action avoids Ollama's cold load.
-        std::thread::sleep(Duration::from_secs(5));
-        if let Some(cfg) = read_config(&db).filter(|config| config.enabled) {
-            let _ = warm_model(&OllamaConfig {
-                url: cfg.url,
-                model: cfg.model,
-            });
-        }
-
         loop {
             std::thread::sleep(WORKER_INTERVAL);
 
@@ -693,6 +739,9 @@ pub fn start(db: Db) {
                 );
                 continue;
             }
+            if recent_game_active(&db) {
+                continue;
+            }
 
             let work = match gather_work(&db, MAX_PER_CYCLE) {
                 Ok(w) => w,
@@ -701,6 +750,7 @@ pub fn start(db: Db) {
                     continue;
                 }
             };
+            let used_model = !work.is_empty();
 
             let oc = OllamaConfig {
                 url: cfg.url.clone(),
@@ -708,7 +758,7 @@ pub fn start(db: Db) {
             };
             for (key, day, req) in work {
                 // On any error we simply don't cache => reads use rule-based.
-                match classify(&oc, &req) {
+                match classify_with_keep_alive(&oc, &req, "2m") {
                     Ok(c) => {
                         let guarded = apply_evidence_guardrails(&req, c);
                         store_classification(&db, &key, &day, &guarded, &cfg.model);
@@ -716,10 +766,46 @@ pub fn start(db: Db) {
                     Err(e) => log_error(&db, Some(&key), &e),
                 }
             }
+            if used_model {
+                let _ = unload_model(&oc);
+            }
         }
     });
 }
 
+#[cfg(test)]
+mod game_guard_tests {
+    use super::*;
+    fn activity_db(timestamp: String, executable_path: &str) -> Db {
+        let conn = crate::db::test_conn();
+        conn.execute(
+            "INSERT INTO activity_log
+               (timestamp, day, app_name, window_title, executable_path, duration_seconds, is_idle)
+             VALUES (?1, '2026-08-02', 'Dead by Daylight', 'Dead by Daylight', ?2, 10, 0)",
+            params![timestamp, executable_path],
+        )
+        .unwrap();
+        std::sync::Arc::new(std::sync::Mutex::new(conn))
+    }
+
+    #[test]
+    fn recent_game_activity_pauses_background_ai() {
+        let db = activity_db(
+            chrono::Utc::now().to_rfc3339(),
+            r"C:\Games\Steam\steamapps\common\Dead by Daylight\DeadByDaylight.exe",
+        );
+        assert!(recent_game_active(&db));
+    }
+
+    #[test]
+    fn stale_game_activity_does_not_pause_background_ai() {
+        let db = activity_db(
+            (chrono::Utc::now() - chrono::Duration::minutes(2)).to_rfc3339(),
+            r"C:\Games\Steam\steamapps\common\Dead by Daylight\DeadByDaylight.exe",
+        );
+        assert!(!recent_game_active(&db));
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -700,7 +700,8 @@ export default function PrivacySettings() {
           <p className="card-hint">
             Optional. Uses a locally-running Ollama server to refine activity classification in the
             background. Only loopback / LAN addresses are allowed — nothing is sent to the cloud, and
-            any error falls back to rule-based classification.
+            any error falls back to rule-based classification. Tempo pauses background AI during
+            detected gameplay and releases the model after each batch to avoid competing with games.
           </p>
           <SettingRow
             label="Enable local LLM classification"
