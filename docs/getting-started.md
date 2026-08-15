@@ -133,14 +133,19 @@ Open **Settings → Tracking** to review local OCR. It can help when app and
 window titles are ambiguous, but it is off by default and is not needed for
 basic tracking.
 
-### Local AI with Ollama
+### Optional AI classification
 
-Open **Settings → Connections** to connect an Ollama server. Local AI can add
-richer classification and reviews, but all core tracking, categories, scores,
-and rule-based reviews work without it. Tempo validates AI output against deterministic evidence:
+Open **Settings → Connections** and choose **OpenAI API** or **Local Ollama**. OpenAI is the
+lowest-friction option on Windows: paste a project API key, save it to Windows Credential Manager,
+test the connection, then enable AI. Local Ollama avoids cloud processing but uses your own hardware.
+
+AI can add richer classification and reviews, but all core tracking, categories, scores, and
+rule-based reviews work without it. Tempo validates AI output against deterministic evidence:
 goals alone cannot assign a project, and an uncertain app/title-only guess cannot claim near-certainty.
 
-The **Local AI check** checkbox on an app or website rule asks Ollama to double-check even when the deterministic rule is already confident. It is optional and usually should stay off; enable it only for an app or site whose context genuinely changes its meaning.
+The **AI review** checkbox on an app or website rule asks the selected provider to double-check even
+when the deterministic rule is already confident. It is optional and usually should stay off; enable
+it only for an app or site whose context genuinely changes its meaning.
 
 ### Tempo Hub
 

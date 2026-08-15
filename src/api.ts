@@ -100,11 +100,19 @@ function webToken(): string {
 }
 
 async function remoteInvoke<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
-  const res = await fetch("/api/invoke", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${webToken()}` },
-    body: JSON.stringify({ cmd, args }),
-  });
+  let res: Response;
+  try {
+    res = await fetch("/api/invoke", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${webToken()}` },
+      body: JSON.stringify({ cmd, args }),
+    });
+  } catch {
+    throw new Error(
+      "Tempo Hub connection lost. Make sure Tailscale is connected, then reload the app. " +
+      "If the screen was already open, it may be showing a cached page even though the Hub is unreachable.",
+    );
+  }
   if (res.status === 401) {
     if (typeof localStorage !== "undefined") localStorage.removeItem("tempo_web_token");
     throw new Error("Unauthorized — re-enter the hub secret and reload.");
@@ -1274,8 +1282,12 @@ export async function setLlmSetting(key: string, value: string): Promise<void> {
     return;
   }
   if (key === "llm_enabled") mockLlm = { ...mockLlm, enabled: value === "1" || value.toLowerCase() === "true" };
+  else if (key === "llm_provider") mockLlm = { ...mockLlm, provider: value as "ollama" | "openai" };
   else if (key === "ollama_url") mockLlm = { ...mockLlm, url: value };
   else if (key === "ollama_model") mockLlm = { ...mockLlm, model: value };
+  else if (key === "openai_classification_model") mockLlm = { ...mockLlm, openaiClassificationModel: value };
+  else if (key === "openai_review_model") mockLlm = { ...mockLlm, openaiReviewModel: value };
+  else if (key === "openai_include_content") mockLlm = { ...mockLlm, openaiIncludeContent: value === "1" || value.toLowerCase() === "true" };
 }
 
 export async function testOllamaConnection(url: string, model: string): Promise<OllamaTestResult> {
@@ -1288,6 +1300,32 @@ export async function testOllamaConnection(url: string, model: string): Promise<
   };
 }
 
+export async function setOpenAiApiKey(apiKey: string): Promise<void> {
+  if (isTauri()) {
+    await invoke("set_openai_api_key", { apiKey });
+    return;
+  }
+  mockLlm = { ...mockLlm, openaiKeyConfigured: Boolean(apiKey.trim()) };
+}
+
+export async function clearOpenAiApiKey(): Promise<void> {
+  if (isTauri()) {
+    await invoke("clear_openai_api_key");
+    return;
+  }
+  mockLlm = { ...mockLlm, openaiKeyConfigured: false };
+}
+
+export async function testOpenAiConnection(model: string): Promise<OllamaTestResult> {
+  if (isTauri()) return invoke<OllamaTestResult>("test_openai_connection", { model });
+  return {
+    ok: false,
+    message: "Preview mode: run the Windows desktop app to test OpenAI.",
+    models: [],
+    modelAvailable: false,
+  };
+}
+
 export async function getLlmErrors(): Promise<LlmErrorEntry[]> {
   if (isTauri()) return invoke<LlmErrorEntry[]>("get_llm_errors");
   return [];
@@ -1295,8 +1333,13 @@ export async function getLlmErrors(): Promise<LlmErrorEntry[]> {
 
 let mockLlm: LlmSettings = {
   enabled: false,
+  provider: "ollama",
   url: "http://localhost:11434",
   model: "llama3.1:8b",
+  openaiClassificationModel: "gpt-5.4-nano",
+  openaiReviewModel: "gpt-5.4-mini",
+  openaiIncludeContent: false,
+  openaiKeyConfigured: false,
   lastError: null,
 };
 

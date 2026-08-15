@@ -16,8 +16,12 @@ pub const SMART_INTERVAL: &str = "smart_interval_seconds";
 pub const IDLE_THRESHOLD: &str = "idle_threshold_seconds";
 pub const COUNT_MEDIA_ACTIVE: &str = "count_media_as_active";
 pub const LLM_ENABLED: &str = "llm_enabled";
+pub const LLM_PROVIDER: &str = "llm_provider";
 pub const OLLAMA_URL: &str = "ollama_url";
 pub const OLLAMA_MODEL: &str = "ollama_model";
+pub const OPENAI_CLASSIFICATION_MODEL: &str = "openai_classification_model";
+pub const OPENAI_REVIEW_MODEL: &str = "openai_review_model";
+pub const OPENAI_INCLUDE_CONTENT: &str = "openai_include_content";
 /// One-time release initialization; the OS remains the source of truth afterwards.
 pub const LAUNCH_AT_LOGIN_INITIALIZED: &str = "launch_at_login_initialized";
 pub const TRACKING_PAUSED_UNTIL: &str = "tracking_paused_until";
@@ -51,6 +55,8 @@ pub const DEFAULT_RETENTION_DAYS: i64 = 90;
 pub const DEFAULT_SMART_INTERVAL: i64 = 60;
 pub const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
 pub const DEFAULT_OLLAMA_MODEL: &str = "llama3.1:8b";
+pub const DEFAULT_OPENAI_CLASSIFICATION_MODEL: &str = "gpt-5.4-nano";
+pub const DEFAULT_OPENAI_REVIEW_MODEL: &str = "gpt-5.4-mini";
 
 pub const DEFAULT_PORT: u16 = 48710;
 pub const DEFAULT_MAX_TEXT_LENGTH: i64 = 8000;
@@ -151,8 +157,16 @@ pub fn ensure_defaults(conn: &Connection) -> rusqlite::Result<()> {
     set_if_absent(conn, TITLE_EXCLUDED_APPS, "[]")?;
     set_if_absent(conn, SMART_INTERVAL, &DEFAULT_SMART_INTERVAL.to_string())?;
     set_if_absent(conn, LLM_ENABLED, "0")?; // OFF by default
+    set_if_absent(conn, LLM_PROVIDER, "ollama")?;
     set_if_absent(conn, OLLAMA_URL, DEFAULT_OLLAMA_URL)?;
     set_if_absent(conn, OLLAMA_MODEL, DEFAULT_OLLAMA_MODEL)?;
+    set_if_absent(
+        conn,
+        OPENAI_CLASSIFICATION_MODEL,
+        DEFAULT_OPENAI_CLASSIFICATION_MODEL,
+    )?;
+    set_if_absent(conn, OPENAI_REVIEW_MODEL, DEFAULT_OPENAI_REVIEW_MODEL)?;
+    set_if_absent(conn, OPENAI_INCLUDE_CONTENT, "0")?; // private content stays local by default
     set_if_absent(conn, DISTRACTION_WARN_ENABLED, "1")?; // ON by default
     set_if_absent(
         conn,

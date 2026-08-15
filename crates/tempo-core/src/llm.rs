@@ -1,4 +1,4 @@
-//! Local LLM classification via a locally-running Ollama server.
+//! Optional AI classification via local Ollama or the OpenAI Responses API.
 //!
 //! Design: an LLM call takes seconds, so a background worker classifies today's
 //! activity *blocks* and caches the result. Reads prefer the cached LLM verdict;
@@ -23,6 +23,17 @@ const MAX_PER_CYCLE: usize = 4;
 pub struct OllamaConfig {
     pub url: String,
     pub model: String,
+}
+
+pub struct OpenAiConfig {
+    pub api_key: String,
+    pub model: String,
+}
+
+#[derive(Clone, Copy)]
+pub enum GenerationPurpose {
+    Review,
+    LockinPlan,
 }
 
 #[derive(Clone, Serialize)]
@@ -367,6 +378,167 @@ pub fn generate_json(cfg: &OllamaConfig, prompt: &str, temperature: f64) -> Resu
         .map(|s| s.to_string())
         .ok_or_else(|| "ollama response missing 'response' field".to_string())
 }
+
+fn response_error(error: ureq::Error) -> String {
+    match error {
+        ureq::Error::Status(code, response) => {
+            let detail = response
+                .into_string()
+                .ok()
+                .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+                .and_then(|value| {
+                    value
+                        .pointer("/error/message")
+                        .and_then(|message| message.as_str())
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| "request rejected".to_string());
+            format!("OpenAI request failed ({code}): {detail}")
+        }
+        other => format!("OpenAI request failed: {other}"),
+    }
+}
+
+fn openai_response_text(
+    cfg: &OpenAiConfig,
+    prompt: &str,
+    format: serde_json::Value,
+    max_output_tokens: u32,
+) -> Result<String, String> {
+    if cfg.api_key.trim().is_empty() {
+        return Err("OpenAI API key is not configured".to_string());
+    }
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(5))
+        .timeout_read(Duration::from_secs(60))
+        .build();
+    let body = serde_json::json!({
+        "model": cfg.model,
+        "input": prompt,
+        "reasoning": { "effort": "none" },
+        "text": { "format": format },
+        "max_output_tokens": max_output_tokens,
+        "store": false
+    });
+    let response: serde_json::Value = agent
+        .post("https://api.openai.com/v1/responses")
+        .set("Authorization", &format!("Bearer {}", cfg.api_key.trim()))
+        .set("Content-Type", "application/json")
+        .send_json(body)
+        .map_err(response_error)?
+        .into_json()
+        .map_err(|error| format!("OpenAI response was not JSON: {error}"))?;
+
+    response
+        .get("output")
+        .and_then(|output| output.as_array())
+        .into_iter()
+        .flatten()
+        .flat_map(|item| {
+            item.get("content")
+                .and_then(|content| content.as_array())
+                .into_iter()
+                .flatten()
+        })
+        .find_map(|content| content.get("text").and_then(|text| text.as_str()))
+        .map(str::to_string)
+        .ok_or_else(|| "OpenAI response did not contain text output".to_string())
+}
+
+fn classify_openai(cfg: &OpenAiConfig, req: &ClassifyRequest) -> Result<LlmClassification, String> {
+    let format = serde_json::json!({
+        "type": "json_schema",
+        "name": "tempo_activity_classification",
+        "strict": true,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "category": { "type": "string", "enum": ["productive", "study", "business", "neutral", "distraction", "recovery"] },
+                "productive": { "type": "boolean" },
+                "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+                "project": { "type": ["string", "null"] },
+                "reason": { "type": "string" }
+            },
+            "required": ["category", "productive", "confidence", "project", "reason"],
+            "additionalProperties": false
+        }
+    });
+    openai_response_text(cfg, &build_prompt(req), format, 220)
+        .and_then(|response| parse_and_validate(&response))
+}
+
+pub fn generate_json_from_settings(
+    conn: &Connection,
+    prompt: &str,
+    purpose: GenerationPurpose,
+) -> Result<(String, String), String> {
+    let provider = settings::get_setting(conn, settings::LLM_PROVIDER)
+        .unwrap_or_else(|| "ollama".to_string());
+    if provider == "openai" {
+        let model = settings::get_setting(conn, settings::OPENAI_REVIEW_MODEL)
+            .unwrap_or_else(|| settings::DEFAULT_OPENAI_REVIEW_MODEL.to_string());
+        let key = std::env::var("OPENAI_API_KEY")
+            .map_err(|_| "OpenAI API key is not configured".to_string())?;
+        let max_output_tokens = match purpose {
+            GenerationPurpose::Review => 900,
+            GenerationPurpose::LockinPlan => 800,
+        };
+        let output = openai_response_text(
+            &OpenAiConfig {
+                api_key: key,
+                model: model.clone(),
+            },
+            prompt,
+            serde_json::json!({ "type": "json_object" }),
+            max_output_tokens,
+        )?;
+        Ok((output, model))
+    } else {
+        let url = settings::get_setting(conn, settings::OLLAMA_URL)
+            .unwrap_or_else(|| settings::DEFAULT_OLLAMA_URL.to_string());
+        let model = settings::get_setting(conn, settings::OLLAMA_MODEL)
+            .unwrap_or_else(|| settings::DEFAULT_OLLAMA_MODEL.to_string());
+        let temperature = match purpose {
+            GenerationPurpose::Review => 0.6,
+            GenerationPurpose::LockinPlan => 0.7,
+        };
+        generate_json(&OllamaConfig { url, model: model.clone() }, prompt, temperature)
+            .map(|output| (output, model))
+    }
+}
+
+pub fn test_openai_connection(api_key: &str, model: &str) -> OllamaTestResult {
+    if api_key.trim().is_empty() {
+        return OllamaTestResult {
+            ok: false,
+            message: "OpenAI API key is not configured".to_string(),
+            models: vec![],
+            model_available: false,
+        };
+    }
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(5))
+        .timeout_read(Duration::from_secs(15))
+        .build();
+    match agent
+        .get(&format!("https://api.openai.com/v1/models/{}", model.trim()))
+        .set("Authorization", &format!("Bearer {}", api_key.trim()))
+        .call()
+    {
+        Ok(_) => OllamaTestResult {
+            ok: true,
+            message: format!("Connected to OpenAI. Model '{model}' is available."),
+            models: vec![model.to_string()],
+            model_available: true,
+        },
+        Err(error) => OllamaTestResult {
+            ok: false,
+            message: response_error(error),
+            models: vec![],
+            model_available: false,
+        },
+    }
+}
 /// Release the model after Tempo's background batch so it does not reserve GPU
 /// memory while games or other graphics-heavy applications are running.
 fn unload_model(cfg: &OllamaConfig) -> Result<(), String> {
@@ -558,18 +730,32 @@ pub fn last_error(conn: &Connection) -> Option<String> {
 
 struct WorkerConfig {
     enabled: bool,
+    provider: String,
     url: String,
     model: String,
+    openai_include_content: bool,
 }
 
 fn read_config(db: &Db) -> Option<WorkerConfig> {
     let conn = db.lock().ok()?;
     Some(WorkerConfig {
         enabled: settings::get_bool(&conn, settings::LLM_ENABLED, false),
+        provider: settings::get_setting(&conn, settings::LLM_PROVIDER)
+            .unwrap_or_else(|| "ollama".to_string()),
         url: settings::get_setting(&conn, settings::OLLAMA_URL)
             .unwrap_or_else(|| settings::DEFAULT_OLLAMA_URL.to_string()),
-        model: settings::get_setting(&conn, settings::OLLAMA_MODEL)
-            .unwrap_or_else(|| settings::DEFAULT_OLLAMA_MODEL.to_string()),
+        model: if settings::get_setting(&conn, settings::LLM_PROVIDER).as_deref() == Some("openai") {
+            settings::get_setting(&conn, settings::OPENAI_CLASSIFICATION_MODEL)
+                .unwrap_or_else(|| settings::DEFAULT_OPENAI_CLASSIFICATION_MODEL.to_string())
+        } else {
+            settings::get_setting(&conn, settings::OLLAMA_MODEL)
+                .unwrap_or_else(|| settings::DEFAULT_OLLAMA_MODEL.to_string())
+        },
+        openai_include_content: settings::get_bool(
+            &conn,
+            settings::OPENAI_INCLUDE_CONTENT,
+            false,
+        ),
     })
 }
 
@@ -665,7 +851,11 @@ fn recent_game_active(db: &Db) -> bool {
     active
 }
 
-fn gather_work(db: &Db, max: usize) -> Result<Vec<(String, String, ClassifyRequest)>, String> {
+fn gather_work(
+    db: &Db,
+    max: usize,
+    include_content: bool,
+) -> Result<Vec<(String, String, ClassifyRequest)>, String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
     let day = chrono::Local::now().format("%Y-%m-%d").to_string();
     let blocks = crate::aggregate::collect_blocks(&conn)?;
@@ -702,7 +892,7 @@ fn gather_work(db: &Db, max: usize) -> Result<Vec<(String, String, ClassifyReque
                 label: b.label.clone(),
                 title: b.title.clone(),
                 domain: b.domain.clone(),
-                summary: b.summary.clone(),
+                summary: include_content.then(|| b.summary.clone()).flatten(),
                 activity_kind: b.activity_kind.clone(),
                 rule_category: b.rule_category.clone(),
                 rule_confidence: b.confidence,
@@ -731,7 +921,7 @@ pub fn start(db: Db) {
                 Some(c) if c.enabled => c,
                 _ => continue,
             };
-            if !is_private_host(&cfg.url) {
+            if cfg.provider == "ollama" && !is_private_host(&cfg.url) {
                 log_error(
                     &db,
                     None,
@@ -743,7 +933,8 @@ pub fn start(db: Db) {
                 continue;
             }
 
-            let work = match gather_work(&db, MAX_PER_CYCLE) {
+            let include_content = cfg.provider != "openai" || cfg.openai_include_content;
+            let work = match gather_work(&db, MAX_PER_CYCLE, include_content) {
                 Ok(w) => w,
                 Err(e) => {
                     log_error(&db, None, &e);
@@ -756,9 +947,27 @@ pub fn start(db: Db) {
                 url: cfg.url.clone(),
                 model: cfg.model.clone(),
             };
+            let openai = if cfg.provider == "openai" {
+                match std::env::var("OPENAI_API_KEY") {
+                    Ok(api_key) if !api_key.trim().is_empty() => Some(OpenAiConfig {
+                        api_key,
+                        model: cfg.model.clone(),
+                    }),
+                    _ => {
+                        log_error(&db, None, "OpenAI API key is not configured");
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
             for (key, day, req) in work {
                 // On any error we simply don't cache => reads use rule-based.
-                match classify_with_keep_alive(&oc, &req, "2m") {
+                let result = match &openai {
+                    Some(config) => classify_openai(config, &req),
+                    None => classify_with_keep_alive(&oc, &req, "2m"),
+                };
+                match result {
                     Ok(c) => {
                         let guarded = apply_evidence_guardrails(&req, c);
                         store_classification(&db, &key, &day, &guarded, &cfg.model);
@@ -766,7 +975,7 @@ pub fn start(db: Db) {
                     Err(e) => log_error(&db, Some(&key), &e),
                 }
             }
-            if used_model {
+            if used_model && cfg.provider == "ollama" {
                 let _ = unload_model(&oc);
             }
         }

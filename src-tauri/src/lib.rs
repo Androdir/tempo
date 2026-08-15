@@ -11,6 +11,7 @@ mod ingest;
 mod output;
 mod platform;
 mod server;
+mod secrets;
 mod smart;
 mod sync;
 mod tracker;
@@ -226,7 +227,9 @@ pub fn run() {
             output::start(database.clone(), app.handle().clone());
             // Tempo Hub sync worker (idle unless app_mode = hub).
             sync::start(database.clone(), app.handle().clone());
-            // Optional background local-LLM classifier (gated by llm_enabled).
+            // Load the cloud key from the OS credential vault before the AI worker starts.
+            secrets::load_openai_key_into_environment();
+            // Optional background AI classifier (gated by llm_enabled).
             llm::start(database);
 
             // Windows-login launches stay out of the way while tracking begins.
@@ -306,6 +309,9 @@ pub fn run() {
             commands::get_llm_settings,
             commands::set_llm_setting,
             commands::test_ollama_connection,
+            commands::set_openai_api_key,
+            commands::clear_openai_api_key,
+            commands::test_openai_connection,
             commands::get_llm_errors,
             commands::get_daily_score,
             commands::set_checkin,

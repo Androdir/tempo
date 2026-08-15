@@ -72,7 +72,7 @@ export default function DailyReview({ onNavigate }: { onNavigate: (page: Page) =
       <div className="card card-pad review-hero">
         <div className="review-hero-top">
           <span className={`src-chip ${r.source === "llm" ? "llm" : "rule"}`}>
-            {r.source === "llm" ? `🤖 Local LLM${r.model ? ` · ${r.model}` : ""}` : "rule-based"}
+            {r.source === "llm" ? `🤖 AI${r.model ? ` · ${r.model}` : ""}` : "rule-based"}
           </span>
           <div className="review-generate-action">
             <button className="btn btn-primary" onClick={generate} disabled={generating}>
@@ -135,8 +135,8 @@ export default function DailyReview({ onNavigate }: { onNavigate: (page: Page) =
 
       {r.source === "fallback" && (
         <p className="muted-num" style={{ marginTop: 12 }}>
-          This is a rule-based review. Enable the local LLM in <b>Privacy &amp; Settings → Local AI
-          classification</b> and start Ollama for a sharper, funnier one.
+          This is a rule-based review. Enable a provider in <b>Settings → Connections → AI
+          classification</b>, then generate again for a more interpretive review.
         </p>
       )}
 

@@ -286,10 +286,26 @@ Paste the endpoint and token into the extension Options page, save, and test the
 connection. For permanent Firefox signing, permission details, and troubleshooting,
 see [`extension/README.md`](extension/README.md).
 
-### 3. (Optional) Enable local LLM classification with Ollama
+### 3. (Optional) Enable AI classification
 
-Refines the app's classification (rule-based → LLM for ambiguous cases) using a locally-running
-Ollama server. Completely optional; the app works fine with rule-based only.
+Tempo can use OpenAI or a locally running Ollama server to review uncertain classifications and
+write Daily Reviews / Lock-In Plans. It still works without AI, and deterministic rules plus manual
+corrections always take priority.
+
+**OpenAI setup (recommended for low friction):**
+
+1. Create a project-scoped API key at <https://platform.openai.com/api-keys>.
+2. Open **Settings → Connections → AI classification** and choose **OpenAI API**.
+3. Paste the key and click **Save key**. On Windows it is stored in Windows Credential Manager,
+   never in Tempo's SQLite database.
+4. Leave classification on `gpt-5.4-nano` and reviews on `gpt-5.4-mini`, then click
+   **Test connection** and enable AI.
+
+By default OpenAI receives app/site names, titles, duration, rule/project evidence and nearby
+activity labels only. Raw captured text is never sent; locally derived page/OCR summaries require
+an additional opt-in.
+
+**Local Ollama alternative:**
 
 **Setup steps:**
 
@@ -307,12 +323,12 @@ Ollama server. Completely optional; the app works fine with rule-based only.
 
 3. **Configure the app:**
    - Open the app's **Settings → Connections**.
-   - Under **Local AI classification (Ollama)**, you'll see:
+   - Under **AI classification**, choose **Local Ollama**. You'll see:
      - **URL** (defaults to `http://localhost:11434`)
      - **Model** (type the model name, e.g., `llama3.1:8b`)
    - Click **Test connection** — it should verify the model is available.
    - Once connected, the LLM background worker starts; new/ambiguous samples get refined
-     classifications (shown with 🤖 badge in the Classifications).
+     classifications (shown with a 🤖 AI badge).
 
 ### 4. (Optional) Enable smart screen OCR (Windows only)
 

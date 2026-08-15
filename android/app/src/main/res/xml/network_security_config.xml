@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Tempo may connect directly to a private 100.64.0.0/10 Tailscale address when
+  MagicDNS or Tailscale Serve TLS is unavailable. The tunnel itself encrypts
+  this traffic end-to-end; this opt-in only stops Android WebView from rejecting
+  the HTTP URL before it reaches Tailscale.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

@@ -16,7 +16,7 @@ function timeOf(iso: string): string {
 
 function SrcChip({ classifier }: { classifier: ActivityLogEntry["classifier"] }) {
   if (classifier === "llm")
-    return <span className="src-chip llm" title="Classified by the local LLM">🤖 LLM</span>;
+    return <span className="src-chip llm" title="Classified by the configured AI provider">🤖 AI</span>;
   if (classifier === "manual")
     return <span className="src-chip manual" title="Manual correction">✎ Manual</span>;
   return <span className="src-chip rule" title="Rule-based classification">Rule</span>;

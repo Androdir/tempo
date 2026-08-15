@@ -38,6 +38,32 @@ class Prefs(ctx: Context) {
 
     fun lastSync(): Long = sp.getLong(LAST_SYNC, 0L)
     fun setLastSync(v: Long) = sp.edit().putLong(LAST_SYNC, v).apply()
+    fun lastSyncError(): String = sp.getString(LAST_SYNC_ERROR, "") ?: ""
+    fun lastSyncEventCount(): Int = sp.getInt(LAST_SYNC_EVENT_COUNT, 0)
+    fun syncInProgress(): Boolean = sp.getBoolean(SYNC_IN_PROGRESS, false)
+
+    fun setSyncStarted() {
+        sp.edit()
+            .putBoolean(SYNC_IN_PROGRESS, true)
+            .remove(LAST_SYNC_ERROR)
+            .apply()
+    }
+
+    fun setSyncSuccess(at: Long, eventCount: Int) {
+        sp.edit()
+            .putLong(LAST_SYNC, at)
+            .putInt(LAST_SYNC_EVENT_COUNT, eventCount)
+            .putBoolean(SYNC_IN_PROGRESS, false)
+            .remove(LAST_SYNC_ERROR)
+            .apply()
+    }
+
+    fun setSyncError(message: String) {
+        sp.edit()
+            .putString(LAST_SYNC_ERROR, message.trim().take(180))
+            .putBoolean(SYNC_IN_PROGRESS, false)
+            .apply()
+    }
 
     /** Persist pairing. The secret doubles as the web-dashboard token (`tempo_web_token`). */
     fun savePairing(url: String, token: String, deviceId: String, secret: String) {
@@ -56,5 +82,8 @@ class Prefs(ctx: Context) {
         private const val SECRET = "web_secret"
         private const val WATERMARK = "usage_watermark"
         private const val LAST_SYNC = "last_sync"
+        private const val LAST_SYNC_ERROR = "last_sync_error"
+        private const val LAST_SYNC_EVENT_COUNT = "last_sync_event_count"
+        private const val SYNC_IN_PROGRESS = "sync_in_progress"
     }
 }

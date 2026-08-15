@@ -7,7 +7,7 @@ mod auth;
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rusqlite::{params, Connection};
@@ -23,6 +23,7 @@ struct Config {
     pairing_secret: String,
     static_dir: String,
     allowed_origins: Vec<String>,
+    db_path: PathBuf,
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -69,11 +70,12 @@ fn main() {
     };
     db::start_startup_maintenance(PathBuf::from(&db_path), database_existed, retention_days);
 
-    let cfg = Config {
+    let cfg = Arc::new(Config {
         pairing_secret,
         static_dir,
         allowed_origins,
-    };
+        db_path: PathBuf::from(&db_path),
+    });
     let addr = format!("{bind}:{port}");
     let server = match Server::http(&addr) {
         Ok(s) => s,
@@ -87,18 +89,34 @@ fn main() {
         cfg.static_dir
     );
 
-    let limiter = Mutex::new(RateLimiter::default());
-    for mut request in server.incoming_requests() {
-        let resp = build_response(&database, &cfg, &limiter, &mut request);
-        let _ = request.respond(resp);
+    let limiter = Arc::new(Mutex::new(RateLimiter::default()));
+    for request in server.incoming_requests() {
+        // A dashboard request can legitimately take a few seconds (and an AI
+        // request longer). Do not make ingestion, health checks, or static
+        // assets wait behind it: each connection gets its own lightweight
+        // handler, while the existing DB mutex still serialises SQLite access.
+        let database = Arc::clone(&database);
+        let cfg = Arc::clone(&cfg);
+        let limiter = Arc::clone(&limiter);
+        std::thread::spawn(move || {
+            let mut request = request;
+            let resp = build_response(&database, &cfg, &limiter, &mut request);
+            let _ = request.respond(resp);
+        });
     }
 }
 
-/// Optionally point the hub at an Ollama instance (e.g. your desktop's) via env,
-/// so the hub-served Daily Review / Lock-In Plan can be LLM-written instead of the
-/// deterministic fallback. Off unless set. The no-cloud guard still applies —
-/// loopback / private-LAN / Tailscale URLs are accepted; public/cloud is refused.
+/// Configure the optional AI provider for hub-served reviews and lock-in plans.
+/// Ollama remains private-network-only; OpenAI reads its key from OPENAI_API_KEY.
 fn apply_llm_env(conn: &Connection) {
+    if let Ok(provider) = std::env::var("TEMPO_LLM_PROVIDER") {
+        let provider = provider.trim().to_ascii_lowercase();
+        if provider == "ollama" || provider == "openai" {
+            let _ = settings::set_setting(conn, settings::LLM_PROVIDER, &provider);
+        } else if !provider.is_empty() {
+            eprintln!("[tempo-hub] ignoring unknown TEMPO_LLM_PROVIDER '{provider}'");
+        }
+    }
     if let Ok(url) = std::env::var("TEMPO_OLLAMA_URL") {
         let url = url.trim();
         if !url.is_empty() {
@@ -118,6 +136,18 @@ fn apply_llm_env(conn: &Connection) {
             let _ = settings::set_setting(conn, settings::OLLAMA_MODEL, model);
         }
     }
+    if let Ok(model) = std::env::var("TEMPO_OPENAI_CLASSIFICATION_MODEL") {
+        let model = model.trim();
+        if !model.is_empty() {
+            let _ = settings::set_setting(conn, settings::OPENAI_CLASSIFICATION_MODEL, model);
+        }
+    }
+    if let Ok(model) = std::env::var("TEMPO_OPENAI_REVIEW_MODEL") {
+        let model = model.trim();
+        if !model.is_empty() {
+            let _ = settings::set_setting(conn, settings::OPENAI_REVIEW_MODEL, model);
+        }
+    }
     if let Ok(v) = std::env::var("TEMPO_LLM_ENABLED") {
         let on = matches!(
             v.trim().to_ascii_lowercase().as_str(),
@@ -125,14 +155,30 @@ fn apply_llm_env(conn: &Connection) {
         );
         let _ = settings::set_setting(conn, settings::LLM_ENABLED, if on { "1" } else { "0" });
         if on {
-            let url = settings::get_setting(conn, settings::OLLAMA_URL)
-                .unwrap_or_else(|| settings::DEFAULT_OLLAMA_URL.to_string());
-            let model = settings::get_setting(conn, settings::OLLAMA_MODEL)
-                .unwrap_or_else(|| settings::DEFAULT_OLLAMA_MODEL.to_string());
-            eprintln!(
-                "[tempo-hub] LLM enabled → Ollama at {url} (model {model}); \
-                 falls back to deterministic if unreachable."
-            );
+            let provider = settings::get_setting(conn, settings::LLM_PROVIDER)
+                .unwrap_or_else(|| "ollama".to_string());
+            if provider == "openai" {
+                let model = settings::get_setting(conn, settings::OPENAI_REVIEW_MODEL)
+                    .unwrap_or_else(|| settings::DEFAULT_OPENAI_REVIEW_MODEL.to_string());
+                let key_status = if std::env::var("OPENAI_API_KEY")
+                    .ok()
+                    .is_some_and(|key| !key.trim().is_empty())
+                {
+                    "key configured"
+                } else {
+                    "OPENAI_API_KEY MISSING"
+                };
+                eprintln!("[tempo-hub] AI enabled → OpenAI ({model}; {key_status}); deterministic fallback remains available.");
+            } else {
+                let url = settings::get_setting(conn, settings::OLLAMA_URL)
+                    .unwrap_or_else(|| settings::DEFAULT_OLLAMA_URL.to_string());
+                let model = settings::get_setting(conn, settings::OLLAMA_MODEL)
+                    .unwrap_or_else(|| settings::DEFAULT_OLLAMA_MODEL.to_string());
+                eprintln!(
+                    "[tempo-hub] AI enabled → Ollama at {url} (model {model}); \
+                     falls back to deterministic if unreachable."
+                );
+            }
         }
     }
 }
@@ -253,9 +299,14 @@ fn api_route(
             let Some(token) = bearer(req) else {
                 return (401, err("missing device token"));
             };
-            let Ok(conn) = db.lock() else {
-                return (500, err("db lock"));
+            // Ingestion must not wait behind a long AI/dashboard command that
+            // currently owns the primary connection mutex. WAL allows this
+            // short-lived connection to commit independently.
+            let conn = match Connection::open(&cfg.db_path) {
+                Ok(conn) => conn,
+                Err(e) => return (500, err(&format!("open db: {e}"))),
             };
+            let _ = conn.busy_timeout(Duration::from_secs(10));
             let Some(device_id) = auth::device_for_token(&conn, &token) else {
                 return (401, err("unknown or revoked device"));
             };
@@ -1559,6 +1610,7 @@ mod tests {
             pairing_secret: "secret".into(),
             static_dir: "web".into(),
             allowed_origins: vec![],
+            db_path: PathBuf::from("tempo-test.db"),
         };
         assert!(cors_headers(&cfg, Some("https://example.com")).is_empty());
         cfg.allowed_origins = vec!["https://tempo.example.ts.net".into()];

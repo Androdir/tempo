@@ -66,6 +66,11 @@ the Pi and phone. The recommended setup keeps Docker's host port on `127.0.0.1`,
 uses Tailscale Serve as the private HTTPS proxy, and requires no router port forwarding.
 Follow the copy-paste [Raspberry Pi setup guide](../docs/raspberry-pi-setup.md) first.
 
+If an Android device cannot negotiate Tailscale Serve HTTPS but can reach the Pi by its
+`100.x.y.z` address, Tempo also supports a direct URL such as
+`http://100.78.243.37:7700`. This remains private and encrypted by the Tailscale tunnel;
+do not use a public/LAN IP with plain HTTP.
+
 In the app:
 
 1. **Grant usage access** (button 1) → flips on "Usage access" for Tempo in Android Settings.

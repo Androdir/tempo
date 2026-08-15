@@ -4,6 +4,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
 import java.net.URI
 import java.net.URL
 
@@ -50,13 +51,34 @@ object HubClient {
     }
 
     /** POST /api/events — upload a batch of activity events (device-token auth). */
-    fun postEvents(hubUrl: String, token: String, deviceId: String, events: List<Event>) {
-        val arr = JSONArray()
-        for (e in events) arr.put(e.toJson())
-        val body = JSONObject()
-            .put("deviceId", deviceId)
-            .put("events", arr)
-        postJson("${normalizeHubUrl(hubUrl)}/api/events", token, body.toString())
+    fun postEvents(
+        hubUrl: String,
+        token: String,
+        deviceId: String,
+        events: List<Event>,
+        onChunkUploaded: (List<Event>) -> Unit = {},
+    ) {
+        // A fresh install can backfill hundreds of app switches. Send modest
+        // chunks so the Pi can commit them without exceeding Android's request
+        // timeout. Event IDs are deterministic, so retrying a partial upload is safe.
+        val chunks = events.chunked(50)
+        for ((index, chunk) in chunks.withIndex()) {
+            val arr = JSONArray()
+            for (e in chunk) arr.put(e.toJson())
+            val body = JSONObject()
+                .put("deviceId", deviceId)
+                .put("events", arr)
+            try {
+                postJson("${normalizeHubUrl(hubUrl)}/api/events", token, body.toString())
+                onChunkUploaded(chunk)
+            } catch (e: SocketTimeoutException) {
+                throw RuntimeException(
+                    "Hub timed out uploading batch ${index + 1}/${chunks.size}. " +
+                        "The Pi may be busy; tap to resume.",
+                    e,
+                )
+            }
+        }
     }
 
     private fun postJson(urlStr: String, bearer: String?, body: String): String {
@@ -64,7 +86,7 @@ object HubClient {
         try {
             con.requestMethod = "POST"
             con.connectTimeout = 15000
-            con.readTimeout = 15000
+            con.readTimeout = 60000
             con.doOutput = true
             con.setRequestProperty("Content-Type", "application/json")
             if (bearer != null) con.setRequestProperty("Authorization", "Bearer $bearer")

@@ -1226,7 +1226,43 @@ tr.clickable:hover td {
   margin-top: 1px;
 }
 
-/* Local LLM classifier */
+/* Optional AI classifier */
+.llm-cloud-notice {
+  margin: 14px 0 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--purple-border);
+  border-radius: var(--radius-sm);
+  background: var(--purple-bg);
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.llm-cloud-notice b {
+  color: var(--text);
+}
+
+.llm-key-edit .search {
+  width: min(340px, 45vw);
+}
+
+.llm-model-input {
+  width: min(210px, 42vw);
+}
+
+@media (max-width: 640px) {
+  .llm-key-edit {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .llm-key-edit .search,
+  .llm-model-input {
+    width: 100%;
+    min-width: 0;
+  }
+}
+
 .proj-llm {
   display: inline-flex;
   align-items: center;

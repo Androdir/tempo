@@ -15,7 +15,10 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
     override suspend fun doWork(): Result {
         val prefs = Prefs(applicationContext)
         if (!prefs.isPaired()) return Result.success()
-        if (!UsageTracker.hasPermission(applicationContext)) return Result.success()
+        if (!UsageTracker.hasPermission(applicationContext)) {
+            prefs.setSyncError("Usage access is not granted")
+            return Result.success()
+        }
 
         val now = System.currentTimeMillis()
         val wm = prefs.watermark()
@@ -26,15 +29,24 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         val scan = UsageTracker.collect(applicationContext, since, now)
         return try {
             if (scan.events.isNotEmpty()) {
-                HubClient.postEvents(prefs.hubUrl(), prefs.token(), prefs.deviceId(), scan.events)
+                HubClient.postEvents(
+                    prefs.hubUrl(), prefs.token(), prefs.deviceId(), scan.events,
+                ) { uploaded ->
+                    // Persist progress after every acknowledged batch. If a later
+                    // batch times out, retry resumes here instead of sending the
+                    // whole day again.
+                    val last = uploaded.last()
+                    prefs.setWatermark(last.startMillis + last.durationSeconds * 1000L)
+                }
             }
             // The collector includes the completed portion of the currently open
             // app, so the next scan can always continue from `now`.
             prefs.setWatermark(scan.openStart ?: now)
-            prefs.setLastSync(now)
+            prefs.setSyncSuccess(now, scan.events.size)
             Result.success()
         } catch (e: Exception) {
             // Leave the watermark untouched; deterministic ids make the retry safe.
+            prefs.setSyncError(e.message ?: "${e.javaClass.simpleName} while contacting the Hub")
             Result.retry()
         }
     }

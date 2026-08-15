@@ -2115,13 +2115,12 @@ pub fn generate_plan_core(conn: &Connection, day: &str) -> LockinPlan {
     let inputs = gather_plan_inputs(conn, day);
     let enabled = settings::get_bool(conn, settings::LLM_ENABLED, false);
     let plan = if enabled {
-        let url = settings::get_setting(conn, settings::OLLAMA_URL)
-            .unwrap_or_else(|| settings::DEFAULT_OLLAMA_URL.to_string());
-        let model = settings::get_setting(conn, settings::OLLAMA_MODEL)
-            .unwrap_or_else(|| settings::DEFAULT_OLLAMA_MODEL.to_string());
-        let cfg = llm::OllamaConfig { url, model };
-        match llm::generate_json(&cfg, &lockin::build_prompt(&inputs), 0.7)
-            .and_then(|j| lockin::parse_plan(day, &j))
+        match llm::generate_json_from_settings(
+            conn,
+            &lockin::build_prompt(&inputs),
+            llm::GenerationPurpose::LockinPlan,
+        )
+            .and_then(|(json, _model)| lockin::parse_plan(day, &json))
             .and_then(|plan| lockin::validate_grounded_plan(plan, &inputs))
         {
             Ok(p) => p,
@@ -2641,18 +2640,13 @@ pub fn generate_review(conn: &Connection) -> Result<DailyAiReview, String> {
     let (report, input) = build_review_input(conn)?;
 
     let enabled = settings::get_bool(conn, settings::LLM_ENABLED, false);
-    let url = settings::get_setting(conn, settings::OLLAMA_URL)
-        .unwrap_or_else(|| settings::DEFAULT_OLLAMA_URL.to_string());
-    let model = settings::get_setting(conn, settings::OLLAMA_MODEL)
-        .unwrap_or_else(|| settings::DEFAULT_OLLAMA_MODEL.to_string());
-
     let review = if enabled {
-        let cfg = llm::OllamaConfig {
-            url,
-            model: model.clone(),
-        };
-        match llm::generate_json(&cfg, &build_review_prompt(&input), 0.6)
-            .and_then(|j| parse_review(&j, &input, &model))
+        match llm::generate_json_from_settings(
+            conn,
+            &build_review_prompt(&input),
+            llm::GenerationPurpose::Review,
+        )
+            .and_then(|(json, model)| parse_review(&json, &input, &model))
         {
             Ok(r) => r,
             Err(e) => {

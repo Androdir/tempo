@@ -6,6 +6,7 @@ import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
+import androidx.work.OutOfQuotaPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
@@ -38,8 +39,10 @@ class TempoApp : Application() {
 
         /** Kick a one-off sync now (e.g. right after pairing) so data shows up fast. */
         fun syncNow(ctx: Context) {
+            Prefs(ctx).setSyncStarted()
             val request = OneTimeWorkRequestBuilder<SyncWorker>()
                 .setConstraints(netConstraints())
+                .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
                 .build()
             WorkManager.getInstance(ctx)
                 .enqueueUniqueWork(SYNC_NOW_WORK, ExistingWorkPolicy.REPLACE, request)

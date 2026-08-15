@@ -960,15 +960,35 @@ pub fn delete_all_captured_content(db: State<'_, Db>) -> Result<i64, String> {
 
 // --------------------------------------------------------------- local LLM
 
+fn invalidate_today_ai_cache(conn: &Connection) {
+    let day = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let _ = conn.execute("DELETE FROM llm_classification WHERE day = ?1", [day]);
+}
+
 #[tauri::command]
 pub fn get_llm_settings(db: State<'_, Db>) -> Result<LlmSettings, String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
     Ok(LlmSettings {
         enabled: settings::get_bool(&conn, settings::LLM_ENABLED, false),
+        provider: settings::get_setting(&conn, settings::LLM_PROVIDER)
+            .unwrap_or_else(|| "ollama".to_string()),
         url: settings::get_setting(&conn, settings::OLLAMA_URL)
             .unwrap_or_else(|| settings::DEFAULT_OLLAMA_URL.to_string()),
         model: settings::get_setting(&conn, settings::OLLAMA_MODEL)
             .unwrap_or_else(|| settings::DEFAULT_OLLAMA_MODEL.to_string()),
+        openai_classification_model: settings::get_setting(
+            &conn,
+            settings::OPENAI_CLASSIFICATION_MODEL,
+        )
+        .unwrap_or_else(|| settings::DEFAULT_OPENAI_CLASSIFICATION_MODEL.to_string()),
+        openai_review_model: settings::get_setting(&conn, settings::OPENAI_REVIEW_MODEL)
+            .unwrap_or_else(|| settings::DEFAULT_OPENAI_REVIEW_MODEL.to_string()),
+        openai_include_content: settings::get_bool(
+            &conn,
+            settings::OPENAI_INCLUDE_CONTENT,
+            false,
+        ),
+        openai_key_configured: crate::secrets::key_is_configured(),
         last_error: llm::last_error(&conn),
     })
 }
@@ -985,6 +1005,16 @@ pub fn set_llm_setting(db: State<'_, Db>, key: String, value: String) -> Result<
             };
             settings::set_setting(&conn, &key, v).map_err(|e| e.to_string())
         }
+        settings::LLM_PROVIDER => {
+            let provider = value.trim().to_ascii_lowercase();
+            if provider != "ollama" && provider != "openai" {
+                return Err("Provider must be 'ollama' or 'openai'".to_string());
+            }
+            settings::set_setting(&conn, settings::LLM_PROVIDER, &provider)
+                .map_err(|e| e.to_string())?;
+            invalidate_today_ai_cache(&conn);
+            Ok(())
+        }
         settings::OLLAMA_URL => {
             let v = value.trim();
             if v.is_empty() {
@@ -997,7 +1027,29 @@ pub fn set_llm_setting(db: State<'_, Db>, key: String, value: String) -> Result<
             if v.is_empty() {
                 return Err("Model is required".into());
             }
-            settings::set_setting(&conn, settings::OLLAMA_MODEL, v).map_err(|e| e.to_string())
+            settings::set_setting(&conn, settings::OLLAMA_MODEL, v).map_err(|e| e.to_string())?;
+            invalidate_today_ai_cache(&conn);
+            Ok(())
+        }
+        settings::OPENAI_CLASSIFICATION_MODEL | settings::OPENAI_REVIEW_MODEL => {
+            let model = value.trim();
+            if model.is_empty() || model.len() > 100 {
+                return Err("Model is required".to_string());
+            }
+            settings::set_setting(&conn, &key, model).map_err(|e| e.to_string())?;
+            invalidate_today_ai_cache(&conn);
+            Ok(())
+        }
+        settings::OPENAI_INCLUDE_CONTENT => {
+            let enabled = value == "1" || value.eq_ignore_ascii_case("true");
+            settings::set_setting(
+                &conn,
+                settings::OPENAI_INCLUDE_CONTENT,
+                if enabled { "1" } else { "0" },
+            )
+            .map_err(|e| e.to_string())?;
+            invalidate_today_ai_cache(&conn);
+            Ok(())
         }
         _ => Err(format!("Unknown setting: {key}")),
     }
@@ -1012,6 +1064,29 @@ pub async fn test_ollama_connection(
     tauri::async_runtime::spawn_blocking(move || llm::test_connection(url.trim(), model.trim()))
         .await
         .map_err(|error| format!("Ollama connection worker failed: {error}"))
+}
+
+#[tauri::command]
+pub fn set_openai_api_key(db: State<'_, Db>, api_key: String) -> Result<(), String> {
+    crate::secrets::save_openai_key(&api_key)?;
+    if let Ok(conn) = db.lock() {
+        invalidate_today_ai_cache(&conn);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn clear_openai_api_key() -> Result<(), String> {
+    crate::secrets::clear_openai_key()
+}
+
+#[tauri::command]
+pub async fn test_openai_connection(model: String) -> Result<OllamaTestResult, String> {
+    let key = std::env::var("OPENAI_API_KEY")
+        .map_err(|_| "OpenAI API key is not configured".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || llm::test_openai_connection(&key, model.trim()))
+        .await
+        .map_err(|error| format!("OpenAI connection worker failed: {error}"))
 }
 
 #[tauri::command]

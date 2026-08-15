@@ -956,8 +956,13 @@ pub struct ActivityDetail {
 #[serde(rename_all = "camelCase")]
 pub struct LlmSettings {
     pub enabled: bool,
+    pub provider: String,
     pub url: String,
     pub model: String,
+    pub openai_classification_model: String,
+    pub openai_review_model: String,
+    pub openai_include_content: bool,
+    pub openai_key_configured: bool,
     pub last_error: Option<String>,
 }
 

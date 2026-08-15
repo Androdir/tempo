@@ -126,7 +126,9 @@ class MainActivity : AppCompatActivity() {
                 if (!UsageTracker.hasPermission(this@MainActivity)) {
                     startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
                 } else {
+                    text = "⏳ Syncing phone activity…"
                     TempoApp.syncNow(this@MainActivity)
+                    handler.postDelayed({ updateStatusBar() }, 1_000L)
                 }
             }
         }
@@ -185,8 +187,19 @@ class MainActivity : AppCompatActivity() {
             bar.text = "⚠ Tracking paused — tap to grant Usage access"
             return
         }
+        if (prefs.syncInProgress()) {
+            bar.text = "⏳ Syncing phone activity…"
+            return
+        }
+        val syncError = prefs.lastSyncError()
+        if (syncError.isNotEmpty()) {
+            bar.text = "⚠ Sync failed: $syncError · tap to retry"
+            return
+        }
         val pickups = UsageTracker.pickupsToday(this)
-        bar.text = "✅ Tracking on · $pickups app opens today · synced ${syncAgo(prefs.lastSync())}"
+        val sent = prefs.lastSyncEventCount()
+        val sentText = if (sent > 0) " · $sent records sent" else ""
+        bar.text = "✅ Tracking on · $pickups app opens today · synced ${syncAgo(prefs.lastSync())}$sentText"
     }
 
     private fun syncAgo(ms: Long): String {

@@ -145,8 +145,13 @@ export interface ActivityDetail {
 
 export interface LlmSettings {
   enabled: boolean;
+  provider: "ollama" | "openai";
   url: string;
   model: string;
+  openaiClassificationModel: string;
+  openaiReviewModel: string;
+  openaiIncludeContent: boolean;
+  openaiKeyConfigured: boolean;
   lastError: string | null;
 }
 

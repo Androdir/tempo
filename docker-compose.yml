@@ -27,12 +27,14 @@ services:
       # desktop clients and Android clients need no CORS configuration.
       # TEMPO_ALLOWED_ORIGINS: "http://tempo-pi:7700,http://100.x.y.z:7700"
       #
-      # Optional: let the hub-served Daily Review / Lock-In Plan be LLM-written by
-      # pointing at an Ollama you run elsewhere (e.g. your desktop). The Pi does NOT
-      # run the model. Must be a private address (LAN or Tailscale) — public/cloud is
-      # refused by the no-cloud guard. On the desktop, run Ollama with
-      # OLLAMA_HOST=0.0.0.0 so it accepts remote connections, and keep the PC awake.
-      # TEMPO_LLM_ENABLED: "1"
+      # Optional AI for hub-served Daily Review / Lock-In Plan. OpenAI is easiest
+      # on a Pi; put the key only in the Pi's local .env file and chmod it 600.
+      TEMPO_LLM_ENABLED: "${TEMPO_LLM_ENABLED:-0}"
+      TEMPO_LLM_PROVIDER: "${TEMPO_LLM_PROVIDER:-ollama}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      TEMPO_OPENAI_CLASSIFICATION_MODEL: "${TEMPO_OPENAI_CLASSIFICATION_MODEL:-gpt-5.4-nano}"
+      TEMPO_OPENAI_REVIEW_MODEL: "${TEMPO_OPENAI_REVIEW_MODEL:-gpt-5.4-mini}"
+      # Or use Ollama on another private LAN/Tailscale device:
       # TEMPO_OLLAMA_URL: "http://192.168.1.50:11434"   # your desktop's LAN IP
       # TEMPO_OLLAMA_MODEL: "llama3.1:8b"
     init: true

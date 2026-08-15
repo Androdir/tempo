@@ -24,6 +24,9 @@ import {
   setPrivacySetting,
   setTrackingPause,
   setLaunchAtLogin,
+  setOpenAiApiKey,
+  clearOpenAiApiKey,
+  testOpenAiConnection,
   testOllamaConnection,
 } from "../api";
 import { previewToast } from "../components/AccountabilityLayer";
@@ -101,6 +104,9 @@ export default function PrivacySettings() {
   const [llm, setLlm] = useState<LlmSettings | null>(null);
   const [llmUrl, setLlmUrl] = useState("http://localhost:11434");
   const [llmModel, setLlmModel] = useState("llama3.1:8b");
+  const [openAiKey, setOpenAiKey] = useState("");
+  const [openAiClassificationModel, setOpenAiClassificationModel] = useState("gpt-5.4-nano");
+  const [openAiReviewModel, setOpenAiReviewModel] = useState("gpt-5.4-mini");
   const [testResult, setTestResult] = useState<OllamaTestResult | null>(null);
   const [testing, setTesting] = useState(false);
 
@@ -134,6 +140,8 @@ export default function PrivacySettings() {
       setLlm(l);
       setLlmUrl(l.url);
       setLlmModel(l.model);
+      setOpenAiClassificationModel(l.openaiClassificationModel);
+      setOpenAiReviewModel(l.openaiReviewModel);
       setAcct(a);
       setDistractMin(String(a.distractionWarnMinutes));
       setEodTime(a.eodPopupTime);
@@ -282,11 +290,70 @@ export default function PrivacySettings() {
     }
   }
 
+  async function setProvider(provider: "ollama" | "openai") {
+    try {
+      await setLlmSetting("llm_provider", provider);
+      setTestResult(null);
+      await load();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function saveOpenAiModels() {
+    try {
+      await setLlmSetting("openai_classification_model", openAiClassificationModel.trim());
+      await setLlmSetting("openai_review_model", openAiReviewModel.trim());
+      await load();
+      flash("OpenAI models saved");
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function toggleOpenAiContent(value: boolean) {
+    try {
+      await setLlmSetting("openai_include_content", value ? "1" : "0");
+      await load();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function saveOpenAiKey() {
+    if (!openAiKey.trim()) return;
+    try {
+      await setOpenAiApiKey(openAiKey.trim());
+      setOpenAiKey("");
+      await load();
+      flash("API key saved securely");
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function removeOpenAiKey() {
+    if (!confirm("Remove Tempo's OpenAI API key from Windows Credential Manager?")) return;
+    try {
+      await clearOpenAiApiKey();
+      setOpenAiKey("");
+      setTestResult(null);
+      await load();
+      flash("API key removed");
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   async function testLlm() {
     setTesting(true);
     setTestResult(null);
     try {
-      setTestResult(await testOllamaConnection(llmUrl.trim(), llmModel.trim()));
+      setTestResult(
+        llm?.provider === "openai"
+          ? await testOpenAiConnection(openAiClassificationModel.trim())
+          : await testOllamaConnection(llmUrl.trim(), llmModel.trim())
+      );
     } catch (e) {
       setTestResult({ ok: false, message: String(e), models: [], modelAvailable: false });
     } finally {
@@ -693,45 +760,111 @@ export default function PrivacySettings() {
         </SettingRow>
       </div>
 
-      {/* Local AI classification (Ollama) */}
+      {/* Optional AI classification */}
       {llm && (
         <div className="card card-pad section-gap" hidden={section !== "connections"}>
-          <h2 className="card-title">Local AI classification (Ollama)</h2>
+          <h2 className="card-title">AI classification</h2>
           <p className="card-hint">
-            Optional. Uses a locally-running Ollama server to refine activity classification in the
-            background. Only loopback / LAN addresses are allowed — nothing is sent to the cloud, and
-            any error falls back to rule-based classification. Tempo pauses background AI during
-            detected gameplay and releases the model after each batch to avoid competing with games.
+            Optional. Rules and your manual corrections always take priority. AI only reviews uncertain
+            activity, and any error falls back to rule-based classification.
           </p>
+          <SettingRow label="Provider" hint="OpenAI is faster and avoids using your gaming GPU. Ollama stays entirely local.">
+            <select
+              className="select"
+              value={llm.provider}
+              onChange={(event) => setProvider(event.target.value as "ollama" | "openai")}
+            >
+              <option value="openai">OpenAI API</option>
+              <option value="ollama">Local Ollama</option>
+            </select>
+          </SettingRow>
           <SettingRow
-            label="Enable local LLM classification"
-            hint="Off by default. Requires Ollama running locally."
+            label="Enable AI"
+            hint={llm.provider === "openai" ? "Uses your OpenAI API credit." : "Requires Ollama running locally."}
           >
             <Switch checked={llm.enabled} onChange={toggleLlm} />
           </SettingRow>
-          <SettingRow label="Ollama URL" hint="Default http://localhost:11434">
-            <input
-              className="search"
-              style={{ width: 240 }}
-              value={llmUrl}
-              onChange={(e) => setLlmUrl(e.target.value)}
-              onBlur={saveLlm}
-            />
-          </SettingRow>
-          <SettingRow label="Model" hint="e.g. llama3.1:8b or qwen2.5:7b">
-            <span className="inline-edit">
+
+          {llm.provider === "openai" ? (
+            <>
+              <div className="llm-cloud-notice">
+                <b>What OpenAI receives:</b> app/site name, window or page title, duration, rule result,
+                project-match evidence and nearby activity labels. Raw text is never sent. Locally derived
+                page/OCR summaries are excluded unless you enable the option below.
+              </div>
+              <SettingRow
+                label="OpenAI API key"
+                hint={llm.openaiKeyConfigured ? "Saved in Windows Credential Manager." : "Paste the key you just created. Tempo never stores it in SQLite."}
+              >
+                <span className="inline-edit llm-key-edit">
+                  <input
+                    className="search"
+                    type="password"
+                    autoComplete="new-password"
+                    placeholder={llm.openaiKeyConfigured ? "Key configured" : "sk-…"}
+                    value={openAiKey}
+                    onChange={(event) => setOpenAiKey(event.target.value)}
+                  />
+                  <button className="btn btn-primary" onClick={saveOpenAiKey} disabled={!openAiKey.trim()}>
+                    {llm.openaiKeyConfigured ? "Replace" : "Save key"}
+                  </button>
+                  {llm.openaiKeyConfigured && <button className="btn" onClick={removeOpenAiKey}>Remove</button>}
+                </span>
+              </SettingRow>
+              <SettingRow label="Classification model" hint="Low-cost model used only for uncertain activity.">
+                <input
+                  className="search llm-model-input"
+                  value={openAiClassificationModel}
+                  onChange={(event) => setOpenAiClassificationModel(event.target.value)}
+                />
+              </SettingRow>
+              <SettingRow label="Review model" hint="Used for Daily Review and tomorrow's lock-in plan.">
+                <span className="inline-edit">
+                  <input
+                    className="search llm-model-input"
+                    value={openAiReviewModel}
+                    onChange={(event) => setOpenAiReviewModel(event.target.value)}
+                  />
+                  <button className="btn" onClick={saveOpenAiModels}>Save models</button>
+                </span>
+              </SettingRow>
+              <SettingRow
+                label="Include locally derived content summaries"
+                hint="Off by default. Enable only if titles alone are not enough; raw captured text is still never sent."
+              >
+                <Switch checked={llm.openaiIncludeContent} onChange={toggleOpenAiContent} />
+              </SettingRow>
+            </>
+          ) : (
+            <>
+              <p className="card-hint">
+                Only loopback, LAN and Tailscale addresses are allowed. Tempo pauses local AI during
+                detected gameplay and releases the model after each batch.
+              </p>
+              <SettingRow label="Ollama URL" hint="Default http://localhost:11434">
               <input
                 className="search"
-                style={{ width: 160 }}
-                value={llmModel}
-                onChange={(e) => setLlmModel(e.target.value)}
+                style={{ width: 240 }}
+                value={llmUrl}
+                onChange={(e) => setLlmUrl(e.target.value)}
                 onBlur={saveLlm}
               />
-              <button className="btn" onClick={saveLlm}>Save</button>
-            </span>
-          </SettingRow>
-          <SettingRow label="Connection" hint="Check the app can reach Ollama and the model is installed.">
-            <button className="btn" onClick={testLlm} disabled={testing}>
+              </SettingRow>
+              <SettingRow label="Model" hint="e.g. llama3.1:8b or qwen2.5:7b">
+                <span className="inline-edit">
+                  <input
+                    className="search llm-model-input"
+                    value={llmModel}
+                    onChange={(e) => setLlmModel(e.target.value)}
+                    onBlur={saveLlm}
+                  />
+                  <button className="btn" onClick={saveLlm}>Save</button>
+                </span>
+              </SettingRow>
+            </>
+          )}
+          <SettingRow label="Connection" hint={`Check Tempo can reach ${llm.provider === "openai" ? "OpenAI" : "Ollama"}.`}>
+            <button className="btn" onClick={testLlm} disabled={testing || (llm.provider === "openai" && !llm.openaiKeyConfigured)}>
               {testing ? "Testing…" : "Test connection"}
             </button>
           </SettingRow>
